@@ -1,0 +1,213 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Gradients with darker purple -->
+    <linearGradient id="violetGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A2E6B;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2D1B40;stop-opacity:1" />
+    </linearGradient>
+    
+    <linearGradient id="yellowGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFD700;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#FFA500;stop-opacity:1" />
+    </linearGradient>
+    
+    <!-- Glow effects -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    
+    <filter id="softGlow">
+      <feGaussianBlur stdDeviation="1.5" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Background random network with straight edges -->
+  <g opacity="0.08">
+    <!-- Random nodes -->
+    <circle cx="23" cy="37" r="2" fill="#4A2E6B"/>
+    <circle cx="67" cy="28" r="2" fill="#4A2E6B"/>
+    <circle cx="142" cy="31" r="2" fill="#4A2E6B"/>
+    <circle cx="178" cy="52" r="2" fill="#4A2E6B"/>
+    <circle cx="189" cy="89" r="2" fill="#4A2E6B"/>
+    <circle cx="171" cy="134" r="2" fill="#4A2E6B"/>
+    <circle cx="158" cy="171" r="2" fill="#4A2E6B"/>
+    <circle cx="112" cy="183" r="2" fill="#4A2E6B"/>
+    <circle cx="54" cy="176" r="2" fill="#4A2E6B"/>
+    <circle cx="21" cy="147" r="2" fill="#4A2E6B"/>
+    <circle cx="15" cy="94" r="2" fill="#4A2E6B"/>
+    <circle cx="38" cy="112" r="2" fill="#4A2E6B"/>
+    <circle cx="92" cy="18" r="2" fill="#4A2E6B"/>
+    <circle cx="134" cy="58" r="2" fill="#4A2E6B"/>
+    <circle cx="47" cy="67" r="2" fill="#4A2E6B"/>
+    <circle cx="165" cy="102" r="2" fill="#4A2E6B"/>
+    <circle cx="78" cy="152" r="2" fill="#4A2E6B"/>
+    
+    <!-- Random straight edges -->
+    <line x1="23" y1="37" x2="67" y2="28" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="67" y1="28" x2="92" y2="18" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="142" y1="31" x2="178" y2="52" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="178" y1="52" x2="189" y2="89" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="189" y1="89" x2="171" y2="134" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="171" y1="134" x2="158" y2="171" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="112" y1="183" x2="54" y2="176" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="54" y1="176" x2="21" y2="147" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="21" y1="147" x2="15" y2="94" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="15" y1="94" x2="38" y2="112" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="47" y1="67" x2="134" y2="58" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="134" y1="58" x2="165" y2="102" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="78" y1="152" x2="112" y2="183" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="23" y1="37" x2="47" y2="67" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="92" y1="18" x2="142" y2="31" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="38" y1="112" x2="78" y2="152" stroke="#4A2E6B" stroke-width="0.8"/>
+    <line x1="165" y1="102" x2="171" y2="134" stroke="#4A2E6B" stroke-width="0.8"/>
+  </g>
+  
+  <!-- 5 Clustered hexagons - no rotation, flat-top orientation -->
+  
+  <!-- Center Hexagon - Graph (GraphNN/Network) -->
+  <g transform="translate(100, 100)">
+    <polygon points="25,0 12.5,21.65 -12.5,21.65 -25,0 -12.5,-21.65 12.5,-21.65" 
+             fill="url(#violetGradient)" 
+             stroke="#FFD700" 
+             stroke-width="3"
+             filter="url(#glow)"/>
+    <!-- Graph Network -->
+    <g transform="scale(0.8)">
+      <!-- Nodes -->
+      <circle cx="0" cy="-8" r="3" fill="#FFD700"/>
+      <circle cx="-7" cy="-2" r="2.5" fill="#FFD700"/>
+      <circle cx="7" cy="-2" r="2.5" fill="#FFD700"/>
+      <circle cx="-5" cy="6" r="2.5" fill="#FFD700"/>
+      <circle cx="5" cy="6" r="2.5" fill="#FFD700"/>
+      <circle cx="0" cy="10" r="2" fill="#FFD700"/>
+      <!-- Edges -->
+      <line x1="0" y1="-8" x2="-7" y2="-2" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="0" y1="-8" x2="7" y2="-2" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="-7" y1="-2" x2="-5" y2="6" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="7" y1="-2" x2="5" y2="6" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="-5" y1="6" x2="0" y2="10" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="5" y1="6" x2="0" y2="10" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="-7" y1="-2" x2="7" y2="-2" stroke="#FFD700" stroke-width="1" opacity="0.5"/>
+      <line x1="-5" y1="6" x2="5" y2="6" stroke="#FFD700" stroke-width="1" opacity="0.5"/>
+    </g>
+  </g>
+  
+  <!-- Top Left Hexagon - DNA (Biomedical) -->
+  <g transform="translate(62.5, 78.35)">
+    <polygon points="25,0 12.5,21.65 -12.5,21.65 -25,0 -12.5,-21.65 12.5,-21.65" 
+             fill="url(#violetGradient)" 
+             stroke="#FFD700" 
+             stroke-width="3"
+             filter="url(#glow)"/>
+    <!-- DNA Helix -->
+    <g transform="scale(0.65)">
+      <path d="M -8,-15 Q -5,-7 -2,0 Q 0,7 2,15" 
+            stroke="#FFD700" 
+            stroke-width="2.5" 
+            fill="none"/>
+      <path d="M 8,-15 Q 5,-7 2,0 Q 0,7 -2,15" 
+            stroke="#FFD700" 
+            stroke-width="2.5" 
+            fill="none"/>
+      <line x1="-8" y1="-15" x2="8" y2="-15" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="-3" y1="-5" x2="3" y2="-5" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="-2" y1="5" x2="2" y2="5" stroke="#FFD700" stroke-width="1.5"/>
+      <line x1="-6" y1="15" x2="6" y2="15" stroke="#FFD700" stroke-width="1.5"/>
+    </g>
+  </g>
+  
+  <!-- Top Right Hexagon - Chip (Computing/AI) -->
+  <g transform="translate(137.5, 78.35)">
+    <polygon points="25,0 12.5,21.65 -12.5,21.65 -25,0 -12.5,-21.65 12.5,-21.65" 
+             fill="url(#violetGradient)" 
+             stroke="#FFD700" 
+             stroke-width="3"
+             filter="url(#glow)"/>
+    <!-- Chip -->
+    <rect x="-8" y="-8" width="16" height="16" fill="#FFD700" stroke="#2D1B40" stroke-width="0.5"/>
+    <rect x="-5" y="-5" width="10" height="10" fill="#2D1B40"/>
+    <!-- Chip pins -->
+    <line x1="-8" y1="-4" x2="-11" y2="-4" stroke="#FFD700" stroke-width="1"/>
+    <line x1="-8" y1="0" x2="-11" y2="0" stroke="#FFD700" stroke-width="1"/>
+    <line x1="-8" y1="4" x2="-11" y2="4" stroke="#FFD700" stroke-width="1"/>
+    <line x1="8" y1="-4" x2="11" y2="-4" stroke="#FFD700" stroke-width="1"/>
+    <line x1="8" y1="0" x2="11" y2="0" stroke="#FFD700" stroke-width="1"/>
+    <line x1="8" y1="4" x2="11" y2="4" stroke="#FFD700" stroke-width="1"/>
+    <!-- Central unit -->
+    <circle cx="0" cy="0" r="2" fill="#FFD700"/>
+  </g>
+  
+  <!-- Bottom Left Hexagon - Magnetic Lens (Agent) -->
+  <g transform="translate(62.5, 121.65)">
+    <polygon points="25,0 12.5,21.65 -12.5,21.65 -25,0 -12.5,-21.65 12.5,-21.65" 
+             fill="url(#violetGradient)" 
+             stroke="#FFD700" 
+             stroke-width="3"
+             filter="url(#glow)"/>
+    <!-- Magnetic Lens -->
+    <g transform="scale(0.7)">
+      <!-- Lens/magnifying glass -->
+      <circle cx="0" cy="-2" r="9" fill="none" stroke="#FFD700" stroke-width="2.5"/>
+      <circle cx="0" cy="-2" r="6" fill="none" stroke="#FFD700" stroke-width="1" opacity="0.5"/>
+      <!-- Handle -->
+      <line x1="6.4" y1="4.4" x2="11" y2="9" stroke="#FFD700" stroke-width="3"/>
+      <!-- Magnetic field lines -->
+      <path d="M -9,-2 Q -6,-6 0,-6 Q 6,-6 9,-2" stroke="#FFD700" stroke-width="1" fill="none" opacity="0.7"/>
+      <path d="M -9,-2 Q -6,2 0,2 Q 6,2 9,-2" stroke="#FFD700" stroke-width="1" fill="none" opacity="0.7"/>
+      <!-- Center focus point -->
+      <circle cx="0" cy="-2" r="1.5" fill="#FFD700"/>
+    </g>
+  </g>
+  
+  <!-- Bottom Right Hexagon - Atom (Physics/Simulation) -->
+  <g transform="translate(137.5, 121.65)">
+    <polygon points="25,0 12.5,21.65 -12.5,21.65 -25,0 -12.5,-21.65 12.5,-21.65" 
+             fill="url(#violetGradient)" 
+             stroke="#FFD700" 
+             stroke-width="3"
+             filter="url(#glow)"/>
+    <!-- Atom -->
+    <g transform="scale(0.7)">
+      <!-- Nucleus -->
+      <circle cx="0" cy="0" r="4" fill="#FFD700"/>
+      <!-- Electron orbits -->
+      <ellipse cx="0" cy="0" rx="12" ry="5" fill="none" stroke="#FFD700" stroke-width="1.5" transform="rotate(0)"/>
+      <ellipse cx="0" cy="0" rx="12" ry="5" fill="none" stroke="#FFD700" stroke-width="1.5" transform="rotate(60)"/>
+      <ellipse cx="0" cy="0" rx="12" ry="5" fill="none" stroke="#FFD700" stroke-width="1.5" transform="rotate(-60)"/>
+      <!-- Electrons -->
+      <circle cx="12" cy="0" r="2" fill="#FFD700"/>
+      <circle cx="-6" cy="10" r="2" fill="#FFD700"/>
+      <circle cx="-6" cy="-10" r="2" fill="#FFD700"/>
+    </g>
+  </g>
+  
+  <!-- Subtle connecting lines between hexagons -->
+  <g opacity="0.1">
+    <line x1="75" y1="90" x2="87.5" y2="90" stroke="#4A2E6B" stroke-width="1"/>
+    <line x1="112.5" y1="90" x2="125" y2="90" stroke="#4A2E6B" stroke-width="1"/>
+    <line x1="75" y1="110" x2="87.5" y2="110" stroke="#4A2E6B" stroke-width="1"/>
+    <line x1="112.5" y1="110" x2="125" y2="110" stroke="#4A2E6B" stroke-width="1"/>
+    <line x1="81" y1="85" x2="81" y2="95" stroke="#4A2E6B" stroke-width="1"/>
+    <line x1="119" y1="85" x2="119" y2="95" stroke="#4A2E6B" stroke-width="1"/>
+    <line x1="81" y1="105" x2="81" y2="115" stroke="#4A2E6B" stroke-width="1"/>
+    <line x1="119" y1="105" x2="119" y2="115" stroke="#4A2E6B" stroke-width="1"/>
+  </g>
+  
+  <!-- Floating particles -->
+  <g opacity="0.25">
+    <circle cx="35" cy="55" r="1.5" fill="#FFD700"/>
+    <circle cx="165" cy="55" r="1.5" fill="#FFD700"/>
+    <circle cx="35" cy="145" r="1.5" fill="#FFD700"/>
+    <circle cx="165" cy="145" r="1.5" fill="#FFD700"/>
+    <circle cx="100" cy="40" r="1" fill="#4A2E6B"/>
+    <circle cx="100" cy="160" r="1" fill="#4A2E6B"/>
+  </g>
+</svg>

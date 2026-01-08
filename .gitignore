@@ -1,0 +1,133 @@
+# Sensitive files - NEVER commit credentials
+.env
+.env.local
+.env.*.local
+# Allow .example template files
+!.env.example
+!**/.env.example
+
+# Ignore actual config .env files but allow examples
+configs/*.env
+!configs/*.env.example
+!configs/paths.yaml.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Credentials and secrets
+.credentials
+.secrets
+**/secrets/*
+**/credentials/*
+**/.aws/
+**/.ssh/
+
+# API keys and tokens
+*_api_key*
+*_secret*
+*_token*
+*_password*
+
+LightRAG
+doi_cache/*
+jsonl_cache/*
+MEDIAL.py
+enrichment/*
+dataset_outputs/*
+webapp/sessions/*
+cache/*
+models/*
+
+tools/omic_tools/outputs/*
+
+db_cache/*
+
+ProCyon
+G-Retriever/dataset
+
+paperscraper
+ProCyongraphlets/
+
+configs/*
+
+
+webapp/cache/*
+webapp/db/*
+webapp/instance/*
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+G-Retriever/__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
+
+
+doi_cache/*
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+
+# Mr Developer
+.mr.developer.cfg
+.project
+.pydevproject
+
+# Rope
+.ropeproject
+
+# Django stuff:
+*.log
+*.pot
+
+# Output
+*.out
+
+# Sphinx documentation
+docs/_build/
+
+
+# logs and results
+logs/
+output/
+
+# G-Retriever
+G-Retriever/logs/
+G-Retriever/output/
+G-Retriever/data/*
+
+# Neo4j
+base_subgraphs/*
+data-loading/emb/prime/*
+neo4j_db/data-loading/emb/prime/*
+neo4j_db/v1/*
+Research/LLM/RAG-MLLM/bioRAG/neo4j_db/data-loading/emb/prime/text-embedding-ada-002/*
+
+# wandb
+wandb/
+G-Retriever/wandb/
+
+.vscode/
+
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+
+# Large CSV files
+tools/omic_tools/outputs/*.csv

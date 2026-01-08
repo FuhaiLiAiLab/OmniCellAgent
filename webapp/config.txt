@@ -1,0 +1,3 @@
+
+[database]
+con = sqlite:///webapp/instance/dash_user_management.db

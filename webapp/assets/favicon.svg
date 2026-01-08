@@ -1,0 +1,34 @@
+<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="violetGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4A2E6B;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2D1B40;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="yellowGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFD700;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#FFA500;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Central hexagon -->
+  <polygon points="16,4 26,10 26,22 16,28 6,22 6,10" fill="url(#violetGradient)" stroke="#2D1B40" stroke-width="0.5"/>
+  
+  <!-- DNA helix -->
+  <g transform="translate(16,16)">
+    <!-- Simplified helix curves -->
+    <path d="M-6,-8 Q0,-4 6,-8" stroke="url(#yellowGradient)" stroke-width="1.5" fill="none"/>
+    <path d="M-6,0 Q0,4 6,0" stroke="url(#yellowGradient)" stroke-width="1.5" fill="none"/>
+    <path d="M-6,8 Q0,12 6,8" stroke="url(#yellowGradient)" stroke-width="1.5" fill="none"/>
+    
+    <!-- Connection lines -->
+    <line x1="-4" y1="-6" x2="4" y2="-6" stroke="#FFD700" stroke-width="0.8"/>
+    <line x1="-4" y1="2" x2="4" y2="2" stroke="#FFD700" stroke-width="0.8"/>
+    <line x1="-4" y1="10" x2="4" y2="10" stroke="#FFD700" stroke-width="0.8"/>
+  </g>
+  
+  <!-- Small nodes around -->
+  <circle cx="8" cy="8" r="1" fill="#4A2E6B" opacity="0.6"/>
+  <circle cx="24" cy="8" r="1" fill="#4A2E6B" opacity="0.6"/>
+  <circle cx="8" cy="24" r="1" fill="#4A2E6B" opacity="0.6"/>
+  <circle cx="24" cy="24" r="1" fill="#4A2E6B" opacity="0.6"/>
+</svg>
