@@ -1,6 +1,7 @@
 from typing import List, Dict, Any 
 import os
 import re
+import sys
 import pymupdf
 import base64
 import asyncio # Added import
@@ -9,6 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 import json
 from datetime import datetime
+
+# Add project root to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from utils.path_config import get_path
 
 # Handle both relative and absolute imports
 try:
@@ -282,7 +287,8 @@ async def save_results_to_json(paper_info_list: List[Dict[str, Any]], paper_dir:
     Save the processed papers to a JSON file with metadata.
     """
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output_file = f"/storage1/fs1/fuhai.li/Active/di.huang/Research/LLM/RAG-MLLM/bioRAGUI/bioRAG/logs/processed_papers_{timestamp}.json"
+    logs_dir = get_path('logs.base', absolute=True, create=True)
+    output_file = os.path.join(logs_dir, f"processed_papers_{timestamp}.json")
     
     # Prepare the output structure
     output_data = []

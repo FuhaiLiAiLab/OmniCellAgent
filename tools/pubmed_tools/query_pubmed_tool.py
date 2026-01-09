@@ -32,7 +32,7 @@ import time
 
 from dotenv import load_dotenv
 
-# AutoGen imports for agent functionality
+# AutoGen imports for agent functionality (optional, only used for AutoGen agent mode)
 try:
     from autogen_agentchat.agents import AssistantAgent
     from autogen_agentchat.messages import StructuredMessage
@@ -42,7 +42,7 @@ try:
     AUTOGEN_AVAILABLE = True
 except ImportError:
     AUTOGEN_AVAILABLE = False
-    print("AutoGen not available. Install with: pip install autogen-agentchat autogen-ext[openai]")
+    # Silent import - warning only shown when AutoGen features are actually needed
 
 load_dotenv('../.env')  
 

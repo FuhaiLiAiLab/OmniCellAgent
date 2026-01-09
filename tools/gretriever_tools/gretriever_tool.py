@@ -242,6 +242,6 @@ def retriever_response(query: str):
 
 if __name__ == "__main__":
     query = "which pharmaceutical compound, currently under research for addressing both HIV Infection and Alzheimer's Disease, acts upon genes or proteins that associate with death effector domain interactions?"
-    model_path = '/storage1/fs1/fuhai.li/Active/di.huang/Research/LLM/RAG-MLLM/neo4j-gnn-llm-example/stark_qa_v0_0/models/0_0_0_gnn-llm-llama3.1-8b_best_val_loss_ckpt.pt'
+    model_path = get_path('models.gretriever', absolute=True)
     result = retriever_response(query)
     print(result)

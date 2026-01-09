@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 from unittest import result
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,14 +14,17 @@ import subprocess
 import argparse
 import asyncio
 
+# Add project root to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from utils.path_config import get_path
+
 # Add OpenAI API import
 try:
     import openai
 except ImportError:
-    print("Warning: openai not installed. Install with: pip install openai")
     openai = None
 
-# Add AutoGen imports for agent mode
+# Add AutoGen imports for agent mode (optional, only used for AutoGen agent mode)
 try:
     from autogen_agentchat.agents import AssistantAgent
     from autogen_agentchat.messages import StructuredMessage
@@ -29,8 +33,8 @@ try:
     from autogen_ext.models.openai import OpenAIChatCompletionClient
     AUTOGEN_AVAILABLE = True
 except ImportError:
-    print("Warning: autogen not installed. Agent mode will be disabled. Install with: pip install autogen-agentchat autogen-ext[openai]")
     AUTOGEN_AVAILABLE = False
+    # Silent import - warning only shown when AutoGen features are actually needed
 
 
 def google_search(query: str, target_results: int = 40, use_llm_filter: bool = True) -> list:  # type: ignore[type-arg]
@@ -702,7 +706,8 @@ def save_results_to_json(results, query, filename=None):
         safe_query = "".join(c for c in query if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_query = safe_query.replace(' ', '_')[:50]  # Limit length
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"/storage1/fs1/fuhai.li/Active/di.huang/Research/LLM/RAG-MLLM/bioRAGUI/bioRAG/logs/search_results_{safe_query}_{timestamp}.json"
+        logs_dir = get_path('logs.base', absolute=True, create=True)
+        filename = os.path.join(logs_dir, f"search_results_{safe_query}_{timestamp}.json")
     
     # Prepare data for JSON - simplified structure
     data = {
