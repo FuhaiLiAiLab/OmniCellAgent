@@ -34,10 +34,10 @@ nohup conda run -n "$CONDA_ENV" python "$PROJECT_ROOT/tools/scientist_rag_tools/
 echo "Started Scientist RAG Tool"
 
 # Start GRetriever Service (port 8001)
-# nohup conda run -n "$CONDA_ENV" python "$PROJECT_ROOT/tools/gretriever_tools/gretriever_service.py" > "$LOG_DIR/gretriever_service_output.log" 2>&1 &
-# echo "Started GRetriever Service"
+nohup conda run -n "$CONDA_ENV" python "$PROJECT_ROOT/tools/gretriever_tools/gretriever_service.py" > "$LOG_DIR/gretriever_service_output.log" 2>&1 &
+echo "Started GRetriever Service"
 
-# Start Omic Fetch Analysis Workflow Microservice (commented out - often not needed)
+# Start Omic Fetch Analysis Workflow Microservice (commented out - already integrated)
 # nohup conda run -n "$CONDA_ENV" python "$PROJECT_ROOT/tools/omic_tools/omic_fetch_analysis_workflow_microservice.py" > "$LOG_DIR/omic_load_fetch_service.log" 2>&1 &
 # echo "Started Omic Fetch Analysis Service"
 

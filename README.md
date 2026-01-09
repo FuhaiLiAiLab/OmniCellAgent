@@ -32,9 +32,7 @@ conda run -n autogen-dev python agent/simple_magentic_agent.py \
   --session-id "lung_cancer_analysis"
 ```
 
-
-Analyze lung cancer: find relevant genes, perform differential expression analysis, and identify therapeutic targets. Use Omni cell mining agent to do enrichment
-
+Analyze lung cancer: identify relevant genes, perform differential expression analysis, and discover therapeutic targets using the OmniCell mining agent for pathway enrichment
 
 
 Results will be saved in `webapp/sessions/lung_cancer_analysis/` including:
