@@ -47,6 +47,7 @@ import operator
 
 # Global session directory for tools (set when agent is initialized)
 _GLOBAL_SESSION_DIR: Optional[str] = None
+_GLOBAL_SESSION_ID: Optional[str] = None
 
 # Import tool functions directly (these are clean async functions without AutoGen dependencies)
 from tools.pubmed_tools.query_pubmed_tool import query_medical_research_async
@@ -111,20 +112,31 @@ class AgentState(TypedDict):
 
 def create_session_dir(session_id: str) -> str:
     """Create and return session directory path"""
-    global _GLOBAL_SESSION_DIR
+    global _GLOBAL_SESSION_DIR, _GLOBAL_SESSION_ID
     sessions_base = get_path('sessions.base', absolute=True, create=True)
     session_dir = os.path.join(sessions_base, session_id)
     os.makedirs(session_dir, exist_ok=True)
     _GLOBAL_SESSION_DIR = session_dir
+    _GLOBAL_SESSION_ID = session_id
     return session_dir
 
 
 def get_current_session_dir() -> str:
     """Get the current session directory, creating a default if not set"""
-    global _GLOBAL_SESSION_DIR
+    global _GLOBAL_SESSION_DIR, _GLOBAL_SESSION_ID
     if _GLOBAL_SESSION_DIR is None:
-        _GLOBAL_SESSION_DIR = create_session_dir(f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        _GLOBAL_SESSION_DIR = create_session_dir(session_id)
     return _GLOBAL_SESSION_DIR
+
+
+def get_current_session_id() -> str:
+    """Get the current session ID"""
+    global _GLOBAL_SESSION_ID
+    if _GLOBAL_SESSION_ID is None:
+        # Trigger session creation
+        get_current_session_dir()
+    return _GLOBAL_SESSION_ID
 
 
 @tool
@@ -180,6 +192,9 @@ def omic_analysis_tool(
 async def pubmed_search_tool(query: str) -> str:
     """
     Search PubMed for biomedical literature and research papers.
+    Automatically detects gene names and performs dual searches for better coverage:
+    1. Original query (e.g., "EGFR lung cancer")
+    2. Gene-specific exact match search (e.g., "EGFR[Title/Abstract]")
     
     Args:
         query: Search query for PubMed
@@ -187,29 +202,75 @@ async def pubmed_search_tool(query: str) -> str:
     Returns:
         Search results with paper summaries
     """
+    import re
+    
     try:
-        # Use the core async function directly
-        papers = await query_medical_research_async(
+        # Use the session ID to group papers from the same analysis session
+        session_id = get_current_session_id()
+        
+        # Detect if query contains a gene name pattern (uppercase letters/numbers, 2-10 chars)
+        # Common gene name patterns: EGFR, TP53, BRCA1, HER2, etc.
+        gene_pattern = r'\b([A-Z][A-Z0-9]{1,9})\b'
+        potential_genes = re.findall(gene_pattern, query)
+        
+        # Filter out common non-gene words
+        non_gene_words = {'AND', 'OR', 'NOT', 'THE', 'FOR', 'WITH', 'FROM', 'INTO', 'THAT', 'THIS', 
+                         'ARE', 'WAS', 'WERE', 'BEEN', 'HAVE', 'HAS', 'HAD', 'DOES', 'DID', 'WILL',
+                         'DNA', 'RNA', 'PCR', 'USA', 'NHS', 'WHO', 'FDA', 'NIH', 'CDC'}
+        genes = [g for g in potential_genes if g not in non_gene_words and len(g) >= 2]
+        
+        all_papers = []
+        queries_run = []
+        
+        # First search: Original query
+        print(f"[PubMed] Search 1: '{query}'")
+        queries_run.append(query)
+        papers1 = await query_medical_research_async(
             query=query,
-            top_k=30,
+            top_k=5,  # Reduced since we're doing multiple searches
             use_llm_processing=True,
-            max_concurrent=10
+            max_concurrent=10,
+            session_id=session_id
         )
+        if isinstance(papers1, list):
+            all_papers.extend(papers1)
         
-        if isinstance(papers, str):
-            # Error case
-            return f"Error retrieving papers: {papers}"
+        # Second search: Gene-specific exact match (if gene detected)
+        if genes:
+            gene = genes[0]  # Use first detected gene
+            gene_query = f'"{gene}"[Title/Abstract]'
+            print(f"[PubMed] Search 2 (gene exact match): '{gene_query}'")
+            queries_run.append(gene_query)
+            papers2 = await query_medical_research_async(
+                query=gene_query,
+                top_k=5,
+                use_llm_processing=True,
+                max_concurrent=10,
+                session_id=session_id
+            )
+            if isinstance(papers2, list):
+                all_papers.extend(papers2)
         
-        if not papers:
-            return f"No papers found for query: '{query}'"
+        # Deduplicate papers by title
+        seen_titles = set()
+        unique_papers = []
+        for paper in all_papers:
+            title = paper.get('title', '').lower().strip()
+            if title and title not in seen_titles:
+                seen_titles.add(title)
+                unique_papers.append(paper)
+        
+        if not unique_papers:
+            return f"No papers found for queries: {queries_run}"
         
         # Format the results
         result_lines = [
-            f"Found {len(papers)} medical research papers for query: '{query}'",
+            f"Found {len(unique_papers)} unique medical research papers",
+            f"Queries run: {queries_run}",
             "=" * 60
         ]
         
-        for i, paper in enumerate(papers, 1):
+        for i, paper in enumerate(unique_papers, 1):
             paper_info = [
                 f"\nPaper {i}:",
                 f"  Title: {paper.get('title', 'N/A')}",

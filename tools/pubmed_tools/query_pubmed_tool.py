@@ -92,7 +92,11 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
         temp_dir = os.path.join(self.jsonl_cache_dir, f"{timestr}_temp")
         os.makedirs(temp_dir, exist_ok=True)
         
-        readable_papers = 0
+        # Count existing papers in the folder (in case we're reusing a session folder)
+        readable_papers = self._count_readable_files(pdf_dir)
+        if readable_papers > 0:
+            print(f"[Info] Found {readable_papers} existing papers in session folder")
+        
         attempt = 1
         max_attempts = 3
         fetch_multiplier = 100
@@ -427,7 +431,8 @@ async def query_medical_research_async(
     query: str,
     top_k: int = 3,
     use_llm_processing: bool = True,
-    max_concurrent: int = 10
+    max_concurrent: int = 10,
+    session_id: str = None
 ) -> List[Dict[str, Any]]:
     """
     Retrieve and process medical research papers.
@@ -437,12 +442,19 @@ async def query_medical_research_async(
         top_k(int): Number of readable papers to retrieve (default: 3)
         use_llm_processing(bool): Whether to use LLM for enhanced content processing (default: True)
         max_concurrent(int): Maximum concurrent LLM operations (default: 10)
+        session_id(str): Optional session ID to group papers from the same analysis session.
+                        If provided, papers from multiple queries will be stored in the same folder.
 
     Returns:
         List[Dict]: Information about retrieved papers and their content.
     """
     try:
-        timestr = time.strftime("%Y%m%d-%H%M%S") 
+        # Use session_id if provided, otherwise generate a new timestamp
+        # This allows multiple queries in the same session to share a folder
+        if session_id:
+            timestr = session_id
+        else:
+            timestr = time.strftime("%Y%m%d-%H%M%S")
         processor = MedicalResearchProcessor() # Use the refactored class
 
         # Cache papers (now ensures readable papers)
@@ -471,7 +483,6 @@ async def query_medical_research_async(
         import traceback
         print(traceback.format_exc()) 
         return f"An error occurred while processing medical research: {str(e)}"
-
 
 async def query_medical_research(
     query: str,
@@ -515,7 +526,7 @@ async def medical_research_tool(
         Formatted string containing information about retrieved papers and their content
     """
 
-    top_k=30
+    top_k=10
 
     try:
         # Call the existing async function

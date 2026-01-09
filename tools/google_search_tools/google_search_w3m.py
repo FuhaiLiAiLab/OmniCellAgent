@@ -37,7 +37,7 @@ except ImportError:
     # Silent import - warning only shown when AutoGen features are actually needed
 
 
-def google_search(query: str, target_results: int = 40, use_llm_filter: bool = True) -> list:  # type: ignore[type-arg]
+def google_search(query: str, target_results: int = 10, use_llm_filter: bool = True) -> list:  # type: ignore[type-arg]
 
     api_key = os.getenv("GOOGLE_API_KEY")
     search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
