@@ -110,11 +110,18 @@ async def process_single_paper(file_path: str, file_name: str, paper_metadata: D
 async def _process_single_paper_internal(file_path: str, file_name: str, paper_metadata: Dict[str, Any], use_llm_processing: bool) -> Dict[str, Any]:
     """
     Internal method to process a single paper.
+    Returns ALL metadata including DOI, PMID, journal, year for proper citation.
     """
     paper_entry = {
         "title": paper_metadata.get("title", "Unknown Title"),
         "authors": paper_metadata.get("authors", []),
         "date": paper_metadata.get("date", "Unknown Date"),
+        # Add citation-relevant metadata
+        "doi": paper_metadata.get("doi", ""),
+        "pmid": paper_metadata.get("pmid", paper_metadata.get("paperId", "")),
+        "journal": paper_metadata.get("journal", paper_metadata.get("venue", "")),
+        "year": paper_metadata.get("year", ""),
+        "abstract": paper_metadata.get("abstract", ""),
         "llm_content": None
     }
     

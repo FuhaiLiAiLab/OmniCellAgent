@@ -196,11 +196,14 @@ async def pubmed_search_tool(query: str) -> str:
     1. Original query (e.g., "EGFR lung cancer")
     2. Gene-specific exact match search (e.g., "EGFR[Title/Abstract]")
     
+    Returns FULL paper content without truncation for comprehensive analysis.
+    Includes proper citations for referencing in reports.
+    
     Args:
         query: Search query for PubMed
         
     Returns:
-        Search results with paper summaries
+        Search results with FULL paper content and formatted citations
     """
     import re
     
@@ -251,7 +254,7 @@ async def pubmed_search_tool(query: str) -> str:
             if isinstance(papers2, list):
                 all_papers.extend(papers2)
         
-        # Deduplicate papers by title
+        # Deduplicate papers by title - keep ALL papers (no content filtering)
         seen_titles = set()
         unique_papers = []
         for paper in all_papers:
@@ -263,33 +266,104 @@ async def pubmed_search_tool(query: str) -> str:
         if not unique_papers:
             return f"No papers found for queries: {queries_run}"
         
-        # Format the results
+        # Format the results with FULL content and citations
         result_lines = [
-            f"Found {len(unique_papers)} unique medical research papers",
-            f"Queries run: {queries_run}",
-            "=" * 60
+            f"# PubMed Search Results",
+            f"**Queries executed:** {queries_run}",
+            f"**Total unique papers found:** {len(unique_papers)}",
+            "",
+            "=" * 80,
+            "",
+            "## IMPORTANT: Include Citations in Reports",
+            "When using information from these papers, always cite the source.",
+            "",
+            "=" * 80
         ]
         
         for i, paper in enumerate(unique_papers, 1):
-            paper_info = [
-                f"\nPaper {i}:",
-                f"  Title: {paper.get('title', 'N/A')}",
-                f"  Has LLM Processing: {'Yes' if paper.get('llm_content') else 'No'}"
-            ]
-            
-            # Add LLM-processed content summary if available
-            if paper.get('llm_content'):
-                llm_summary = paper['llm_content']
-                paper_info.append(f"  Content: {llm_summary}")
+            # Format authors
+            authors = paper.get('authors', [])
+            if isinstance(authors, list) and authors:
+                if len(authors) > 3:
+                    author_str = f"{authors[0]} et al."
+                else:
+                    author_str = ", ".join(str(a) for a in authors)
             else:
-                paper_info.append(f"  Content: Title only (no content processing)")
+                author_str = "Unknown authors"
             
-            result_lines.extend(paper_info)
+            # Get metadata
+            doi = paper.get('doi', '')
+            pmid = paper.get('pmid', '')
+            journal = paper.get('journal', '')
+            year = paper.get('year', paper.get('date', ''))
+            title = paper.get('title', 'N/A')
+            
+            # Build citation
+            citation_parts = [author_str]
+            if year:
+                citation_parts.append(f"({year})")
+            citation_parts.append(f'"{title}"')
+            if journal:
+                citation_parts.append(journal)
+            if doi:
+                citation_parts.append(f"DOI: {doi}")
+            elif pmid:
+                citation_parts.append(f"PMID: {pmid}")
+            citation = " ".join(citation_parts)
+            
+            result_lines.append(f"\n## Paper [{i}]")
+            result_lines.append(f"**Title:** {title}")
+            result_lines.append(f"**Authors:** {author_str}")
+            
+            meta = []
+            if doi:
+                meta.append(f"DOI: {doi}")
+            if pmid:
+                meta.append(f"PMID: {pmid}")
+            if journal:
+                meta.append(f"Journal: {journal}")
+            if year:
+                meta.append(f"Year: {year}")
+            if meta:
+                result_lines.append("**Metadata:** " + " | ".join(meta))
+            
+            result_lines.append(f"**Citation:** {citation}")
+            
+            # Add FULL LLM-processed content (NO truncation)
+            llm_content = paper.get('llm_content') or paper.get('abstract') or ''
+            if llm_content:
+                result_lines.append(f"\n**Full Content:**\n{llm_content}")
+            else:
+                result_lines.append("\n**Content:** [Title only - paper content not yet extracted]")
+            
+            result_lines.append("\n" + "-" * 60)
+        
+        # Quick reference section
+        result_lines.append("\n## Quick Reference - All Citations")
+        for i, paper in enumerate(unique_papers, 1):
+            authors = paper.get('authors', [])
+            if isinstance(authors, list) and authors:
+                author_str = f"{authors[0]} et al." if len(authors) > 3 else ", ".join(str(a) for a in authors)
+            else:
+                author_str = "Unknown"
+            year = paper.get('year', paper.get('date', ''))
+            doi = paper.get('doi', '')
+            pmid = paper.get('pmid', '')
+            ref = f"[{i}] {author_str}"
+            if year:
+                ref += f" ({year})"
+            ref += f' "{paper.get("title", "N/A")}"'
+            if doi:
+                ref += f" DOI: {doi}"
+            elif pmid:
+                ref += f" PMID: {pmid}"
+            result_lines.append(ref)
         
         return "\n".join(result_lines)
         
     except Exception as e:
-        return f"Error searching PubMed: {str(e)}"
+        import traceback
+        return f"Error searching PubMed: {str(e)}\n{traceback.format_exc()}"
 
 
 @tool
@@ -314,6 +388,14 @@ async def google_search_tool_wrapper(query: str) -> str:
 async def curated_pubmed_tool(genes: Optional[List[str]] = None, disease: Optional[str] = None, max_papers_per_query: int = 5) -> str:
     """
     Curated PubMed retrieval optimized for gene-centric literature curation.
+    Returns FULL paper content without truncation to enable comprehensive analysis.
+    
+    IMPORTANT: This tool returns complete paper information including:
+    - Full citation details (DOI, PMID, authors, journal, year)
+    - Complete LLM-processed content (NOT truncated)
+    - All papers are returned without premature filtering
+    
+    The agent should read ALL returned content before deciding relevance.
 
     Args:
         genes: Optional list of gene symbols to search for (e.g., ['EGFR', 'TP53'])
@@ -321,7 +403,7 @@ async def curated_pubmed_tool(genes: Optional[List[str]] = None, disease: Option
         max_papers_per_query: number of papers to retrieve per query
 
     Returns:
-        A concise curated summary (string) containing top papers for each gene.
+        A comprehensive summary (string) containing ALL papers with FULL content and citations.
     """
     try:
         session_id = get_current_session_id()
@@ -352,56 +434,121 @@ async def curated_pubmed_tool(genes: Optional[List[str]] = None, disease: Option
             if isinstance(papers, list):
                 all_papers.extend(papers)
 
-        # Deduplicate by DOI or title
+        # Deduplicate by DOI or title - but keep ALL papers (no content filtering)
         seen = set()
         curated = []
         for p in all_papers:
-            doi = p.get('doi') or p.get('pmid') or p.get('title', '').lower().strip()
-            key = doi
+            # Create unique key from DOI, PMID, or title
+            doi = p.get('doi', '')
+            pmid = p.get('pmid', '')
+            title = p.get('title', '').lower().strip()
+            key = doi or pmid or title
             if not key:
                 continue
             if key in seen:
                 continue
             seen.add(key)
-            # Build a compact entry
+            
+            # Build a COMPLETE entry - NO truncation
+            # Format authors for citation
+            authors = p.get('authors', [])
+            if isinstance(authors, list) and authors:
+                if len(authors) > 3:
+                    author_str = f"{authors[0]} et al."
+                else:
+                    author_str = ", ".join(authors)
+            else:
+                author_str = "Unknown authors"
+            
             entry = {
                 'title': p.get('title', 'N/A'),
-                'doi': p.get('doi', ''),
-                'pmid': p.get('pmid', ''),
+                'authors': author_str,
+                'doi': doi,
+                'pmid': pmid,
                 'journal': p.get('journal', ''),
-                'year': p.get('year', ''),
-                'summary': None
+                'year': p.get('year', p.get('date', '')),
+                'content': None,  # Full content, not summary
+                'citation': None  # Formatted citation for reports
             }
+            
+            # Keep FULL content - NO truncation
             llm_content = p.get('llm_content') or p.get('abstract') or ''
             if llm_content:
-                entry['summary'] = (llm_content[:400] + '...') if len(llm_content) > 400 else llm_content
+                entry['content'] = llm_content  # Full content preserved
+            
+            # Generate formatted citation for use in reports
+            citation_parts = []
+            citation_parts.append(author_str)
+            if entry['year']:
+                citation_parts.append(f"({entry['year']})")
+            citation_parts.append(f'"{entry["title"]}"')
+            if entry['journal']:
+                citation_parts.append(entry['journal'])
+            if entry['doi']:
+                citation_parts.append(f"DOI: {entry['doi']}")
+            elif entry['pmid']:
+                citation_parts.append(f"PMID: {entry['pmid']}")
+            entry['citation'] = " ".join(citation_parts)
+            
             curated.append(entry)
 
-        # Format output as concise markdown-like text
-        lines = [f"Curated PubMed results (queries run: {queries})", "=" * 60]
+        # Format output with FULL content and citations
+        lines = [
+            f"# PubMed Literature Results",
+            f"**Queries executed:** {queries}",
+            f"**Total unique papers found:** {len(curated)}",
+            "",
+            "=" * 80,
+            "",
+            "## IMPORTANT: Citation Format for Reports",
+            "When referencing findings in your report, use the citation provided for each paper.",
+            "Example: 'EGFR mutations are associated with... (Smith et al., 2023, DOI: 10.1234/example)'",
+            "",
+            "=" * 80
+        ]
+        
         if not curated:
-            lines.append("No papers found for the provided genes/disease.")
+            lines.append("\nNo papers found for the provided genes/disease.")
             return "\n".join(lines)
 
         for i, e in enumerate(curated, 1):
-            lines.append(f"\n[{i}] {e['title']}")
+            lines.append(f"\n## Paper [{i}]")
+            lines.append(f"**Title:** {e['title']}")
+            lines.append(f"**Authors:** {e['authors']}")
+            
+            # Metadata line
             meta = []
             if e['doi']:
                 meta.append(f"DOI: {e['doi']}")
             if e['pmid']:
                 meta.append(f"PMID: {e['pmid']}")
             if e['journal']:
-                meta.append(e['journal'])
+                meta.append(f"Journal: {e['journal']}")
             if e['year']:
-                meta.append(str(e['year']))
+                meta.append(f"Year: {e['year']}")
             if meta:
-                lines.append("  " + " | ".join(meta))
-            if e['summary']:
-                lines.append(f"  Summary: {e['summary']}")
+                lines.append("**Metadata:** " + " | ".join(meta))
+            
+            # Citation for use in reports
+            lines.append(f"**Citation:** {e['citation']}")
+            
+            # FULL content (not truncated)
+            if e['content']:
+                lines.append(f"\n**Full Content:**\n{e['content']}")
+            else:
+                lines.append("\n**Content:** [Paper downloaded but content not extracted - check PDF/XML directly]")
+            
+            lines.append("\n" + "-" * 60)
+
+        # Add summary section for easy reference
+        lines.append("\n## Quick Reference - All Citations")
+        for i, e in enumerate(curated, 1):
+            lines.append(f"[{i}] {e['citation']}")
 
         return "\n".join(lines)
     except Exception as ex:
-        return f"Error in curated_pubmed_tool: {str(ex)}"
+        import traceback
+        return f"Error in curated_pubmed_tool: {str(ex)}\n{traceback.format_exc()}"
 
 
 @tool
@@ -619,8 +766,12 @@ After tool calls complete, write a concise summary of the gene list and pathway 
             
             "PubMedResearcher": SubAgent(
                 name="PubMedResearcher",
-                description="Searches biomedical literature using PubMed and returns curated summaries",
-                system_message="""You are a literature curation specialist. When given a task, do NOT return raw PDF content or long unstructured data.
+                description="Searches biomedical literature using PubMed and returns curated summaries with citations",
+                system_message="""You are a literature curation specialist. Your job is to find, analyze, and summarize relevant scientific papers WITH PROPER CITATIONS.
+
+## CRITICAL: CITATION REQUIREMENTS
+Every finding you report MUST include its source citation. The tools return full citations - USE THEM.
+Format: "Finding description (Author et al., Year, DOI: xxx)"
 
 ## PUBMED SEARCH SYNTAX FOR EXACT/HARD MATCHING:
 When searching for specific genes or terms, use PubMed field tags for precise matching:
@@ -632,19 +783,39 @@ When searching for specific genes or terms, use PubMed field tags for precise ma
 
 ## YOUR RESPONSIBILITIES:
 1) Use `curated_pubmed_tool` for gene-centric searches. Pass genes as a list (e.g., genes=['EGFR', 'TP53']) and disease as a string.
-   - The tool automatically runs TWO searches per gene: "GENE disease" AND "GENE"[Title/Abstract] for better coverage.
+   - The tool automatically runs TWO searches per gene for better coverage.
+   - The tool returns FULL paper content - read it ALL before summarizing.
+   
 2) Extract gene names from `previous_results` in the context. Look for keys like 'top_genes', 'significant_genes', or gene lists.
-3) Return at most 10 curated paper summaries with: title, DOI/PMID, journal/year, and 1-2 sentence summary.
-4) Keep outputs concise - the main agent's memory should stay light.
-5) If `curated_pubmed_tool` fails, use `pubmed_search_tool` with explicit PubMed syntax:
-   - For gene search: query='"TAFAZZIN"[Title/Abstract] AND lung cancer'
-   - For general search: query='lung cancer therapeutic targets'
+
+3) DO NOT FILTER PAPERS PREMATURELY:
+   - Read the FULL content returned by the tool
+   - Include ALL relevant papers in your analysis
+   - Only exclude papers that are truly irrelevant to the query
+   
+4) OUTPUT FORMAT - Always include:
+   - Paper title
+   - Authors
+   - DOI or PMID
+   - Journal and year
+   - Key findings WITH CITATIONS
+   
+5) FINAL SUMMARY must include a "References" section listing all papers cited.
+
+## EXAMPLE OUTPUT FORMAT:
+### Key Findings:
+- EGFR mutations occur in ~15% of lung adenocarcinomas (Smith et al., 2023, DOI: 10.1234/example)
+- TP53 alterations are associated with poor prognosis (Jones et al., 2022, PMID: 12345678)
+
+### References:
+[1] Smith J et al. (2023) "EGFR in Lung Cancer" Nature. DOI: 10.1234/example
+[2] Jones K et al. (2022) "TP53 Mutations" Cancer Res. PMID: 12345678
 
 ## EXAMPLE TOOL CALLS:
 - curated_pubmed_tool(genes=['EGFR', 'KRAS'], disease='lung cancer', max_papers_per_query=5)
 - pubmed_search_tool(query='"TP53"[Title/Abstract] AND breast cancer')
 
-Always summarize findings, never dump raw paper content.
+IMPORTANT: Always cite your sources. Never make claims without referencing the paper they came from.
 """,
                 tools=[curated_pubmed_tool, pubmed_search_tool],
                 llm=self.llm
@@ -1011,7 +1182,7 @@ Respond in JSON format:
             }
     
     async def _reporting_node(self, state: AgentState) -> Dict[str, Any]:
-        """Generate comprehensive final report"""
+        """Generate comprehensive final report with citations"""
         print("\n📄 REPORTING PHASE")
         print("=" * 60)
         
@@ -1055,6 +1226,20 @@ Generate a COMPREHENSIVE report that:
 6. **Limitations**: What couldn't be accomplished and why
 7. **Recommendations**: Next steps and further research directions
 
+## CRITICAL: CITATION REQUIREMENTS
+- **ALL findings from literature MUST include citations**
+- Look for DOI, PMID, author names, and paper titles in the task results
+- Format citations as: (Author et al., Year, DOI: xxx) or (Author et al., Year, PMID: xxx)
+- Include a **References** section at the end listing all cited papers
+- Example citation format in text: "EGFR mutations occur in 15% of cases (Smith et al., 2023, DOI: 10.1234/example)"
+
+8. **References**: List ALL papers cited in the report with full citation details:
+   - Author(s)
+   - Year
+   - Title
+   - Journal
+   - DOI or PMID
+
 The report should be at least 1500 words and include all important details from the process.
 Format the report in Markdown.
 """
@@ -1062,6 +1247,10 @@ Format the report in Markdown.
         response = await self.llm.ainvoke([
             SystemMessage(content="""You are an expert scientific report writer. Generate detailed, comprehensive reports 
 that capture all important information from the research process. Include specific data, names, and findings.
+
+IMPORTANT: Every claim from literature MUST be cited with its source. Include DOI or PMID for every paper referenced.
+The report MUST end with a References section listing all cited papers.
+
 Always use Markdown formatting."""),
             HumanMessage(content=reporting_prompt)
         ])
