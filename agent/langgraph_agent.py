@@ -311,6 +311,100 @@ async def google_search_tool_wrapper(query: str) -> str:
 
 
 @tool
+async def curated_pubmed_tool(genes: Optional[List[str]] = None, disease: Optional[str] = None, max_papers_per_query: int = 5) -> str:
+    """
+    Curated PubMed retrieval optimized for gene-centric literature curation.
+
+    Args:
+        genes: Optional list of gene symbols to search for (e.g., ['EGFR', 'TP53'])
+        disease: Optional disease string to combine with gene searches (e.g., 'lung cancer')
+        max_papers_per_query: number of papers to retrieve per query
+
+    Returns:
+        A concise curated summary (string) containing top papers for each gene.
+    """
+    try:
+        session_id = get_current_session_id()
+        all_papers = []
+
+        queries = []
+        # If genes provided, run two searches per gene: gene+disease and gene exact match
+        if genes:
+            for gene in genes:
+                if disease:
+                    q1 = f"{gene} {disease}"
+                    queries.append(q1)
+                    papers1 = await query_medical_research_async(query=q1, top_k=max_papers_per_query, use_llm_processing=True, max_concurrent=6, session_id=session_id)
+                    if isinstance(papers1, list):
+                        all_papers.extend(papers1)
+
+                # gene exact match
+                q2 = f'"{gene}"[Title/Abstract]'
+                queries.append(q2)
+                papers2 = await query_medical_research_async(query=q2, top_k=max_papers_per_query, use_llm_processing=True, max_concurrent=6, session_id=session_id)
+                if isinstance(papers2, list):
+                    all_papers.extend(papers2)
+
+        # If no genes provided, fallback to disease-level search
+        if not genes and disease:
+            queries.append(disease)
+            papers = await query_medical_research_async(query=disease, top_k=max_papers_per_query, use_llm_processing=True, max_concurrent=6, session_id=session_id)
+            if isinstance(papers, list):
+                all_papers.extend(papers)
+
+        # Deduplicate by DOI or title
+        seen = set()
+        curated = []
+        for p in all_papers:
+            doi = p.get('doi') or p.get('pmid') or p.get('title', '').lower().strip()
+            key = doi
+            if not key:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            # Build a compact entry
+            entry = {
+                'title': p.get('title', 'N/A'),
+                'doi': p.get('doi', ''),
+                'pmid': p.get('pmid', ''),
+                'journal': p.get('journal', ''),
+                'year': p.get('year', ''),
+                'summary': None
+            }
+            llm_content = p.get('llm_content') or p.get('abstract') or ''
+            if llm_content:
+                entry['summary'] = (llm_content[:400] + '...') if len(llm_content) > 400 else llm_content
+            curated.append(entry)
+
+        # Format output as concise markdown-like text
+        lines = [f"Curated PubMed results (queries run: {queries})", "=" * 60]
+        if not curated:
+            lines.append("No papers found for the provided genes/disease.")
+            return "\n".join(lines)
+
+        for i, e in enumerate(curated, 1):
+            lines.append(f"\n[{i}] {e['title']}")
+            meta = []
+            if e['doi']:
+                meta.append(f"DOI: {e['doi']}")
+            if e['pmid']:
+                meta.append(f"PMID: {e['pmid']}")
+            if e['journal']:
+                meta.append(e['journal'])
+            if e['year']:
+                meta.append(str(e['year']))
+            if meta:
+                lines.append("  " + " | ".join(meta))
+            if e['summary']:
+                lines.append(f"  Summary: {e['summary']}")
+
+        return "\n".join(lines)
+    except Exception as ex:
+        return f"Error in curated_pubmed_tool: {str(ex)}"
+
+
+@tool
 async def scientist_rag_tool(query: str) -> str:
     """
     Query the scientific knowledge base using RAG retrieval for expert scientific information.
@@ -525,9 +619,34 @@ After tool calls complete, write a concise summary of the gene list and pathway 
             
             "PubMedResearcher": SubAgent(
                 name="PubMedResearcher",
-                description="Searches biomedical literature using PubMed",
-                system_message=PUBMED_AGENT_SYSTEM_MESSAGE_v1,
-                tools=[pubmed_search_tool],
+                description="Searches biomedical literature using PubMed and returns curated summaries",
+                system_message="""You are a literature curation specialist. When given a task, do NOT return raw PDF content or long unstructured data.
+
+## PUBMED SEARCH SYNTAX FOR EXACT/HARD MATCHING:
+When searching for specific genes or terms, use PubMed field tags for precise matching:
+- Gene exact match: "EGFR"[Title/Abstract] - finds papers with EGFR in title or abstract
+- Author search: "Smith J"[Author]
+- Title only: "lung cancer"[Title]
+- MeSH terms: "Neoplasms"[MeSH]
+- Combine with AND/OR: "EGFR"[Title/Abstract] AND "lung cancer"[Title/Abstract]
+
+## YOUR RESPONSIBILITIES:
+1) Use `curated_pubmed_tool` for gene-centric searches. Pass genes as a list (e.g., genes=['EGFR', 'TP53']) and disease as a string.
+   - The tool automatically runs TWO searches per gene: "GENE disease" AND "GENE"[Title/Abstract] for better coverage.
+2) Extract gene names from `previous_results` in the context. Look for keys like 'top_genes', 'significant_genes', or gene lists.
+3) Return at most 10 curated paper summaries with: title, DOI/PMID, journal/year, and 1-2 sentence summary.
+4) Keep outputs concise - the main agent's memory should stay light.
+5) If `curated_pubmed_tool` fails, use `pubmed_search_tool` with explicit PubMed syntax:
+   - For gene search: query='"TAFAZZIN"[Title/Abstract] AND lung cancer'
+   - For general search: query='lung cancer therapeutic targets'
+
+## EXAMPLE TOOL CALLS:
+- curated_pubmed_tool(genes=['EGFR', 'KRAS'], disease='lung cancer', max_papers_per_query=5)
+- pubmed_search_tool(query='"TP53"[Title/Abstract] AND breast cancer')
+
+Always summarize findings, never dump raw paper content.
+""",
+                tools=[curated_pubmed_tool, pubmed_search_tool],
                 llm=self.llm
             ),
             
