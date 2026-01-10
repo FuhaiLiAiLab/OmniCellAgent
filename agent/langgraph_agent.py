@@ -628,7 +628,7 @@ async def biomarker_kg_tool(query: str) -> str:
 # AGENT DEFINITIONS
 # ==============================================================================
 
-def create_llm(model_name: str = "gemini-3-pro"):
+def create_llm(model_name: str = "gemini-3-pro-preview"):
     """
     Create an LLM instance based on the model name.
     Supports Google Gemini models by default.
@@ -645,7 +645,7 @@ def create_llm(model_name: str = "gemini-3-pro"):
 class SubAgent:
     """Base class for specialized sub-agents"""
     
-    def __init__(self, name: str, description: str, system_message: str, tools: List, llm=None, model_name: str = "gemini-2.0-flash"):
+    def __init__(self, name: str, description: str, system_message: str, tools: List, llm=None, model_name: str = "gemini-3-pro-preview"):
         self.name = name
         self.description = description
         self.system_message = system_message
@@ -733,7 +733,7 @@ class LangGraphOmniCellAgent:
     LangGraph-based OmniCellAgent with planning, sub-agent execution, re-planning, and reporting.
     """
     
-    def __init__(self, model_name: str = "gemini-2.0-flash", log_dir: str = None, session_id: str = None, llm=None):
+    def __init__(self, model_name: str = "gemini-3-pro-preview", log_dir: str = None, session_id: str = None, llm=None):
         """
         Initialize the LangGraph agent system.
         
@@ -939,8 +939,13 @@ Respond in JSON:
         
         # Parse the plan
         try:
-            # Extract JSON from response
+            # Extract JSON from response - handle both str and list content types
             content = response.content
+            # Some Gemini models return content as a list of parts
+            if isinstance(content, list):
+                content = "".join(str(part) for part in content)
+            content = str(content)  # Ensure it's a string
+            
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
             elif "```" in content:
@@ -1217,6 +1222,11 @@ Respond in JSON format:
         
         try:
             content = response.content
+            # Handle list content from some Gemini models
+            if isinstance(content, list):
+                content = "".join(str(part) for part in content)
+            content = str(content)
+            
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
             elif "```" in content:
@@ -1327,6 +1337,10 @@ CRITICAL:
         ])
         
         report = response.content
+        # Handle list content from some Gemini models
+        if isinstance(report, list):
+            report = "".join(str(part) for part in report)
+        report = str(report)
         
         # Save the report
         report_path = self._save_report(state["query"], report)
@@ -1487,8 +1501,8 @@ async def main():
     parser.add_argument(
         "--model", 
         type=str, 
-        default="gemini-2.0-flash",
-        help="Model to use (default: gemini-2.0-flash)"
+        default="gemini-3-pro-preview",
+        help="Model to use (default: gemini-3-pro-preview_)"
     )
     parser.add_argument(
         "--session-id",
