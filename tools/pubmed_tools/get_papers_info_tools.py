@@ -201,9 +201,12 @@ async def get_papers_info(paper_dir: str, jsonl_file_path: str = None, use_llm_p
     """
     Process papers from a directory in parallel and extract their content.
     
+    When jsonl_file_path is provided, only papers listed in the JSONL metadata are processed.
+    This supports the global DOI cache where all papers are stored in a flat structure.
+    
     Args:
-        paper_dir: Directory containing paper files (PDF/XML)
-        jsonl_file_path: Path to JSONL file containing paper metadata (optional)
+        paper_dir: Directory containing paper files (PDF/XML) - typically the global DOI cache
+        jsonl_file_path: Path to JSONL file containing paper metadata for this session
         use_llm_processing: Whether to use LLM for content processing and formatting
         max_concurrent: Maximum number of concurrent LLM calls to prevent rate limiting
     
@@ -222,24 +225,41 @@ async def get_papers_info(paper_dir: str, jsonl_file_path: str = None, use_llm_p
     else:
         print(f"[Warning] No JSONL metadata file provided or file doesn't exist: {jsonl_file_path}")
     
-    # Get all valid paper files
-    all_files = os.listdir(paper_dir)
     paper_files = []
     
-    for file_name in all_files:
-        if file_name.endswith(('.xml', '.pdf')):
-            file_path = os.path.join(paper_dir, file_name)
+    if metadata_map:
+        # Use JSONL metadata to determine which papers to process (session-specific)
+        # This is the preferred approach for global DOI cache
+        print(f"[Info] Using JSONL metadata to identify {len(metadata_map)} session papers")
+        
+        for doi_filename, paper_metadata in metadata_map.items():
+            # Look for the file with either .xml or .pdf extension
+            found = False
+            for ext in ['.xml', '.pdf']:
+                file_name = doi_filename + ext
+                file_path = os.path.join(paper_dir, file_name)
+                if os.path.exists(file_path):
+                    paper_files.append((file_name, file_path, paper_metadata))
+                    found = True
+                    break
             
-            # Extract DOI from filename (remove extension and convert back)
-            filename_base = os.path.splitext(file_name)[0]
-            
-            # Find matching metadata
-            paper_metadata = metadata_map.get(filename_base, {"title": f"Unknown Title ({file_name})"})
-            
-            paper_files.append((file_name, file_path, paper_metadata))
+            if not found:
+                print(f"[Warning] Paper file not found for DOI: {paper_metadata.get('doi', doi_filename)}")
+    else:
+        # Fallback: scan all files in directory (legacy behavior)
+        print(f"[Warning] No metadata available, scanning all files in directory")
+        all_files = os.listdir(paper_dir)
+        
+        for file_name in all_files:
+            if file_name.endswith(('.xml', '.pdf')):
+                file_path = os.path.join(paper_dir, file_name)
+                
+                # Extract DOI from filename (remove extension)
+                filename_base = os.path.splitext(file_name)[0]
+                
+                paper_files.append((file_name, file_path, {"title": f"Unknown Title ({file_name})"}))
     
     print(f"[Info] Found {len(paper_files)} paper files to process")
-    print(f"[Info] {len([f for f in paper_files if f[2].get('title', '').startswith('Unknown')])} files without metadata")
     
     # Create semaphore to limit concurrent LLM calls
     semaphore = asyncio.Semaphore(max_concurrent) if use_llm_processing else None

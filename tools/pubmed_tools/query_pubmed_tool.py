@@ -63,50 +63,81 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
 
         Args:
             jsonl_cache_dir: Directory for caching paper metadata
-            doi_cache_dir: Directory for caching PDF files
+            doi_cache_dir: Directory for caching PDF files (flat structure, DOI as unique key)
         """
         self.jsonl_cache_dir = jsonl_cache_dir
-        self.doi_cache_dir = doi_cache_dir
+        self.doi_cache_dir = doi_cache_dir  # Global flat cache - papers stored by DOI
        
         for directory in [jsonl_cache_dir, doi_cache_dir]:
             if not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
+    
+    def _doi_to_filename(self, doi: str) -> str:
+        """Convert DOI to a safe filename by replacing / with _"""
+        return doi.replace("/", "_")
+    
+    def _check_global_cache(self, doi: str) -> str:
+        """
+        Check if a paper with the given DOI already exists in the global cache.
+        
+        Args:
+            doi: DOI of the paper
+            
+        Returns:
+            Path to the cached file if found, None otherwise
+        """
+        if not doi:
+            return None
+        
+        filename = self._doi_to_filename(doi)
+        
+        # Check for PDF
+        pdf_path = os.path.join(self.doi_cache_dir, f"{filename}.pdf")
+        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 1024:
+            return pdf_path
+        
+        # Check for XML
+        xml_path = os.path.join(self.doi_cache_dir, f"{filename}.xml")
+        if os.path.exists(xml_path) and not is_error_file(xml_path):
+            return xml_path
+        
+        return None
 
 
 
     def cache_paper(self, query: List[str], top_k: int = DEFAULT_TOP_K, timestr: str = None) -> str:
         """
         Cache papers from PubMed using incremental downloading to reach the target number.
+        Uses a flat global DOI cache - papers are shared across all sessions.
 
         Args:
             query: List of query terms
             top_k: Number of papers to retrieve (will incrementally download until target is reached)
+            timestr: Session identifier for metadata tracking
 
         Returns:
-            Path to the directory containing cached papers
+            Path to the global DOI cache directory (papers are downloaded there directly)
         """
-        pdf_dir = os.path.join(self.doi_cache_dir, timestr)
-        os.makedirs(pdf_dir, exist_ok=True)
+        # Use global flat DOI cache - no session subfolders for papers
+        pdf_dir = self.doi_cache_dir
         
         # Create temp directory for single-paper jsonl files
         temp_dir = os.path.join(self.jsonl_cache_dir, f"{timestr}_temp")
         os.makedirs(temp_dir, exist_ok=True)
         
-        # Count existing papers in the folder (in case we're reusing a session folder)
-        readable_papers = self._count_readable_files(pdf_dir)
-        if readable_papers > 0:
-            print(f"[Info] Found {readable_papers} existing papers in session folder")
+        # Track papers for this session (by DOI)
+        session_papers = []
         
         attempt = 1
         max_attempts = 3
         fetch_multiplier = 100
         all_papers_metadata = []  # Store all fetched metadata
         
-        while readable_papers < top_k and attempt <= max_attempts:
+        while len(session_papers) < top_k and attempt <= max_attempts:
             print(f"[Attempt {attempt}] Fetching papers to reach {top_k} readable papers...")
             
             # Calculate how many more papers we need
-            papers_needed = top_k - readable_papers
+            papers_needed = top_k - len(session_papers)
             fetch_count = max(papers_needed, int(papers_needed * fetch_multiplier))
             
             # Get and dump papers for this attempt
@@ -139,22 +170,20 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                 all_papers_metadata.extend(new_papers)
                 print(f"[Attempt {attempt}] Found {len(new_papers)} papers with DOI in metadata")
                 
-                # Use incremental downloading for new papers
+                # Use incremental downloading for new papers (now checks global cache)
                 downloaded_count = self._incremental_download(
-                    new_papers, pdf_dir, temp_dir, timestr, readable_papers, top_k
+                    new_papers, pdf_dir, temp_dir, timestr, 
+                    len(session_papers), top_k, session_papers
                 )
                 
-                # Update readable papers count
-                readable_papers = self._count_readable_files(pdf_dir)
+                print(f"[Attempt {attempt}] Successfully downloaded/found {downloaded_count} papers")
+                print(f"[Total] {len(session_papers)}/{top_k} readable papers available")
                 
-                print(f"[Attempt {attempt}] Successfully downloaded {downloaded_count} new papers")
-                print(f"[Total] {readable_papers}/{top_k} readable papers available")
-                
-                if readable_papers >= top_k:
+                if len(session_papers) >= top_k:
                     print(f"Successfully reached target of {top_k} readable papers!")
                     break
                 else:
-                    print(f"Still need {top_k - readable_papers} more readable papers...")
+                    print(f"Still need {top_k - len(session_papers)} more readable papers...")
                     fetch_multiplier += 0.5
                 
             except FileNotFoundError:
@@ -178,7 +207,7 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
             print(f"[Warning] Keeping attempt files as backup since consolidated file creation failed")
         
         # Final summary
-        final_count = self._count_readable_files(pdf_dir)
+        final_count = len(session_papers)
         if final_count < top_k:
             print(f"Warning: Only found {final_count}/{top_k} readable papers after {attempt-1} attempts")
             print(f"   Some papers may be behind paywalls, inaccessible, or contain errors")
@@ -186,41 +215,53 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
         return pdf_dir
 
     def _incremental_download(self, papers_metadata: List[Dict], pdf_dir: str, temp_dir: str, 
-                             timestr: str, current_readable: int, target_count: int) -> int:
+                             timestr: str, current_readable: int, target_count: int,
+                             session_papers: List[str] = None) -> int:
         """
         Download papers incrementally using individual temp .jsonl files.
+        First checks global cache to avoid re-downloading existing papers.
         
         Args:
             papers_metadata: List of paper metadata dictionaries
-            pdf_dir: Directory to save PDFs
+            pdf_dir: Directory to save PDFs (global cache)
             temp_dir: Temporary directory for single-paper jsonl files
             timestr: Timestamp string for naming
             current_readable: Current count of readable papers
             target_count: Target number of papers needed
+            session_papers: List to track DOIs for this session (modified in-place)
             
         Returns:
-            Number of successfully downloaded papers
+            Number of successfully found/downloaded papers
         """
-        downloaded_count = 0
+        if session_papers is None:
+            session_papers = []
+            
+        found_count = 0
         
         for i, paper_data in enumerate(papers_metadata):
             # Stop if we've reached our target
-            if current_readable + downloaded_count >= target_count:
+            if len(session_papers) >= target_count:
                 print(f"[Info] Reached target of {target_count} papers, stopping download")
                 break
                 
             doi = paper_data.get('doi', '')
             if not doi:
                 continue
-                
-            # Check if paper already exists (PDF or XML)
-            filename = doi.replace("/", "_")
-            pdf_file = os.path.join(pdf_dir, f"{filename}.pdf")
-            xml_file = os.path.join(pdf_dir, f"{filename}.xml")
             
-            if os.path.exists(pdf_file) or os.path.exists(xml_file):
-                print(f"[Skip] Paper {i+1}: {filename} already exists")
+            # Skip if already in this session's list
+            if doi in session_papers:
                 continue
+            
+            # Check if paper already exists in global cache
+            cached_path = self._check_global_cache(doi)
+            if cached_path:
+                print(f"[Cache Hit] Paper {i+1}: {doi} already cached at {os.path.basename(cached_path)}")
+                session_papers.append(doi)
+                found_count += 1
+                continue
+            
+            # Paper not in cache - need to download
+            filename = self._doi_to_filename(doi)
             
             # Create temporary single-paper jsonl file
             temp_jsonl_path = os.path.join(temp_dir, f"{timestr}_paper_{i+1}_{filename[:50]}.jsonl")
@@ -235,7 +276,7 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                 # Track download success before attempting
                 before_files = set(os.listdir(pdf_dir)) if os.path.exists(pdf_dir) else set()
                 
-                # Download using the single-paper temp file
+                # Download using the single-paper temp file directly to global cache
                 save_pdf_from_dump(temp_jsonl_path, pdf_path=pdf_dir, key_to_save='doi')
                 
                 # Check if download was successful
@@ -264,8 +305,9 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                                 continue
                     
                     if success:
-                        downloaded_count += 1
-                        print(f"[Success] Paper {i+1}: Downloaded successfully ({downloaded_count} total)")
+                        session_papers.append(doi)
+                        found_count += 1
+                        print(f"[Success] Paper {i+1}: Downloaded successfully ({found_count} total)")
                     else:
                         print(f"[Failed] Paper {i+1}: Downloaded but file appears corrupted")
                 else:
@@ -281,7 +323,7 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                     except:
                         pass
         
-        return downloaded_count
+        return found_count
 
     def _cleanup_temp_files(self, temp_dir: str):
         """Clean up temporary directory and any remaining temp files."""
@@ -362,27 +404,27 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
         
         return readable_count
     
-    async def load_papers(self, paper_dir: str, use_llm_processing: bool = True, max_concurrent: int = 10, target_count: int = None) -> List[Dict[str, Any]]:
+    async def load_papers(self, paper_dir: str, use_llm_processing: bool = True, max_concurrent: int = 10, 
+                          target_count: int = None, session_id: str = None) -> List[Dict[str, Any]]:
         """
-        Load papers from a directory (handles PDF and XML) with optional LLM processing.
+        Load papers from the global cache using JSONL metadata to identify session papers.
 
         Args:
-            paper_dir: Directory containing papers
+            paper_dir: Directory containing papers (global DOI cache)
             use_llm_processing: Whether to use LLM for enhanced content processing
             max_concurrent: Maximum concurrent LLM operations
             target_count: Maximum number of papers to process (None for all)
+            session_id: Session identifier to find the right JSONL metadata file
 
         Returns:
             List of paper dictionaries with processed content
         """
-        # Extract timestamp from paper_dir to find corresponding JSONL file
+        # Find the JSONL metadata file for this session
         jsonl_file_path = None
-        if paper_dir:
-            # Extract the timestamp from the paper directory path
-            dir_name = os.path.basename(paper_dir)
-            
-            # Look for consolidated JSONL file with the same timestamp
-            consolidated_jsonl = os.path.join(self.jsonl_cache_dir, f"{dir_name}.jsonl")
+        
+        if session_id:
+            # Look for consolidated JSONL file with the session ID
+            consolidated_jsonl = os.path.join(self.jsonl_cache_dir, f"{session_id}.jsonl")
             
             if os.path.exists(consolidated_jsonl):
                 jsonl_file_path = consolidated_jsonl
@@ -395,23 +437,24 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                 attempt_files = []
                 if os.path.exists(self.jsonl_cache_dir):
                     for file in os.listdir(self.jsonl_cache_dir):
-                        if file.startswith(f"{dir_name}_attempt_") and file.endswith('.jsonl'):
+                        if file.startswith(f"{session_id}_attempt_") and file.endswith('.jsonl'):
                             attempt_files.append(os.path.join(self.jsonl_cache_dir, file))
                 
                 if attempt_files:
                     # Use the first (or most recent) attempt file
                     jsonl_file_path = attempt_files[0]
                     print(f"[Info] Using attempt file as fallback: {jsonl_file_path}")
-                else:
-                    # Last resort: look for any JSONL file with similar timestamp
-                    print(f"[Warning] No metadata files found for timestamp {dir_name}")
-                    if os.path.exists(self.jsonl_cache_dir):
-                        all_jsonl_files = [f for f in os.listdir(self.jsonl_cache_dir) if f.endswith('.jsonl')]
-                        if all_jsonl_files:
-                            # Sort by modification time and use the most recent
-                            all_jsonl_files.sort(key=lambda x: os.path.getmtime(os.path.join(self.jsonl_cache_dir, x)), reverse=True)
-                            jsonl_file_path = os.path.join(self.jsonl_cache_dir, all_jsonl_files[0])
-                            print(f"[Info] Using most recent JSONL file as fallback: {jsonl_file_path}")
+        else:
+            # Fallback: look for most recent JSONL file
+            print(f"[Warning] No session_id provided, using most recent JSONL file")
+            if os.path.exists(self.jsonl_cache_dir):
+                all_jsonl_files = [f for f in os.listdir(self.jsonl_cache_dir) 
+                                   if f.endswith('.jsonl') and not f.endswith('_temp.jsonl')]
+                if all_jsonl_files:
+                    # Sort by modification time and use the most recent
+                    all_jsonl_files.sort(key=lambda x: os.path.getmtime(os.path.join(self.jsonl_cache_dir, x)), reverse=True)
+                    jsonl_file_path = os.path.join(self.jsonl_cache_dir, all_jsonl_files[0])
+                    print(f"[Info] Using most recent JSONL file as fallback: {jsonl_file_path}")
         
         papers = await get_papers_info(
             paper_dir,
@@ -475,7 +518,8 @@ async def query_medical_research_async(
             paper_dir, 
             use_llm_processing=use_llm_processing,
             max_concurrent=max_concurrent,
-            target_count=top_k
+            target_count=top_k,
+            session_id=timestr  # Pass session_id to find correct JSONL metadata
         )
         return paper_info
 

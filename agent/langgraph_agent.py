@@ -98,6 +98,9 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     agent_outputs: Dict[str, Any]
     
+    # Structured data for cross-agent sharing (programmatic, not via LLM parsing)
+    shared_data: Dict[str, Any]  # Keys: 'top_genes', 'paper_dois', 'pathways', etc.
+    
     # Process tracking for comprehensive reporting
     process_log: List[Dict[str, Any]]
     
@@ -544,6 +547,16 @@ async def curated_pubmed_tool(genes: Optional[List[str]] = None, disease: Option
         lines.append("\n## Quick Reference - All Citations")
         for i, e in enumerate(curated, 1):
             lines.append(f"[{i}] {e['citation']}")
+        
+        # Add structured DOI list for programmatic access by downstream agents
+        all_dois = [e['doi'] for e in curated if e.get('doi')]
+        all_pmids = [e['pmid'] for e in curated if e.get('pmid')]
+        if all_dois or all_pmids:
+            lines.append("\n## Structured Paper Identifiers (for programmatic use)")
+            if all_dois:
+                lines.append(f"DOIs: {all_dois}")
+            if all_pmids:
+                lines.append(f"PMIDs: {all_pmids}")
 
         return "\n".join(lines)
     except Exception as ex:
@@ -781,12 +794,20 @@ When searching for specific genes or terms, use PubMed field tags for precise ma
 - MeSH terms: "Neoplasms"[MeSH]
 - Combine with AND/OR: "EGFR"[Title/Abstract] AND "lung cancer"[Title/Abstract]
 
+## CRITICAL: USE GENES FROM CONTEXT
+The context contains a `top_genes` list populated by previous OmicAnalysis. 
+ALWAYS check context["top_genes"] first - if populated, use those genes for your search.
+
+Example: If context["top_genes"] = ['EGFR', 'TP53', 'KRAS']:
+  Call: curated_pubmed_tool(genes=['EGFR', 'TP53', 'KRAS'], disease='lung cancer')
+
 ## YOUR RESPONSIBILITIES:
-1) Use `curated_pubmed_tool` for gene-centric searches. Pass genes as a list (e.g., genes=['EGFR', 'TP53']) and disease as a string.
+1) Check context["top_genes"] FIRST - if available, use those genes directly.
+   If not available, try to extract from previous_results.
+   
+2) Use `curated_pubmed_tool` for gene-centric searches. Pass genes as a list (e.g., genes=['EGFR', 'TP53']) and disease as a string.
    - The tool automatically runs TWO searches per gene for better coverage.
    - The tool returns FULL paper content - read it ALL before summarizing.
-   
-2) Extract gene names from `previous_results` in the context. Look for keys like 'top_genes', 'significant_genes', or gene lists.
 
 3) DO NOT FILTER PAPERS PREMATURELY:
    - Read the FULL content returned by the tool
@@ -1027,11 +1048,16 @@ Respond in JSON format:
         
         sub_agent = self.sub_agents[agent_name]
         
-        # Prepare context from previous task results
+        # Prepare context from previous task results, including structured shared_data
+        shared_data = state.get("shared_data", {})
         context = {
             "query": state["query"],
             "session_id": state["session_id"],
-            "previous_results": state.get("agent_outputs", {})
+            "previous_results": state.get("agent_outputs", {}),
+            # Structured data for programmatic access by downstream agents
+            "shared_data": shared_data,
+            "top_genes": shared_data.get("top_genes", []),  # Explicit gene list
+            "paper_dois": shared_data.get("paper_dois", []),  # Explicit DOI list
         }
         
         # Execute the task
@@ -1057,10 +1083,15 @@ Respond in JSON format:
             agent_outputs = state.get("agent_outputs", {})
             agent_outputs[current_task["id"]] = result
             
+            # Extract and store structured data from agent results
+            shared_data = state.get("shared_data", {}).copy()
+            shared_data = self._extract_structured_data(agent_name, result, shared_data)
+            
             return {
                 "plan": plan,
                 "current_task_index": current_idx + 1,
                 "agent_outputs": agent_outputs,
+                "shared_data": shared_data,
                 "process_log": state.get("process_log", []) + [process_entry],
                 "messages": [AIMessage(content=f"Task {current_task['id']} completed by {agent_name}")]
             }
@@ -1075,6 +1106,77 @@ Respond in JSON format:
                 "process_log": state.get("process_log", []) + [process_entry],
                 "messages": [AIMessage(content=f"Task {current_task['id']} failed: {result.get('error', '')}")]
             }
+    
+    def _extract_structured_data(self, agent_name: str, result: Dict[str, Any], shared_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract structured data from agent results for programmatic use by downstream agents.
+        
+        This enables cross-agent data sharing without relying on LLM parsing of free-text context.
+        
+        Args:
+            agent_name: Name of the agent that produced the result
+            result: The result dictionary from the agent
+            shared_data: Current shared_data dictionary to update
+            
+        Returns:
+            Updated shared_data dictionary
+        """
+        result_content = result.get("result", "")
+        
+        if agent_name == "OmicAnalysis":
+            # Extract genes from OmicAnalysis result
+            # The result is a dict from omic_analysis_tool
+            if isinstance(result_content, dict):
+                # Direct dict result from tool
+                top_genes = result_content.get("top_genes_by_fdr", [])
+                if top_genes:
+                    shared_data["top_genes"] = top_genes
+                    print(f"[SharedData] Stored {len(top_genes)} genes from OmicAnalysis")
+                
+                # Also extract disease and cell type
+                extracted = result_content.get("extracted_entities", {})
+                if extracted.get("disease"):
+                    shared_data["disease"] = extracted["disease"]
+                if extracted.get("cell_type"):
+                    shared_data["cell_type"] = extracted["cell_type"]
+            else:
+                # Try to parse if it's a string representation
+                try:
+                    if "top_genes_by_fdr" in str(result_content):
+                        # Attempt to extract gene list from string
+                        import re
+                        genes_match = re.search(r"top_genes_by_fdr.*?:\s*\[([^\]]+)\]", str(result_content))
+                        if genes_match:
+                            genes_str = genes_match.group(1)
+                            genes = [g.strip().strip("'\"") for g in genes_str.split(",")]
+                            shared_data["top_genes"] = genes
+                            print(f"[SharedData] Parsed {len(genes)} genes from OmicAnalysis string output")
+                except Exception as e:
+                    print(f"[SharedData] Warning: Could not parse genes from OmicAnalysis: {e}")
+        
+        elif agent_name == "PubMedResearcher":
+            # Extract DOIs from PubMed results
+            if isinstance(result_content, str):
+                import re
+                # Find all DOIs in the result
+                doi_pattern = r'DOI:\s*(10\.\d{4,}/[^\s\)\]]+)'
+                dois = re.findall(doi_pattern, result_content)
+                if dois:
+                    # Add to existing DOIs, avoiding duplicates
+                    existing_dois = set(shared_data.get("paper_dois", []))
+                    existing_dois.update(dois)
+                    shared_data["paper_dois"] = list(existing_dois)
+                    print(f"[SharedData] Stored {len(dois)} DOIs from PubMedResearcher (total: {len(shared_data['paper_dois'])})")
+                
+                # Also extract PMIDs
+                pmid_pattern = r'PMID:\s*(\d+)'
+                pmids = re.findall(pmid_pattern, result_content)
+                if pmids:
+                    existing_pmids = set(shared_data.get("paper_pmids", []))
+                    existing_pmids.update(pmids)
+                    shared_data["paper_pmids"] = list(existing_pmids)
+        
+        return shared_data
     
     async def _replanning_node(self, state: AgentState) -> Dict[str, Any]:
         """Re-plan when tasks fail"""
@@ -1379,6 +1481,13 @@ query: {query}
             "max_plan_revisions": 2,
             "messages": [],
             "agent_outputs": {},
+            "shared_data": {
+                "top_genes": [],      # Populated by OmicAnalysis
+                "paper_dois": [],      # Populated by PubMed tools
+                "pathways": [],        # Populated by KEGG analysis
+                "disease": "",         # Extracted from query
+                "cell_type": "",       # Extracted from query
+            },
             "process_log": [],
             "final_report": None,
             "status": "planning"
