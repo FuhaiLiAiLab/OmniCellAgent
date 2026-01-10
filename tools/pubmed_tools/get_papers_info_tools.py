@@ -245,9 +245,15 @@ async def get_papers_info(paper_dir: str, jsonl_file_path: str = None, use_llm_p
             
             if not found:
                 print(f"[Warning] Paper file not found for DOI: {paper_metadata.get('doi', doi_filename)}")
+    elif jsonl_file_path:
+        # JSONL file was provided but is empty - this means no papers were found for this session
+        # Do NOT fall back to scanning all files in the directory
+        print(f"[Info] JSONL metadata file exists but contains no papers - returning empty result")
+        return []
     else:
-        # Fallback: scan all files in directory (legacy behavior)
-        print(f"[Warning] No metadata available, scanning all files in directory")
+        # No JSONL file provided at all - only then do we scan all files (legacy behavior)
+        # This should rarely happen with the new architecture
+        print(f"[Warning] No JSONL metadata file provided, scanning all files in directory (legacy mode)")
         all_files = os.listdir(paper_dir)
         
         for file_name in all_files:

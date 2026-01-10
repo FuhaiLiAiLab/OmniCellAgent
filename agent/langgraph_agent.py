@@ -52,6 +52,8 @@ _GLOBAL_SESSION_ID: Optional[str] = None
 # Import tool functions directly (these are clean async functions without AutoGen dependencies)
 from tools.pubmed_tools.query_pubmed_tool import query_medical_research_async
 from tools.google_search_tools.google_search_w3m import google_search, web_search_tool
+# Lite PubMed search (no PDF download, just metadata + abstracts)
+from langchain_community.tools.pubmed.tool import PubmedQueryRun
 from tools.scientist_rag_tools.scientist_tool import scientist_rag_tool_wrapper
 from tools.gretriever_tools.gretriever_client import gretriever_tool
 
@@ -234,7 +236,7 @@ async def pubmed_search_tool(query: str) -> str:
         papers1 = await query_medical_research_async(
             query=query,
             top_k=5,  # Reduced since we're doing multiple searches
-            use_llm_processing=True,
+            use_llm_processing=False,  # Disabled for speed
             max_concurrent=10,
             session_id=session_id
         )
@@ -250,7 +252,7 @@ async def pubmed_search_tool(query: str) -> str:
             papers2 = await query_medical_research_async(
                 query=gene_query,
                 top_k=5,
-                use_llm_processing=True,
+                use_llm_processing=False,  # Disabled for speed
                 max_concurrent=10,
                 session_id=session_id
             )
@@ -369,6 +371,28 @@ async def pubmed_search_tool(query: str) -> str:
         return f"Error searching PubMed: {str(e)}\n{traceback.format_exc()}"
 
 
+# Create lite PubMed tool instance (no PDF download, just metadata + abstracts from NCBI)
+_pubmed_lite = PubmedQueryRun()
+
+@tool
+def pubmed_lite_tool(query: str) -> str:
+    """
+    Lightweight PubMed search - returns abstracts and metadata only (NO PDF download).
+    Much faster than full pubmed_search_tool but doesn't provide full paper content.
+    Use this for quick literature overview or when PDF download is not needed.
+    
+    Args:
+        query: Search query for PubMed
+        
+    Returns:
+        Paper abstracts and metadata from PubMed
+    """
+    try:
+        return _pubmed_lite.invoke(query)
+    except Exception as e:
+        return f"Error in lite PubMed search: {str(e)}"
+
+
 @tool
 async def google_search_tool_wrapper(query: str) -> str:
     """
@@ -419,21 +443,21 @@ async def curated_pubmed_tool(genes: Optional[List[str]] = None, disease: Option
                 if disease:
                     q1 = f"{gene} {disease}"
                     queries.append(q1)
-                    papers1 = await query_medical_research_async(query=q1, top_k=max_papers_per_query, use_llm_processing=True, max_concurrent=6, session_id=session_id)
+                    papers1 = await query_medical_research_async(query=q1, top_k=max_papers_per_query, use_llm_processing=False, max_concurrent=6, session_id=session_id)
                     if isinstance(papers1, list):
                         all_papers.extend(papers1)
 
                 # gene exact match
                 q2 = f'"{gene}"[Title/Abstract]'
                 queries.append(q2)
-                papers2 = await query_medical_research_async(query=q2, top_k=max_papers_per_query, use_llm_processing=True, max_concurrent=6, session_id=session_id)
+                papers2 = await query_medical_research_async(query=q2, top_k=max_papers_per_query, use_llm_processing=False, max_concurrent=6, session_id=session_id)
                 if isinstance(papers2, list):
                     all_papers.extend(papers2)
 
         # If no genes provided, fallback to disease-level search
         if not genes and disease:
             queries.append(disease)
-            papers = await query_medical_research_async(query=disease, top_k=max_papers_per_query, use_llm_processing=True, max_concurrent=6, session_id=session_id)
+            papers = await query_medical_research_async(query=disease, top_k=max_papers_per_query, use_llm_processing=False, max_concurrent=6, session_id=session_id)
             if isinstance(papers, list):
                 all_papers.extend(papers)
 
@@ -604,7 +628,7 @@ async def biomarker_kg_tool(query: str) -> str:
 # AGENT DEFINITIONS
 # ==============================================================================
 
-def create_llm(model_name: str = "gemini-2.0-flash"):
+def create_llm(model_name: str = "gemini-3-pro"):
     """
     Create an LLM instance based on the model name.
     Supports Google Gemini models by default.
@@ -780,65 +804,28 @@ After tool calls complete, write a concise summary of the gene list and pathway 
             "PubMedResearcher": SubAgent(
                 name="PubMedResearcher",
                 description="Searches biomedical literature using PubMed and returns curated summaries with citations",
-                system_message="""You are a literature curation specialist. Your job is to find, analyze, and summarize relevant scientific papers WITH PROPER CITATIONS.
+                system_message="""You are a biomedical literature specialist. Search PubMed for relevant papers and provide comprehensive summaries WITH CITATIONS.
 
-## CRITICAL: CITATION REQUIREMENTS
-Every finding you report MUST include its source citation. The tools return full citations - USE THEM.
-Format: "Finding description (Author et al., Year, DOI: xxx)"
+## KEY INSTRUCTIONS:
+1. Check context["top_genes"] for genes from previous analysis - search ALL of them (up to 20 genes)
+2. For each gene, search: "[GENE] [disease]" to find relevant literature
+3. Every claim MUST include citation: (Author et al., Year, DOI/PMID)
+4. Provide comprehensive coverage - multiple searches are encouraged
 
-## PUBMED SEARCH SYNTAX FOR EXACT/HARD MATCHING:
-When searching for specific genes or terms, use PubMed field tags for precise matching:
-- Gene exact match: "EGFR"[Title/Abstract] - finds papers with EGFR in title or abstract
-- Author search: "Smith J"[Author]
-- Title only: "lung cancer"[Title]
-- MeSH terms: "Neoplasms"[MeSH]
-- Combine with AND/OR: "EGFR"[Title/Abstract] AND "lung cancer"[Title/Abstract]
+## OUTPUT FORMAT per gene:
+### [GENE_SYMBOL]
+- **Function**: What it does (cited)
+- **Disease Role**: Relevance to condition (cited)  
+- **Key Finding**: Most important result (cited)
 
-## CRITICAL: USE GENES FROM CONTEXT
-The context contains a `top_genes` list populated by previous OmicAnalysis. 
-ALWAYS check context["top_genes"] first - if populated, use those genes for your search.
+## CITATION FORMAT:
+"EGFR mutations occur in 15% of cases (Lynch et al., 2004, DOI: 10.1056/NEJMoa040938)"
 
-Example: If context["top_genes"] = ['EGFR', 'TP53', 'KRAS']:
-  Call: curated_pubmed_tool(genes=['EGFR', 'TP53', 'KRAS'], disease='lung cancer')
-
-## YOUR RESPONSIBILITIES:
-1) Check context["top_genes"] FIRST - if available, use those genes directly.
-   If not available, try to extract from previous_results.
-   
-2) Use `curated_pubmed_tool` for gene-centric searches. Pass genes as a list (e.g., genes=['EGFR', 'TP53']) and disease as a string.
-   - The tool automatically runs TWO searches per gene for better coverage.
-   - The tool returns FULL paper content - read it ALL before summarizing.
-
-3) DO NOT FILTER PAPERS PREMATURELY:
-   - Read the FULL content returned by the tool
-   - Include ALL relevant papers in your analysis
-   - Only exclude papers that are truly irrelevant to the query
-   
-4) OUTPUT FORMAT - Always include:
-   - Paper title
-   - Authors
-   - DOI or PMID
-   - Journal and year
-   - Key findings WITH CITATIONS
-   
-5) FINAL SUMMARY must include a "References" section listing all papers cited.
-
-## EXAMPLE OUTPUT FORMAT:
-### Key Findings:
-- EGFR mutations occur in ~15% of lung adenocarcinomas (Smith et al., 2023, DOI: 10.1234/example)
-- TP53 alterations are associated with poor prognosis (Jones et al., 2022, PMID: 12345678)
-
-### References:
-[1] Smith J et al. (2023) "EGFR in Lung Cancer" Nature. DOI: 10.1234/example
-[2] Jones K et al. (2022) "TP53 Mutations" Cancer Res. PMID: 12345678
-
-## EXAMPLE TOOL CALLS:
-- curated_pubmed_tool(genes=['EGFR', 'KRAS'], disease='lung cancer', max_papers_per_query=5)
-- pubmed_search_tool(query='"TP53"[Title/Abstract] AND breast cancer')
-
-IMPORTANT: Always cite your sources. Never make claims without referencing the paper they came from.
+Include a References section at the end listing all papers.
 """,
-                tools=[curated_pubmed_tool, pubmed_search_tool],
+                # Use only lite tool for now (no PDF download)
+                # tools=[curated_pubmed_tool, pubmed_search_tool, pubmed_lite_tool],  # Full version with PDF download
+                tools=[pubmed_lite_tool],
                 llm=self.llm
             ),
             
@@ -920,40 +907,33 @@ You will provide structured data and relationships from the knowledge graph to e
         print("\n📋 PLANNING PHASE")
         print("=" * 60)
         
-        planning_prompt = f"""You are a biomedical research planner. Analyze the user's query and create a detailed plan.
+        planning_prompt = f"""You are a biomedical research planner. Create a plan for:
 
-User Query: {state['query']}
+Query: {state['query']}
 
-Available Agents:
-1. OmicMiningAgent - For gene expression, biomarkers, differential expression, pathway analysis
-2. PubMedResearcher - For searching biomedical literature
-3. GoogleSearcher - For current web information and recent research
-4. ScientistRAGExpert - For querying scientific knowledge bases
-5. BioMarkerKGAgent - For querying biomedical knowledge graphs
+## Available Agents:
+1. OmicMiningAgent - Differential expression, pathway enrichment (use FIRST for gene/pathway queries)
+2. PubMedResearcher - Literature search with citations (can search up to 20 genes comprehensively)
+3. GoogleSearcher - Current web information and clinical context
+4. ScientistRAGExpert - Scientific knowledge base queries
+5. BioMarkerKGAgent - Knowledge graph for gene-disease relationships
 
-Create a plan with sequential tasks. Each task should specify:
-- What needs to be done
-- Which agent should handle it
-- Dependencies on previous tasks
+## Key Principles:
+- Later tasks should USE RESULTS from earlier tasks (e.g., genes found by OmicMiningAgent → literature search)
+- PubMedResearcher should search for ALL top genes identified (up to 20)
+- Agents can be called multiple times if needed for comprehensive coverage
 
-For molecular/genetic queries, ALWAYS include OmicMiningAgent first, then literature validation.
-
-Respond in JSON format:
+Respond in JSON:
 {{
-    "analysis": "Brief analysis of the query",
+    "analysis": "Brief analysis of what's needed",
     "tasks": [
-        {{
-            "id": "task_1",
-            "description": "Task description",
-            "assigned_agent": "AgentName",
-            "depends_on": []
-        }}
+        {{"id": "task_1", "description": "Task description", "assigned_agent": "AgentName", "depends_on": []}}
     ]
 }}
 """
         
         response = await self.llm.ainvoke([
-            SystemMessage(content="You are a strategic research planner. Output valid JSON only."),
+            SystemMessage(content="You are a research planner. Output valid JSON only."),
             HumanMessage(content=planning_prompt)
         ])
         
@@ -1303,57 +1283,46 @@ Respond in JSON format:
                 "result": task.get("result", "")
             })
         
-        reporting_prompt = f"""Generate a comprehensive research report based on the following analysis.
+        reporting_prompt = f"""Generate a comprehensive research report for a graduate-level biomedical audience.
 
-Original Query: {state['query']}
-
-## Process Summary:
-- Total tasks planned: {len(state['plan'])}
-- Tasks completed: {len(completed_tasks)}
-- Tasks failed: {len(failed_tasks)}
-- Plan revisions: {state.get('plan_revision_count', 0)}
+## Research Question:
+{state['query']}
 
 ## Task Results:
 {json.dumps(task_results, indent=2, default=str)}
 
-## Process Log:
-{json.dumps(process_log, indent=2, default=str)}
+---
 
-Generate a COMPREHENSIVE report that:
-1. **Executive Summary**: Key findings and conclusions
-2. **Methodology**: How the analysis was conducted (which agents, what tools)
-3. **Detailed Findings**: For each task, explain what was discovered
-4. **Data and Evidence**: Include specific numbers, gene names, pathways, statistics
-5. **Integration**: How different findings connect and support each other
-6. **Limitations**: What couldn't be accomplished and why
-7. **Recommendations**: Next steps and further research directions
+## REPORT REQUIREMENTS:
 
-## CRITICAL: CITATION REQUIREMENTS
-- **ALL findings from literature MUST include citations**
-- Look for DOI, PMID, author names, and paper titles in the task results
-- Format citations as: (Author et al., Year, DOI: xxx) or (Author et al., Year, PMID: xxx)
-- Include a **References** section at the end listing all cited papers
-- Example citation format in text: "EGFR mutations occur in 15% of cases (Smith et al., 2023, DOI: 10.1234/example)"
+Write a professional scientific report including:
 
-8. **References**: List ALL papers cited in the report with full citation details:
-   - Author(s)
-   - Year
-   - Title
-   - Journal
-   - DOI or PMID
+1. **Executive Summary** - Key findings, top genes/pathways, main conclusions
+2. **Introduction** - Scientific context and significance  
+3. **Methods** - Data sources, analysis pipeline, literature search strategy
+4. **Results** - Comprehensive findings organized by:
+   - Differential expression results (all genes found)
+   - Pathway enrichment analysis
+   - Literature validation for EACH gene (with citations)
+5. **Discussion** - Integration of findings, mechanistic insights, clinical relevance
+6. **Conclusions** - Summary and future directions
+7. **References** - ALL papers cited with DOI/PMID
 
-The report should be at least 1500 words and include all important details from the process.
-Format the report in Markdown.
+## CRITICAL:
+- Include ALL genes from the analysis (up to 20)
+- Every literature claim MUST have citation: (Author et al., Year, DOI/PMID)
+- Be comprehensive - this is for graduate-level scientists
+- Minimum 2500 words
 """
         
         response = await self.llm.ainvoke([
-            SystemMessage(content="""You are an expert scientific report writer. Generate detailed, comprehensive reports 
-that capture all important information from the research process. Include specific data, names, and findings.
+            SystemMessage(content="""You are an expert biomedical science writer. Generate comprehensive, publication-quality reports.
 
-IMPORTANT: Every claim from literature MUST be cited with its source. Include DOI or PMID for every paper referenced.
-The report MUST end with a References section listing all cited papers.
-
-Always use Markdown formatting."""),
+CRITICAL: 
+- Every claim from literature MUST include proper citation (DOI/PMID)
+- Include ALL genes and findings from the task results
+- Write for graduate-level biomedical audience
+- End with complete References section"""),
             HumanMessage(content=reporting_prompt)
         ])
         

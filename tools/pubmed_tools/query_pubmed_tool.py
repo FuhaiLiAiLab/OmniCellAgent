@@ -67,6 +67,10 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
         """
         self.jsonl_cache_dir = jsonl_cache_dir
         self.doi_cache_dir = doi_cache_dir  # Global flat cache - papers stored by DOI
+        
+        # Load API keys path for paperscraper (Wiley, Elsevier, etc.)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.api_keys_path = os.path.join(project_root, '.env')
        
         for directory in [jsonl_cache_dir, doi_cache_dir]:
             if not os.path.exists(directory):
@@ -263,6 +267,23 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
             # Paper not in cache - need to download
             filename = self._doi_to_filename(doi)
             
+            # Identify publisher from DOI for debugging
+            publisher = "unknown"
+            if "wiley" in doi.lower() or "10.1002" in doi or "10.1111" in doi:
+                publisher = "Wiley"
+            elif "elsevier" in doi.lower() or "10.1016" in doi:
+                publisher = "Elsevier"
+            elif "springer" in doi.lower() or "10.1007" in doi:
+                publisher = "Springer"
+            elif "nature" in doi.lower() or "10.1038" in doi:
+                publisher = "Nature"
+            elif "pnas" in doi.lower() or "10.1073" in doi:
+                publisher = "PNAS"
+            elif "10.1371" in doi:
+                publisher = "PLOS"
+            elif "10.3389" in doi:
+                publisher = "Frontiers"
+            
             # Create temporary single-paper jsonl file
             temp_jsonl_path = os.path.join(temp_dir, f"{timestr}_paper_{i+1}_{filename[:50]}.jsonl")
             
@@ -271,13 +292,14 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                     json.dump(paper_data, temp_file)
                     temp_file.write('\n')
                 
-                print(f"[Download] Paper {i+1}/{len(papers_metadata)}: Attempting {doi}")
+                print(f"[Download] Paper {i+1}/{len(papers_metadata)}: Attempting {doi} (Publisher: {publisher})")
                 
                 # Track download success before attempting
                 before_files = set(os.listdir(pdf_dir)) if os.path.exists(pdf_dir) else set()
                 
                 # Download using the single-paper temp file directly to global cache
-                save_pdf_from_dump(temp_jsonl_path, pdf_path=pdf_dir, key_to_save='doi')
+                # Pass API keys path for Wiley/Elsevier TDM API access
+                save_pdf_from_dump(temp_jsonl_path, pdf_path=pdf_dir, key_to_save='doi', api_keys=self.api_keys_path)
                 
                 # Check if download was successful
                 after_files = set(os.listdir(pdf_dir)) if os.path.exists(pdf_dir) else set()
@@ -309,12 +331,18 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                         found_count += 1
                         print(f"[Success] Paper {i+1}: Downloaded successfully ({found_count} total)")
                     else:
-                        print(f"[Failed] Paper {i+1}: Downloaded but file appears corrupted")
+                        print(f"[Failed] Paper {i+1}: Downloaded but file appears corrupted (Publisher: {publisher})")
                 else:
-                    print(f"[Failed] Paper {i+1}: No file downloaded")
+                    # Provide specific guidance based on publisher
+                    if publisher == "Wiley":
+                        print(f"[Failed] Paper {i+1}: No file downloaded (Publisher: {publisher}) - Need WILEY_TDM_API_TOKEN in .env")
+                    elif publisher == "Elsevier":
+                        print(f"[Failed] Paper {i+1}: No file downloaded (Publisher: {publisher}) - Need ELSEVIER_TDM_API_KEY in .env")
+                    else:
+                        print(f"[Failed] Paper {i+1}: No file downloaded (Publisher: {publisher}) - May not be open access")
                 
             except Exception as e:
-                print(f"[Error] Paper {i+1}: {e}")
+                print(f"[Error] Paper {i+1} ({publisher}): {e}")
             finally:
                 # Clean up the temporary file
                 if os.path.exists(temp_jsonl_path):
@@ -473,7 +501,7 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
 async def query_medical_research_async(
     query: str,
     top_k: int = 3,
-    use_llm_processing: bool = True,
+    use_llm_processing: bool = False,
     max_concurrent: int = 10,
     session_id: str = None
 ) -> List[Dict[str, Any]]:
@@ -483,7 +511,7 @@ async def query_medical_research_async(
     Args:
         query(str): The medical topic to search for (e.g., "COVID-19 Treatment")
         top_k(int): Number of readable papers to retrieve (default: 3)
-        use_llm_processing(bool): Whether to use LLM for enhanced content processing (default: True)
+        use_llm_processing(bool): Whether to use LLM for enhanced content processing (default: False for speed)
         max_concurrent(int): Maximum concurrent LLM operations (default: 10)
         session_id(str): Optional session ID to group papers from the same analysis session.
                         If provided, papers from multiple queries will be stored in the same folder.
@@ -531,7 +559,7 @@ async def query_medical_research_async(
 async def query_medical_research(
     query: str,
     top_k: int = 3,
-    use_llm_processing: bool = True,
+    use_llm_processing: bool = False,
     max_concurrent: int = 10
     ) -> List[Dict[str, Any]]:
     """
@@ -540,7 +568,7 @@ async def query_medical_research(
     Args:
         query(str): The medical topic to search for (e.g., "COVID-19 Treatment")
         top_k(int): Number of readable papers to retrieve (default: 3)
-        use_llm_processing(bool): Whether to use LLM for enhanced content processing (default: True)
+        use_llm_processing(bool): Whether to use LLM for enhanced content processing (default: False for speed)
         max_concurrent(int): Maximum concurrent LLM operations (default: 10)
 
     Returns:
@@ -554,7 +582,7 @@ async def query_medical_research(
 async def medical_research_tool(
     query: str,
     top_k: int = 10,
-    use_llm_processing: bool = True,
+    use_llm_processing: bool = False,
     max_concurrent: int = 10
 ) -> str:
     """
@@ -563,7 +591,7 @@ async def medical_research_tool(
     Args:
         query: The medical topic to search for (e.g., "COVID-19 Treatment", "leptin resistance obesity")
         top_k: Number of readable papers to retrieve (default: 10, recommended range: 1-20)
-        use_llm_processing: Whether to use LLM for enhanced content processing (default: True)
+        use_llm_processing: Whether to use LLM for enhanced content processing (default: False for speed)
         max_concurrent: Maximum concurrent LLM operations (default: 10)
     
     Returns:
