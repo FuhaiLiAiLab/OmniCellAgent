@@ -580,15 +580,25 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                         "enrichment_results_dir": data_and_analysis_dict.get('enrichment_results_dir'),
                     }
                     
-                    # Extract top genes by FDR
+                    # Extract top genes by FDR with full statistics
                     gene_file = os.path.join(
                         data_and_analysis_dict.get('differential_expression_dir', ''),
                         "significant_genes_by_fdr.csv"
                     )
                     if os.path.exists(gene_file):
                         gene_df = pd.read_csv(gene_file)
-                        top_genes_by_fdr = gene_df['Name'].astype(str).values.tolist()[:TOP_K_GENES]
-                        print(f"[DE] Top {len(top_genes_by_fdr)} genes by FDR: {top_genes_by_fdr[:5]}...")
+                        # Store full statistics for top genes
+                        top_genes_by_fdr = []
+                        for idx, row in gene_df.head(TOP_K_GENES).iterrows():
+                            top_genes_by_fdr.append({
+                                "rank": idx + 1,
+                                "gene_name": str(row['Name']),
+                                "log2_fold_change": float(row['log2_fold_change']) if 'log2_fold_change' in row else None,
+                                "FDR": float(row['FDR']) if 'FDR' in row else None,
+                                "p_value": float(row['p_value']) if 'p_value' in row else None,
+                                "effect_size": float(row['effect_size']) if 'effect_size' in row else None,
+                            })
+                        print(f"[DE] Top {len(top_genes_by_fdr)} genes by FDR: {[g['gene_name'] for g in top_genes_by_fdr[:5]]}...")
                     
                     del data_and_analysis_dict
                     

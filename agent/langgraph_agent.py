@@ -70,6 +70,33 @@ from utils.prompt import (
 
 
 # ==============================================================================
+# HELPER FUNCTIONS
+# ==============================================================================
+
+def extract_text_from_llm_response(content) -> str:
+    """
+    Extract text from LLM response content.
+    Handles Gemini's various response formats:
+    - String: returned as-is
+    - List of dicts with 'text' key: extracts and joins text
+    - List of strings: joins them
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = []
+        for part in content:
+            if isinstance(part, dict) and 'text' in part:
+                texts.append(part['text'])
+            elif isinstance(part, str):
+                texts.append(part)
+            else:
+                texts.append(str(part))
+        return "".join(texts)
+    return str(content)
+
+
+# ==============================================================================
 # STATE DEFINITIONS
 # ==============================================================================
 
@@ -696,7 +723,7 @@ class SubAgent:
             
             return {
                 "success": True,
-                "result": response.content,
+                "result": extract_text_from_llm_response(response.content),
                 "iterations": iteration
             }
             
@@ -907,48 +934,36 @@ You will provide structured data and relationships from the knowledge graph to e
         print("\n📋 PLANNING PHASE")
         print("=" * 60)
         
-        planning_prompt = f"""You are a biomedical research planner. Create a plan for:
+        planning_prompt = f"""Create a research plan for this query:
 
 Query: {state['query']}
 
-## Available Agents:
-1. OmicMiningAgent - Differential expression, pathway enrichment (use FIRST for gene/pathway queries)
-2. PubMedResearcher - Literature search with citations (can search up to 20 genes comprehensively)
-3. GoogleSearcher - Current web information and clinical context
-4. ScientistRAGExpert - Scientific knowledge base queries
-5. BioMarkerKGAgent - Knowledge graph for gene-disease relationships
+Available Agents:
+1. OmicMiningAgent - Differential expression, pathway enrichment (ALWAYS use FIRST for gene/pathway queries)
+2. PubMedResearcher - Literature search (use AFTER OmicMiningAgent to search identified genes)
+3. GoogleSearcher - Web search for clinical context
+4. ScientistRAGExpert - Scientific knowledge base
+5. BioMarkerKGAgent - Gene-disease knowledge graph
 
-## Key Principles:
-- Later tasks should USE RESULTS from earlier tasks (e.g., genes found by OmicMiningAgent → literature search)
-- PubMedResearcher should search for ALL top genes identified (up to 20)
-- Agents can be called multiple times if needed for comprehensive coverage
+IMPORTANT: For biomedical queries about genes/pathways/diseases, ALWAYS start with OmicMiningAgent to identify genes, THEN use PubMedResearcher to find literature on those genes.
 
-Respond in JSON:
-{{
-    "analysis": "Brief analysis of what's needed",
-    "tasks": [
-        {{"id": "task_1", "description": "Task description", "assigned_agent": "AgentName", "depends_on": []}}
-    ]
-}}
-"""
+Output ONLY valid JSON (no markdown, no explanation):
+{{"analysis": "brief analysis", "tasks": [{{"id": "task_1", "description": "description", "assigned_agent": "AgentName", "depends_on": []}}]}}"""
         
         response = await self.llm.ainvoke([
-            SystemMessage(content="You are a research planner. Output valid JSON only."),
+            SystemMessage(content="You are a research planner. Output ONLY valid JSON, no markdown code blocks."),
             HumanMessage(content=planning_prompt)
         ])
         
         # Parse the plan
         try:
-            # Extract JSON from response - handle both str and list content types
-            content = response.content
-            # Some Gemini models return content as a list of parts
-            if isinstance(content, list):
-                content = "".join(str(part) for part in content)
-            content = str(content)  # Ensure it's a string
+            # Extract text from response using helper function
+            content = extract_text_from_llm_response(response.content)
             
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
             elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
                 content = content.split("```")[1].split("```")[0]
             
             plan_data = json.loads(content)
@@ -987,22 +1002,37 @@ Respond in JSON:
             
         except json.JSONDecodeError as e:
             print(f"⚠️ Error parsing plan: {e}")
-            # Create a default plan
-            default_task = SubTask(
-                id="task_1",
-                description=state['query'],
-                assigned_agent="GoogleSearcher",
-                status="pending",
-                result=None,
-                error=None,
-                attempts=0
-            )
+            print(f"⚠️ Raw response content: {content[:500] if content else 'EMPTY'}")
+            # Create a default plan - use OmicMiningAgent FIRST, then PubMedResearcher
+            default_tasks = [
+                SubTask(
+                    id="task_1",
+                    description=f"Analyze differential expression and identify key genes/pathways for: {state['query']}",
+                    assigned_agent="OmicMiningAgent",
+                    status="pending",
+                    result=None,
+                    error=None,
+                    attempts=0
+                ),
+                SubTask(
+                    id="task_2",
+                    description=f"Search literature for the genes and pathways identified, focusing on: {state['query']}",
+                    assigned_agent="PubMedResearcher",
+                    status="pending",
+                    result=None,
+                    error=None,
+                    attempts=0
+                )
+            ]
+            print(f"📝 Created default plan with {len(default_tasks)} tasks:")
+            for task in default_tasks:
+                print(f"   - {task['id']}: {task['description'][:50]}... ({task['assigned_agent']})")
             return {
-                "plan": [default_task],
+                "plan": default_tasks,
                 "current_task_index": 0,
                 "status": "executing",
-                "process_log": state.get("process_log", []) + [{"phase": "planning", "error": str(e)}],
-                "messages": [AIMessage(content="Created default plan due to parsing error")]
+                "process_log": state.get("process_log", []) + [{"phase": "planning", "error": str(e), "fallback": "default_omic_pubmed"}],
+                "messages": [AIMessage(content="Created default plan (OmicMiningAgent → PubMedResearcher) due to parsing error")]
             }
     
     async def _execution_node(self, state: AgentState) -> Dict[str, Any]:
@@ -1221,11 +1251,8 @@ Respond in JSON format:
         ])
         
         try:
-            content = response.content
-            # Handle list content from some Gemini models
-            if isinstance(content, list):
-                content = "".join(str(part) for part in content)
-            content = str(content)
+            # Extract text from response using helper function
+            content = extract_text_from_llm_response(response.content)
             
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
@@ -1311,36 +1338,49 @@ Write a professional scientific report including:
 2. **Introduction** - Scientific context and significance  
 3. **Methods** - Data sources, analysis pipeline, literature search strategy
 4. **Results** - Comprehensive findings organized by:
-   - Differential expression results (all genes found)
+   - Differential expression results from OmniCellAgent analysis
    - Pathway enrichment analysis
-   - Literature validation for EACH gene (with citations)
+   - For EACH gene, include:
+     * OmniCellAgent ranking (FDR rank position, e.g., "Rank #1 by FDR")
+     * Statistical metrics (log2 fold change, FDR value if available)
+     * Gene function and biological role
+     * Literature findings (2-3 paragraphs per gene with citations)
+     * Clinical/therapeutic relevance
 5. **Discussion** - Integration of findings, mechanistic insights, clinical relevance
 6. **Conclusions** - Summary and future directions
 7. **References** - ALL papers cited with DOI/PMID
 
-## CRITICAL:
-- Include ALL genes from the analysis (up to 20)
-- Every literature claim MUST have citation: (Author et al., Year, DOI/PMID)
-- Be comprehensive - this is for graduate-level scientists
-- Minimum 2500 words
+## CRITICAL FORMATTING FOR EACH GENE:
+For each gene in the results, structure as:
+
+**Gene Name (Symbol)** - OmniCellAgent Rank: #X | log2FC: X.XX | FDR: X.XXe-XX
+- **Function:** [biological function]
+- **Role in Disease:** [mechanism in the disease context]
+- **Literature Evidence:** [2-3 paragraphs summarizing PubMed findings with citations]
+- **Therapeutic Implications:** [potential as drug target or biomarker]
+
+## REQUIREMENTS:
+- Include ALL genes from the OmniCellAgent analysis (up to 20)
+- Every literature claim MUST have citation: (Author et al., Year, Journal, DOI/PMID)
+- Be comprehensive - minimum 3000 words
+- The OmniCellAgent metrics (rank, fold change, FDR) are CRITICAL to include
 """
         
         response = await self.llm.ainvoke([
             SystemMessage(content="""You are an expert biomedical science writer. Generate comprehensive, publication-quality reports.
 
 CRITICAL: 
-- Every claim from literature MUST include proper citation (DOI/PMID)
-- Include ALL genes and findings from the task results
+- For EACH gene, include its OmniCellAgent ranking (FDR rank #1, #2, etc.) and statistics
+- Include extensive literature review for each gene (2-3 paragraphs with citations)
+- Every claim MUST include proper citation (Author, Year, Journal, DOI/PMID)
+- Include ALL genes from the differential expression results
 - Write for graduate-level biomedical audience
 - End with complete References section"""),
             HumanMessage(content=reporting_prompt)
         ])
         
-        report = response.content
-        # Handle list content from some Gemini models
-        if isinstance(report, list):
-            report = "".join(str(part) for part in report)
-        report = str(report)
+        # Extract text from response using helper function
+        report = extract_text_from_llm_response(response.content)
         
         # Save the report
         report_path = self._save_report(state["query"], report)
