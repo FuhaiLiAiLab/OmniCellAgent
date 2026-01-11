@@ -939,15 +939,19 @@ You will provide structured data and relationships from the knowledge graph to e
 Query: {state['query']}
 
 Available Agents:
-1. OmicMiningAgent - Differential expression, pathway enrichment (ALWAYS use FIRST for gene/pathway queries)
-2. PubMedResearcher - Literature search (use AFTER OmicMiningAgent to search identified genes)
-3. GoogleSearcher - Web search for clinical context
-4. ScientistRAGExpert - Scientific knowledge base
-5. BioMarkerKGAgent - Gene-disease knowledge graph
+1. OmicMiningAgent - Differential expression analysis (ALWAYS FIRST - returns sample counts, DEG rankings)
+2. BioMarkerKGAgent - Knowledge graph for gene neighbors (drugs, pathways, GO terms)
+3. PubMedResearcher - Literature search for disease/gene targets
+4. ScientistRAGExpert - Hypothesis generation and mechanism synthesis
+5. GoogleSearcher - Clinical context and recent developments
 
-IMPORTANT: For biomedical queries about genes/pathways/diseases, ALWAYS start with OmicMiningAgent to identify genes, THEN use PubMedResearcher to find literature on those genes.
+Recommended workflow:
+- Step 1: OmicMiningAgent → Get DEGs with statistics
+- Step 2: BioMarkerKGAgent → Find KG neighbors of top DEGs  
+- Step 3: PubMedResearcher → Literature on top targets
+- Step 4: ScientistRAGExpert → Synthesize mechanisms/hypotheses
 
-Output ONLY valid JSON (no markdown, no explanation):
+Output ONLY valid JSON:
 {{"analysis": "brief analysis", "tasks": [{{"id": "task_1", "description": "description", "assigned_agent": "AgentName", "depends_on": []}}]}}"""
         
         response = await self.llm.ainvoke([
@@ -1003,11 +1007,11 @@ Output ONLY valid JSON (no markdown, no explanation):
         except json.JSONDecodeError as e:
             print(f"⚠️ Error parsing plan: {e}")
             print(f"⚠️ Raw response content: {content[:500] if content else 'EMPTY'}")
-            # Create a default plan - use OmicMiningAgent FIRST, then PubMedResearcher
+            # Create default 4-step workflow
             default_tasks = [
                 SubTask(
                     id="task_1",
-                    description=f"Analyze differential expression and identify key genes/pathways for: {state['query']}",
+                    description=f"Step 1: Differential expression analysis to identify DEGs for: {state['query']}",
                     assigned_agent="OmicMiningAgent",
                     status="pending",
                     result=None,
@@ -1016,23 +1020,41 @@ Output ONLY valid JSON (no markdown, no explanation):
                 ),
                 SubTask(
                     id="task_2",
-                    description=f"Search literature for the genes and pathways identified, focusing on: {state['query']}",
+                    description=f"Step 2: Query knowledge graph for gene neighbors (drugs, pathways, GO terms)",
+                    assigned_agent="BioMarkerKGAgent",
+                    status="pending",
+                    result=None,
+                    error=None,
+                    attempts=0
+                ),
+                SubTask(
+                    id="task_3",
+                    description=f"Step 3: Literature search for top DEGs and disease targets",
                     assigned_agent="PubMedResearcher",
+                    status="pending",
+                    result=None,
+                    error=None,
+                    attempts=0
+                ),
+                SubTask(
+                    id="task_4",
+                    description=f"Step 4: Synthesize findings and generate mechanistic hypotheses",
+                    assigned_agent="ScientistRAGExpert",
                     status="pending",
                     result=None,
                     error=None,
                     attempts=0
                 )
             ]
-            print(f"📝 Created default plan with {len(default_tasks)} tasks:")
+            print(f"📝 Created default 4-step plan:")
             for task in default_tasks:
-                print(f"   - {task['id']}: {task['description'][:50]}... ({task['assigned_agent']})")
+                print(f"   - {task['id']}: {task['description'][:60]}... ({task['assigned_agent']})")
             return {
                 "plan": default_tasks,
                 "current_task_index": 0,
                 "status": "executing",
-                "process_log": state.get("process_log", []) + [{"phase": "planning", "error": str(e), "fallback": "default_omic_pubmed"}],
-                "messages": [AIMessage(content="Created default plan (OmicMiningAgent → PubMedResearcher) due to parsing error")]
+                "process_log": state.get("process_log", []) + [{"phase": "planning", "error": str(e), "fallback": "default_4step"}],
+                "messages": [AIMessage(content="Created default 4-step workflow")]
             }
     
     async def _execution_node(self, state: AgentState) -> Dict[str, Any]:
@@ -1330,52 +1352,52 @@ Respond in JSON format:
 
 ---
 
-## REPORT REQUIREMENTS:
+## REPORT STRUCTURE (Follow this order):
 
-Write a professional scientific report including:
+### Step 1: Omics Data Analysis Summary
+- Report sample sizes (disease vs normal)
+- Number of DEGs identified (upregulated/downregulated)
+- **Top DEGs Table** (ranked by p-value/FDR): Show top 10-15 genes with:
+  | Rank | Gene | log2FC | FDR | Direction |
+- Note: Full gene list saved to differential_expression/ folder
 
-1. **Executive Summary** - Key findings, top genes/pathways, main conclusions
-2. **Introduction** - Scientific context and significance  
-3. **Methods** - Data sources, analysis pipeline, literature search strategy
-4. **Results** - Comprehensive findings organized by:
-   - Differential expression results from OmniCellAgent analysis
-   - Pathway enrichment analysis
-   - For EACH gene, include:
-     * OmniCellAgent ranking (FDR rank position, e.g., "Rank #1 by FDR")
-     * Statistical metrics (log2 fold change, FDR value if available)
-     * Gene function and biological role
-     * Literature findings (2-3 paragraphs per gene with citations)
-     * Clinical/therapeutic relevance
-5. **Discussion** - Integration of findings, mechanistic insights, clinical relevance
-6. **Conclusions** - Summary and future directions
-7. **References** - ALL papers cited with DOI/PMID
+### Step 2: Knowledge Graph Analysis  
+- First-neighbor nodes of top DEGs from knowledge graph
+- Categorize neighbors: Drugs, Pathways, GO Terms, Diseases
+- Highlight potential drug targets and pathway connections
 
-## CRITICAL FORMATTING FOR EACH GENE:
-For each gene in the results, structure as:
+### Step 3: Literature-Validated Targets
+- Targets found in both DEGs AND literature
+- **Intersection Table**: Genes supported by both omics and literature
+- For each validated target: brief literature summary with citations
 
-**Gene Name (Symbol)** - OmniCellAgent Rank: #X | log2FC: X.XX | FDR: X.XXe-XX
-- **Function:** [biological function]
-- **Role in Disease:** [mechanism in the disease context]
-- **Literature Evidence:** [2-3 paragraphs summarizing PubMed findings with citations]
-- **Therapeutic Implications:** [potential as drug target or biomarker]
+### Step 4: Mechanistic Hypotheses
+- Proposed molecular mechanisms based on integrated evidence
+- **Mechanism Network**: Describe causal relationships between:
+  - Key genes → pathways → phenotypes
+  - Drug targets → mechanisms → therapeutic effects
+- Present as a conceptual network/pathway diagram description
 
-## REQUIREMENTS:
-- Include ALL genes from the OmniCellAgent analysis (up to 20)
-- Every literature claim MUST have citation: (Author et al., Year, Journal, DOI/PMID)
-- Be comprehensive - minimum 3000 words
-- The OmniCellAgent metrics (rank, fold change, FDR) are CRITICAL to include
+### Step 5: Conclusions
+- Key actionable findings
+- Suggested experimental validations
+- References (with DOI/PMID)
+
+## KEY REQUIREMENTS:
+- Use tables for gene lists (keep them concise)
+- Emphasize INTERSECTION of evidence sources
+- Generate testable hypotheses with mechanism descriptions
+- All citations must include DOI or PMID
 """
         
         response = await self.llm.ainvoke([
-            SystemMessage(content="""You are an expert biomedical science writer. Generate comprehensive, publication-quality reports.
-
-CRITICAL: 
-- For EACH gene, include its OmniCellAgent ranking (FDR rank #1, #2, etc.) and statistics
-- Include extensive literature review for each gene (2-3 paragraphs with citations)
-- Every claim MUST include proper citation (Author, Year, Journal, DOI/PMID)
-- Include ALL genes from the differential expression results
-- Write for graduate-level biomedical audience
-- End with complete References section"""),
+            SystemMessage(content="""You are an expert biomedical research synthesizer. Generate structured reports that:
+1. Summarize omics findings with statistics (samples, DEG counts)
+2. Show ranked gene tables (top 10-15, note full list in files)
+3. Integrate knowledge graph neighbors (drugs, pathways, GO)
+4. Identify literature-validated targets (intersection analysis)
+5. Propose mechanistic hypotheses with network descriptions
+Keep tables concise. Focus on actionable insights."""),
             HumanMessage(content=reporting_prompt)
         ])
         
