@@ -29,8 +29,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import the UI system class and helper functions from the webapp UI directory
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'UI'))
-from UI.dash_UI import (
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from webapp.UI.dash_UI import (
     UIMagneticAgentSystem, 
     create_autogen_team,
     add_message_to_queue,
@@ -130,9 +130,10 @@ layout = dbc.Container([
                         id='team-type-selector',
                         options=[
                             # {'label': ' Simple Assistant', 'value': 'simple'},
-                            {'label': ' Biomedical Research Team', 'value': 'magentic'}
+                            {'label': ' AutoGen Research Team', 'value': 'magentic'},
+                            {'label': ' LangGraph Research Team', 'value': 'langgraph'}
                         ],
-                        value='magentic',
+                        value='langgraph',
                         inline=False,
                         style={'font-size': '0.85rem'}
                     )

@@ -33,8 +33,15 @@ from autogen_agentchat.ui import Console
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_core import CancellationToken
 
-# Import the SimpleMagneticAgentSystem from agent
+# Import the SimpleMagneticAgentSystem from agent (AutoGen-based)
 from agent.simple_magentic_agent import SimpleMagneticAgentSystem
+
+# Import the LangGraph adapter for the new LangGraph-based agent
+# Try both import paths for flexibility (webapp.UI or relative)
+try:
+    from webapp.UI.langgraph_adapter import UILangGraphAdapter, create_langgraph_adapter
+except ImportError:
+    from .langgraph_adapter import UILangGraphAdapter, create_langgraph_adapter
 
 
 class UIMagneticAgentSystem(SimpleMagneticAgentSystem):
@@ -795,11 +802,49 @@ FINAL_RESULTS = {}        # Placeholder for backward compatibility
 COLLAPSE_STATE = {}       # Placeholder for backward compatibility
 
 # --- Helper Function to Create an Autogen Team ---
-def create_autogen_team(session_id, use_simple_team=False):
-    """Initializes and returns a new SimpleMagneticAgentSystem with session-specific storage."""
-    print(f"Creating a new biomedical agent system (simple={use_simple_team}) for session: {session_id}")
+def create_autogen_team(session_id, use_simple_team=False, team_type='magentic'):
+    """
+    Initializes and returns a new agent system with session-specific storage.
     
-    if use_simple_team:
+    Args:
+        session_id: Unique session identifier
+        use_simple_team: If True, use simple model (legacy parameter)
+        team_type: 'simple', 'magentic', or 'langgraph'
+        
+    Returns:
+        dict with system and metadata
+    """
+    print(f"Creating a new biomedical agent system (team_type={team_type}) for session: {session_id}")
+    
+    # Handle langgraph team type
+    if team_type == 'langgraph':
+        # Create LangGraph adapter with UI callbacks configured
+        adapter = create_langgraph_adapter(
+            session_id=session_id,
+            model_name="gemini-3-pro-preview"
+        )
+        
+        # Set up callbacks for UI updates
+        adapter.set_callbacks(
+            process_step=add_process_step,
+            left_chat=add_left_chat_message,
+            multimedia=add_multimedia_process_step,
+            final_result=lambda sid, content: append_to_final_result(sid, content)
+        )
+        
+        print(f"[DEBUG] Created LangGraph adapter for session {session_id}")
+        
+        return {
+            "system": adapter,
+            "adapter": adapter,  # Reference to adapter for type checking
+            "conversation_started": False,
+            "task_result": None,
+            "team_type": "langgraph",
+            "session_id": session_id
+        }
+    
+    # Legacy handling for simple/magentic
+    if use_simple_team or team_type == 'simple':
         # For simple mode, use a basic model configuration
         model_name = "gpt-4o-mini"
         print("[DEBUG] Created simple agent configuration")
@@ -1257,9 +1302,10 @@ app.layout = dbc.Container([
                         id='team-type-selector',
                         options=[
                             # {'label': ' Simple Assistant', 'value': 'simple'},
-                            {'label': ' Biomedical Research Team', 'value': 'magentic'}
+                            {'label': ' AutoGen Research Team', 'value': 'magentic'},
+                            {'label': ' LangGraph Research Team', 'value': 'langgraph'}
                         ],
-                        value='magentic',
+                        value='langgraph',
                         inline=False,
                         style={'font-size': '0.85rem'}
                     )
@@ -1681,11 +1727,19 @@ def get_process_details_display(session_id):
     return steps
 
 def start_processing_in_background(session_id, user_input, team_type):
-    """Start agent processing in a background thread with proper cancellation support."""
+    """Start agent processing in a background thread with proper cancellation support.
+    
+    Supports both AutoGen-based (magentic/simple) and LangGraph-based agents.
+    
+    Args:
+        session_id: Unique session identifier
+        user_input: The user's query/task
+        team_type: 'simple', 'magentic', or 'langgraph'
+    """
     
     def process_agent_response():
         try:
-            print(f"[DEBUG] Starting background processing for session {session_id}")
+            print(f"[DEBUG] Starting background processing for session {session_id}, team_type={team_type}")
             PROCESSING_STATUS[session_id] = {"status": "processing", "task_id": str(uuid.uuid4())}
             
             # Get the stop event for this session
@@ -1698,18 +1752,18 @@ def start_processing_in_background(session_id, user_input, team_type):
             
             # Get or create session (always create new if stopped to prevent reuse issues)
             if session_id not in SESSIONS or SESSIONS[session_id] is None:
-                use_simple = team_type == 'simple'
-                print(f"[DEBUG] Creating new agent system for session {session_id}")
-                SESSIONS[session_id] = create_autogen_team(session_id, use_simple_team=use_simple)
+                print(f"[DEBUG] Creating new agent system for session {session_id}, team_type={team_type}")
+                SESSIONS[session_id] = create_autogen_team(session_id, team_type=team_type)
             
             if stop_event.is_set():
                 return
             
-            # Get team and run
+            # Get session data
             session_data = SESSIONS[session_id]
             
             if isinstance(session_data, dict) and 'system' in session_data:
                 agent_system = session_data['system']
+                actual_team_type = session_data.get('team_type', 'magentic')
                 
                 # Create a new event loop for this thread
                 loop = asyncio.new_event_loop()
@@ -1727,8 +1781,15 @@ def start_processing_in_background(session_id, user_input, team_type):
                         BACKGROUND_THREADS[session_id]["current_task"] = current_task
                         
                         try:
-                            # Run the agent system with stop event for in-loop cancellation
-                            await agent_system.run_stream_for_ui(user_input, session_id, stop_event=stop_event)
+                            # Different execution paths for different agent types
+                            if actual_team_type == 'langgraph':
+                                # LangGraph adapter - use run_stream
+                                print(f"[DEBUG] Running LangGraph adapter for session {session_id}")
+                                await agent_system.run_stream(user_input, stop_event=stop_event)
+                            else:
+                                # AutoGen-based system - use run_stream_for_ui
+                                print(f"[DEBUG] Running AutoGen system for session {session_id}")
+                                await agent_system.run_stream_for_ui(user_input, session_id, stop_event=stop_event)
                         except asyncio.CancelledError:
                             print(f"[DEBUG] Agent system cancelled for session {session_id}")
                             raise

@@ -694,36 +694,84 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     print(f"{'='*70}\n")
 
     # ===========================================================================
-    # Collect all plot paths for UI display (HTML files only)
+    # Collect all plot paths for UI display and report embedding
+    # Returns both absolute paths and relative paths for markdown embedding
     # ===========================================================================
-    plot_paths = []
+    plot_paths = []  # Absolute paths for backward compatibility
+    plots_for_report = {
+        "volcano_plots": [],
+        "enrichment_bar_plots": [],
+        "kegg_pathway_plots": [],
+        "all_plots": []
+    }
     
-    # Collect volcano plots (HTML only)
+    # Collect volcano plots
     volcano_dir = os.path.join(session_dir, "volcano_plots")
     if os.path.exists(volcano_dir):
-        for f in os.listdir(volcano_dir):
+        for f in sorted(os.listdir(volcano_dir)):
+            abs_path = os.path.join(volcano_dir, f)
+            rel_path = os.path.join("volcano_plots", f)
             if f.endswith('.html'):
-                plot_paths.append(os.path.join(volcano_dir, f))
+                plot_paths.append(abs_path)
+            if f.endswith('.png'):
+                plots_for_report["volcano_plots"].append({
+                    "name": f.replace('.png', '').replace('_', ' ').title(),
+                    "filename": f,
+                    "relative_path": rel_path,
+                    "absolute_path": abs_path,
+                    "type": "volcano",
+                    "format": "png"
+                })
+                plots_for_report["all_plots"].append(rel_path)
     
-    # Collect enrichment plots (HTML only)
-    plot_enrich_dir = os.path.join(session_dir, "enrichment_plots")
-    if os.path.exists(plot_enrich_dir):
-        for f in os.listdir(plot_enrich_dir):
+    # Collect enrichment bar plots from enrichment_results/enrichment_plots
+    enrichment_plots_dir = os.path.join(session_dir, "enrichment_results", "enrichment_plots")
+    if os.path.exists(enrichment_plots_dir):
+        for f in sorted(os.listdir(enrichment_plots_dir)):
+            abs_path = os.path.join(enrichment_plots_dir, f)
+            rel_path = os.path.join("enrichment_results", "enrichment_plots", f)
             if f.endswith('.html'):
-                plot_paths.append(os.path.join(plot_enrich_dir, f))
+                plot_paths.append(abs_path)
+            if f.endswith('.png'):
+                # Parse plot type from filename (e.g., KEGG_2021_Human_all_regulated.png)
+                plot_name = f.replace('.png', '').replace('_', ' ')
+                plots_for_report["enrichment_bar_plots"].append({
+                    "name": plot_name,
+                    "filename": f,
+                    "relative_path": rel_path,
+                    "absolute_path": abs_path,
+                    "type": "enrichment_bar",
+                    "format": "png"
+                })
+                plots_for_report["all_plots"].append(rel_path)
     
-    # Collect KEGG plots from plots directory (HTML only)
+    # Collect KEGG pathway plots (dotplot, lollipop, combined)
     kegg_plot_dir = os.path.join(session_dir, "plots")
     if os.path.exists(kegg_plot_dir):
-        for f in os.listdir(kegg_plot_dir):
+        for f in sorted(os.listdir(kegg_plot_dir)):
+            abs_path = os.path.join(kegg_plot_dir, f)
+            rel_path = os.path.join("plots", f)
             if f.endswith('.html'):
-                plot_paths.append(os.path.join(kegg_plot_dir, f))
+                plot_paths.append(abs_path)
+            if f.endswith('.png'):
+                plot_name = f.replace('.png', '').replace('_', ' ').title()
+                plots_for_report["kegg_pathway_plots"].append({
+                    "name": plot_name,
+                    "filename": f,
+                    "relative_path": rel_path,
+                    "absolute_path": abs_path,
+                    "type": "kegg_pathway",
+                    "format": "png"
+                })
+                plots_for_report["all_plots"].append(rel_path)
     
-    print(f"[Plots] Collected {len(plot_paths)} plot files")
-    for p in plot_paths[:5]:
-        print(f"  - {p}")
-    if len(plot_paths) > 5:
-        print(f"  ... and {len(plot_paths) - 5} more")
+    # Print summary
+    print(f"[Plots] Collected plots for report:")
+    print(f"  - Volcano plots: {len(plots_for_report['volcano_plots'])}")
+    print(f"  - Enrichment bar plots: {len(plots_for_report['enrichment_bar_plots'])}")
+    print(f"  - KEGG pathway plots: {len(plots_for_report['kegg_pathway_plots'])}")
+    print(f"  - Total PNG plots: {len(plots_for_report['all_plots'])}")
+    print(f"  - HTML interactive: {len(plot_paths)}")
     
     # ===========================================================================
     # Compress and cleanup large .npy files in background (don't block workflow)
@@ -754,7 +802,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         "analysis_success": analysis_success,
         "kegg_success": kegg_success,
         "analysis_paths": analysis_paths,
-        "plot_paths": plot_paths,  # Add collected plot paths
+        "plot_paths": plot_paths,  # HTML paths for backward compatibility
+        "plots_for_report": plots_for_report,  # Categorized plots with relative paths for embedding
         "message": f"Successfully retrieved {metadata.shape[0] if metadata is not None else 0} samples",
         "timing": {
             "ner": times['ner_end'] - times['start'],

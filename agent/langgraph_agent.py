@@ -100,6 +100,22 @@ def extract_text_from_llm_response(content) -> str:
 # STATE DEFINITIONS
 # ==============================================================================
 
+# Pydantic models for structured LLM output (more robust than JSON parsing)
+from pydantic import BaseModel, Field
+from typing import List as PyList
+
+class PlannedTask(BaseModel):
+    """A single task in the research plan"""
+    id: str = Field(description="Unique task identifier like task_1, task_2, etc.")
+    description: str = Field(description="Detailed description of what this task should accomplish")
+    assigned_agent: str = Field(description="Agent to execute this task: OmicMiningAgent, BioMarkerKGAgent, PubMedResearcher, ScientistRAGExpert, or GoogleSearcher")
+
+class ResearchPlan(BaseModel):
+    """Structured research plan output"""
+    analysis: str = Field(description="Brief analysis of the query and research strategy")
+    tasks: PyList[PlannedTask] = Field(description="List of tasks to execute in order")
+
+
 class SubTask(TypedDict):
     """Represents a single sub-task in the plan"""
     id: str
@@ -930,61 +946,77 @@ You will provide structured data and relationships from the knowledge graph to e
         return workflow.compile()
     
     async def _planning_node(self, state: AgentState) -> Dict[str, Any]:
-        """Create initial plan for the query"""
+        """Create initial plan for the query using structured output"""
         print("\n📋 PLANNING PHASE")
         print("=" * 60)
         
-        planning_prompt = f"""Create a research plan for this query:
+        planning_prompt = f"""Create a comprehensive research plan for hypothesis-driven discovery:
 
 Query: {state['query']}
 
-Available Agents:
-1. OmicMiningAgent - Differential expression analysis (ALWAYS FIRST - returns sample counts, DEG rankings)
-2. BioMarkerKGAgent - Knowledge graph for gene neighbors (drugs, pathways, GO terms)
-3. PubMedResearcher - Literature search for disease/gene targets
-4. ScientistRAGExpert - Hypothesis generation and mechanism synthesis
-5. GoogleSearcher - Clinical context and recent developments
+**Goal**: Generate thorough Gene→Pathway→Phenotype grounded hypotheses with literature validation.
 
-Recommended workflow:
-- Step 1: OmicMiningAgent → Get DEGs with statistics
-- Step 2: BioMarkerKGAgent → Find KG neighbors of top DEGs  
-- Step 3: PubMedResearcher → Literature on top targets
-- Step 4: ScientistRAGExpert → Synthesize mechanisms/hypotheses
+**Available Agents & Capabilities:**
+1. **OmicMiningAgent** - Differential expression analysis 
+   - Returns: sample counts, DEG rankings, log2FC, p-values, volcano plots
+   - ALWAYS run FIRST to ground analysis in actual expression data
+   
+2. **BioMarkerKGAgent** - Knowledge graph traversal for gene neighbors
+   - Returns: drug interactions, pathway memberships, GO terms, protein interactors
+   - Query for TOP 10-15 DEGs to build gene-pathway-phenotype chains
+   
+3. **PubMedResearcher** - Literature search & citation mining
+   - Returns: relevant publications, existing hypotheses, experimental evidence
+   - Search BOTH: (a) disease-specific papers AND (b) gene-mechanism papers
+   - Helps classify hypotheses as confirmatory vs novel
+   
+4. **ScientistRAGExpert** - Hypothesis generation & mechanism synthesis  
+   - Returns: mechanistic hypotheses, network descriptions, validation strategies
+   - Synthesizes omics + KG + literature into testable hypotheses
 
-Output ONLY valid JSON:
-{{"analysis": "brief analysis", "tasks": [{{"id": "task_1", "description": "description", "assigned_agent": "AgentName", "depends_on": []}}]}}"""
+5. **GoogleSearcher** - Clinical/translational context
+   - Returns: clinical trials, recent developments, therapeutic landscape
+   - Grounds hypotheses in translational relevance
+
+**Mandatory Workflow (for hypothesis-quality reports):**
+- Step 1: OmicMiningAgent → Get DEGs with statistics (establishes data foundation)
+- Step 2: BioMarkerKGAgent → Query top 10-15 DEGs for KG neighbors (builds gene→pathway chains)
+- Step 3: PubMedResearcher → Literature on TOP targets AND pathways (validates & classifies novelty)
+- Step 4: ScientistRAGExpert → Synthesize mechanisms, score hypotheses, propose experiments
+
+**Planning Principles:**
+- Be THOROUGH: Query KG for multiple gene sets (up-regulated, down-regulated, top-ranked)
+- Be GROUNDED: Every hypothesis must trace to specific gene(s) in the omics data
+- Be NOVEL-SEEKING: Literature search should identify what is KNOWN vs what is NEW
+- Be ACTIONABLE: Plan should enable proposing specific validation experiments"""
         
-        response = await self.llm.ainvoke([
-            SystemMessage(content="You are a research planner. Output ONLY valid JSON, no markdown code blocks."),
-            HumanMessage(content=planning_prompt)
-        ])
-        
-        # Parse the plan
+        # Try structured output first (more robust)
         try:
-            # Extract text from response using helper function
-            content = extract_text_from_llm_response(response.content)
+            structured_llm = self.llm.with_structured_output(ResearchPlan)
+            plan_result: ResearchPlan = await structured_llm.ainvoke([
+                SystemMessage(content="""You are an expert research planner for biomedical hypothesis discovery. 
+Create thorough plans that:
+1. Ground ALL hypotheses in actual omics data
+2. Build explicit Gene→Pathway→Phenotype chains via knowledge graphs
+3. Validate novelty through comprehensive literature search
+4. Enable specific, testable experimental proposals"""),
+                HumanMessage(content=planning_prompt)
+            ])
             
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
-                content = content.split("```")[1].split("```")[0]
-            
-            plan_data = json.loads(content)
-            
+            # Convert Pydantic model to SubTask list
             tasks = []
-            for task in plan_data.get("tasks", []):
+            for planned_task in plan_result.tasks:
                 tasks.append(SubTask(
-                    id=task["id"],
-                    description=task["description"],
-                    assigned_agent=task["assigned_agent"],
+                    id=planned_task.id,
+                    description=planned_task.description,
+                    assigned_agent=planned_task.assigned_agent,
                     status="pending",
                     result=None,
                     error=None,
                     attempts=0
                 ))
             
-            print(f"📝 Created plan with {len(tasks)} tasks:")
+            print(f"📝 Created plan with {len(tasks)} tasks (structured output):")
             for task in tasks:
                 print(f"   - {task['id']}: {task['description'][:50]}... ({task['assigned_agent']})")
             
@@ -992,7 +1024,7 @@ Output ONLY valid JSON:
             process_entry = {
                 "phase": "planning",
                 "timestamp": datetime.now().isoformat(),
-                "analysis": plan_data.get("analysis", ""),
+                "analysis": plan_result.analysis,
                 "tasks_created": len(tasks)
             }
             
@@ -1004,58 +1036,113 @@ Output ONLY valid JSON:
                 "messages": [AIMessage(content=f"Plan created with {len(tasks)} tasks")]
             }
             
-        except json.JSONDecodeError as e:
-            print(f"⚠️ Error parsing plan: {e}")
-            print(f"⚠️ Raw response content: {content[:500] if content else 'EMPTY'}")
-            # Create default 4-step workflow
-            default_tasks = [
-                SubTask(
-                    id="task_1",
-                    description=f"Step 1: Differential expression analysis to identify DEGs for: {state['query']}",
-                    assigned_agent="OmicMiningAgent",
-                    status="pending",
-                    result=None,
-                    error=None,
-                    attempts=0
-                ),
-                SubTask(
-                    id="task_2",
-                    description=f"Step 2: Query knowledge graph for gene neighbors (drugs, pathways, GO terms)",
-                    assigned_agent="BioMarkerKGAgent",
-                    status="pending",
-                    result=None,
-                    error=None,
-                    attempts=0
-                ),
-                SubTask(
-                    id="task_3",
-                    description=f"Step 3: Literature search for top DEGs and disease targets",
-                    assigned_agent="PubMedResearcher",
-                    status="pending",
-                    result=None,
-                    error=None,
-                    attempts=0
-                ),
-                SubTask(
-                    id="task_4",
-                    description=f"Step 4: Synthesize findings and generate mechanistic hypotheses",
-                    assigned_agent="ScientistRAGExpert",
-                    status="pending",
-                    result=None,
-                    error=None,
-                    attempts=0
-                )
-            ]
-            print(f"📝 Created default 4-step plan:")
-            for task in default_tasks:
-                print(f"   - {task['id']}: {task['description'][:60]}... ({task['assigned_agent']})")
-            return {
-                "plan": default_tasks,
-                "current_task_index": 0,
-                "status": "executing",
-                "process_log": state.get("process_log", []) + [{"phase": "planning", "error": str(e), "fallback": "default_4step"}],
-                "messages": [AIMessage(content="Created default 4-step workflow")]
-            }
+        except Exception as e:
+            print(f"⚠️ Structured output failed: {e}, falling back to JSON parsing")
+            
+            # Fallback to JSON parsing
+            try:
+                response = await self.llm.ainvoke([
+                    SystemMessage(content="You are a research planner. Output ONLY valid JSON, no markdown."),
+                    HumanMessage(content=planning_prompt + '\n\nOutput JSON: {"analysis": "...", "tasks": [{"id": "task_1", "description": "...", "assigned_agent": "AgentName"}]}')
+                ])
+                
+                content = extract_text_from_llm_response(response.content)
+                
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0]
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0]
+                
+                plan_data = json.loads(content)
+            
+                tasks = []
+                for task in plan_data.get("tasks", []):
+                    tasks.append(SubTask(
+                        id=task["id"],
+                        description=task["description"],
+                        assigned_agent=task["assigned_agent"],
+                        status="pending",
+                        result=None,
+                        error=None,
+                        attempts=0
+                    ))
+                
+                print(f"📝 Created plan with {len(tasks)} tasks (JSON fallback):")
+                for task in tasks:
+                    print(f"   - {task['id']}: {task['description'][:50]}... ({task['assigned_agent']})")
+                
+                # Log the planning
+                process_entry = {
+                    "phase": "planning",
+                    "timestamp": datetime.now().isoformat(),
+                    "analysis": plan_data.get("analysis", ""),
+                    "tasks_created": len(tasks)
+                }
+                
+                return {
+                    "plan": tasks,
+                    "current_task_index": 0,
+                    "status": "executing",
+                    "process_log": state.get("process_log", []) + [process_entry],
+                    "messages": [AIMessage(content=f"Plan created with {len(tasks)} tasks")]
+                }
+                
+            except (json.JSONDecodeError, KeyError) as json_err:
+                print(f"⚠️ JSON parsing also failed: {json_err}")
+                # Fall through to default plan below
+        
+        # Default 4-step workflow (used when both structured and JSON parsing fail)
+        print("📝 Using default 4-step research plan")
+        default_tasks = [
+            SubTask(
+                id="task_1",
+                description=f"Perform differential expression analysis for: {state['query']}",
+                assigned_agent="OmicMiningAgent",
+                status="pending",
+                result=None,
+                error=None,
+                attempts=0
+            ),
+            SubTask(
+                id="task_2",
+                description="Query knowledge graph for gene neighbors (drugs, pathways, GO terms) of top DEGs",
+                assigned_agent="BioMarkerKGAgent",
+                status="pending",
+                result=None,
+                error=None,
+                attempts=0
+            ),
+            SubTask(
+                id="task_3",
+                description="Literature search for top DEGs and disease targets",
+                assigned_agent="PubMedResearcher",
+                status="pending",
+                result=None,
+                error=None,
+                attempts=0
+            ),
+            SubTask(
+                id="task_4",
+                description="Synthesize findings and generate mechanistic hypotheses",
+                assigned_agent="ScientistRAGExpert",
+                status="pending",
+                result=None,
+                error=None,
+                attempts=0
+            )
+        ]
+        
+        print(f"📝 Created default plan with {len(default_tasks)} tasks:")
+        for task in default_tasks:
+            print(f"   - {task['id']}: {task['description'][:50]}... ({task['assigned_agent']})")
+        
+        return {
+            "plan": default_tasks,
+            "current_task_index": 0,
+            "status": "executing",
+            "process_log": state.get("process_log", []) + [{"phase": "planning", "fallback": "default_4step"}],
+            "messages": [AIMessage(content="Created default 4-step workflow")]
+        }
     
     async def _execution_node(self, state: AgentState) -> Dict[str, Any]:
         """Execute the current task in the plan"""
@@ -1360,6 +1447,7 @@ Respond in JSON format:
 - **Top DEGs Table** (ranked by p-value/FDR): Show top 10-15 genes with:
   | Rank | Gene | log2FC | FDR | Direction |
 - Note: Full gene list saved to differential_expression/ folder
+- **Embed volcano plot** if available using: ![Volcano Plot](volcano_plots/volcano_plot.png)
 
 ### Step 2: Knowledge Graph Analysis  
 - First-neighbor nodes of top DEGs from knowledge graph
@@ -1371,41 +1459,107 @@ Respond in JSON format:
 - **Intersection Table**: Genes supported by both omics and literature
 - For each validated target: brief literature summary with citations
 
-### Step 4: Mechanistic Hypotheses
-- Proposed molecular mechanisms based on integrated evidence
-- **Mechanism Network**: Describe causal relationships between:
-  - Key genes → pathways → phenotypes
-  - Drug targets → mechanisms → therapeutic effects
-- Present as a conceptual network/pathway diagram description
+### Step 4: Pathway Enrichment Analysis
+- Summarize top enriched pathways (KEGG, Reactome, GO)
+- **Embed pathway plots** if available:
+  - ![KEGG Dotplot](plots/kegg_dotplot.png)
+  - ![Pathway Combined](plots/pathway_combined_plot.png)
+- Discuss biological significance of enriched pathways
 
-### Step 5: Conclusions
-- Key actionable findings
-- Suggested experimental validations
+### Step 5: Gene-Anchored Mechanistic Hypotheses (REQUIRED FORMAT)
+
+Generate 3-5 ranked hypotheses. **EACH hypothesis MUST include**:
+
+**5.1 Hypothesis Structure (for each)**
+| Field | Required Content |
+|-------|------------------|
+| **Rank & Title** | e.g., "Rank 1: BDP1-Driven Translational Reprogramming" |
+| **Gene Anchor(s)** | At least 1 gene symbol (e.g., BDP1, COX7C, FKBP1A) |
+| **Pathway/Module** | Named pathway (e.g., RNA Pol III transcription, oxidative phosphorylation, mTOR signaling) |
+| **Mechanistic Chain** | Gene → Pathway dysregulation → Intermediate biology → Phenotype |
+| **Total Score** | X/100 using rubric below |
+
+**5.2 Scoring Rubric (compute for each hypothesis)**
+- **Fit-to-Evidence (0-30)**: How well does it explain the omics findings (DEGs, enrichment)?
+- **Mechanistic Plausibility (0-20)**: Biological coherence with known pathways
+- **Testability (0-15)**: Clear predictions; accessible validation methods
+- **Novelty (0-10)**: Beyond generic findings; what's NEW vs. literature?
+- **Clinical/Research Impact (0-10)**: Would this change treatment strategy or research direction?
+- **Parsimony (0-5)**: Explains more with fewer assumptions
+- **Low Confounding Risk (0-10)**: Start at 10, subtract for major confounders
+
+**5.3 For Each Hypothesis, Provide**:
+1. **Mechanism** (2-4 sentences, causal chain style)
+2. **Predictions** (3-5 falsifiable predictions including at least one omics signature)
+3. **Validation Plan**:
+   - *Computational*: DE signature scoring, pathway enrichment, network analysis
+   - *In vitro*: CRISPR knockdown/activation, reporter assays, drug screens
+   - *Ex vivo*: Patient organoids, tissue explants
+   - *In vivo*: Xenografts, genetic mouse models
+4. **Supporting Evidence**: Cite specific findings from our analysis AND mined literature
+5. **Contradicting Evidence / Gaps**: What challenges this hypothesis?
+6. **Novelty Statement**: 
+   - What is ALREADY KNOWN (cite literature)
+   - What GAP exists (what papers don't connect)
+   - What NEW LINK you propose
+   - Why it's ACTIONABLE (new target, biomarker, stratification)
+
+**5.4 Critical Assessment**
+- **Key Assumptions**: What must be true for each hypothesis? Which are untested?
+- **Knowledge Gaps**: What additional data would strengthen conclusions?
+- **Limitations**: Sample size, cell heterogeneity, batch effects, etc.
+- **Confounders**: Stromal contamination, treatment history, cohort bias
+
+**5.5 Top 3 Minimal Validation Actions**
+Prioritized list of the most information-gaining experiments/analyses that could quickly validate or refute top hypotheses.
+
+### Step 6: Conclusions
+- Key actionable findings (ranked by confidence and impact)
+- Immediate next steps for experimental validation
 - References (with DOI/PMID)
 
 ## KEY REQUIREMENTS:
 - Use tables for gene lists (keep them concise)
+- EMBED plots using markdown: ![Title](relative_path.png)
 - Emphasize INTERSECTION of evidence sources
 - Generate testable hypotheses with mechanism descriptions
 - All citations must include DOI or PMID
 """
         
         response = await self.llm.ainvoke([
-            SystemMessage(content="""You are an expert biomedical research synthesizer. Generate structured reports that:
-1. Summarize omics findings with statistics (samples, DEG counts)
+            SystemMessage(content="""You are an expert biomedical research synthesizer specializing in gene-pathway-anchored hypothesis generation. 
+
+**Core Synthesis Capabilities:**
+1. Summarize omics findings with statistics (samples, DEG counts, effect sizes)
 2. Show ranked gene tables (top 10-15, note full list in files)
-3. Integrate knowledge graph neighbors (drugs, pathways, GO)
-4. Identify literature-validated targets (intersection analysis)
-5. Propose mechanistic hypotheses with network descriptions
-Keep tables concise. Focus on actionable insights."""),
+3. EMBED plots using markdown syntax: ![Title](relative_path.png)
+   - Volcano plots: ![Volcano Plot](volcano_plots/volcano_plot.png)
+   - KEGG plots: ![KEGG Dotplot](plots/kegg_dotplot.png)
+   - Enrichment plots: ![Enrichment](enrichment_results/enrichment_plots/filename.png)
+
+**Advanced Hypothesis Framework (MedHypoRank-GenePath):**
+- Generate 8-15 gene-pathway-anchored hypotheses per report
+- Each hypothesis MUST: anchor to specific Gene(s)→Pathway(s)→Phenotype chain
+- Score each hypothesis (0-100) using subscores: Novelty(20), Literature(15), Mechanism(20), Feasibility(15), Significance(15), Data(10), Cross-validation(5)
+- Distinguish: 1=confirmatory (existing literature), 2=incremental extension, 3=novel discovery
+- For novel hypotheses: justify what makes them NEW vs existing literature
+- Propose specific validation experiments: In-Vitro (cell lines, assays) → In-Vivo (animal models) → Translational (patient samples)
+
+**Scoring Rubric:**
+- 0-30: Weak support, speculative
+- 31-60: Moderate support, some mechanistic basis
+- 61-80: Strong support, clear mechanism, testable
+- 81-100: Exceptional, multiple converging evidence lines, high clinical potential
+
+Keep tables concise. Prioritize actionable, testable hypotheses over confirmatory observations."""),
             HumanMessage(content=reporting_prompt)
         ])
         
         # Extract text from response using helper function
         report = extract_text_from_llm_response(response.content)
         
-        # Save the report
-        report_path = self._save_report(state["query"], report)
+        # Save the report with appendix and generate PDF
+        report_path = self._save_report(state["query"], report, state=state)
         
         print(f"📄 Report generated ({len(report)} characters)")
         if report_path:
@@ -1455,8 +1609,278 @@ Keep tables concise. Focus on actionable insights."""),
             return "report"
         return "execute"
     
-    def _save_report(self, query: str, report: str) -> Optional[str]:
-        """Save the report to a file"""
+    def _generate_appendix(self, state: AgentState) -> str:
+        """Generate appendix section with state metadata and detailed outputs"""
+        appendix_parts = []
+        appendix_parts.append("\n\n---\n\n# Appendix\n")
+        
+        # A1: Session Information
+        appendix_parts.append("## A1. Session Information\n\n")
+        appendix_parts.append(f"- **Session ID**: `{state.get('session_id', 'N/A')}`\n")
+        appendix_parts.append(f"- **Generated At**: {datetime.now().isoformat()}\n")
+        appendix_parts.append(f"- **Query**: {state.get('query', 'N/A')}\n\n")
+        
+        # A2: Execution Plan
+        plan = state.get("plan", [])
+        if plan:
+            appendix_parts.append("## A2. Execution Plan\n\n")
+            appendix_parts.append("| Step | Task ID | Agent | Description | Status |\n")
+            appendix_parts.append("|------|---------|-------|-------------|--------|\n")
+            for i, task in enumerate(plan, 1):
+                task_id = task.get('id', f'task_{i}')
+                agent = task.get('assigned_agent', 'Unknown')
+                description = task.get('description', 'N/A')
+                # Truncate long descriptions
+                if len(description) > 60:
+                    description = description[:57] + "..."
+                status = task.get('status', 'pending')
+                appendix_parts.append(f"| {i} | {task_id} | {agent} | {description} | {status} |\n")
+            appendix_parts.append("\n")
+        
+        # A3: Process Log
+        process_log = state.get("process_log", [])
+        if process_log:
+            appendix_parts.append("## A3. Process Log\n\n")
+            appendix_parts.append("```\n")
+            for entry in process_log[-50:]:  # Last 50 entries to avoid too much
+                appendix_parts.append(f"{entry}\n")
+            appendix_parts.append("```\n\n")
+        
+        # A4: Shared Data Summary
+        shared_data = state.get("shared_data", {})
+        if shared_data:
+            appendix_parts.append("## A4. Shared Data Summary\n\n")
+            
+            # Top genes - full list if available
+            top_genes = shared_data.get("top_genes", [])
+            if top_genes:
+                appendix_parts.append("### Top Differentially Expressed Genes\n\n")
+                appendix_parts.append("| # | Gene | Log2FC | FDR | Direction |\n")
+                appendix_parts.append("|---|------|--------|-----|----------|\n")
+                for i, gene in enumerate(top_genes[:50], 1):  # Top 50 genes
+                    if isinstance(gene, dict):
+                        name = gene.get('gene', gene.get('name', str(gene)))
+                        log2fc = gene.get('log2_fold_change', gene.get('log2fc', 'N/A'))
+                        fdr = gene.get('fdr', gene.get('adj_pvalue', 'N/A'))
+                        direction = gene.get('direction', 'N/A')
+                        if isinstance(log2fc, float):
+                            log2fc = f"{log2fc:.3f}"
+                        if isinstance(fdr, float):
+                            fdr = f"{fdr:.2e}"
+                        appendix_parts.append(f"| {i} | {name} | {log2fc} | {fdr} | {direction} |\n")
+                    else:
+                        appendix_parts.append(f"| {i} | {gene} | - | - | - |\n")
+                appendix_parts.append("\n")
+            
+            # Disease and cell type
+            if shared_data.get("disease"):
+                appendix_parts.append(f"**Disease Context**: {shared_data['disease']}\n\n")
+            if shared_data.get("cell_type"):
+                appendix_parts.append(f"**Cell Type**: {shared_data['cell_type']}\n\n")
+            
+            # Paper DOIs
+            paper_dois = shared_data.get("paper_dois", [])
+            if paper_dois:
+                appendix_parts.append("### Literature References (DOIs)\n\n")
+                for i, doi in enumerate(paper_dois[:20], 1):  # Top 20 DOIs
+                    appendix_parts.append(f"{i}. `{doi}`\n")
+                appendix_parts.append("\n")
+            
+            # Pathways
+            pathways = shared_data.get("pathways", [])
+            if pathways:
+                appendix_parts.append("### Enriched Pathways\n\n")
+                for i, pathway in enumerate(pathways[:20], 1):  # Top 20 pathways
+                    appendix_parts.append(f"{i}. {pathway}\n")
+                appendix_parts.append("\n")
+        
+        # A5: Agent Outputs Summary
+        agent_outputs = state.get("agent_outputs", {})
+        if agent_outputs:
+            appendix_parts.append("## A5. Agent Outputs Summary\n\n")
+            for agent_name, output in agent_outputs.items():
+                appendix_parts.append(f"### {agent_name}\n\n")
+                # Truncate long outputs but show more than in main report
+                output_str = str(output)
+                if len(output_str) > 3000:
+                    appendix_parts.append(f"```\n{output_str[:3000]}...\n[Output truncated - {len(output_str)} chars total]\n```\n\n")
+                else:
+                    appendix_parts.append(f"```\n{output_str}\n```\n\n")
+        
+        return "".join(appendix_parts)
+    
+    def _compile_pdf(self, markdown_path: str) -> Optional[str]:
+        """Compile the markdown report to PDF using available tools"""
+        try:
+            import subprocess
+            import shutil
+            
+            pdf_path = markdown_path.replace('.md', '.pdf')
+            html_path = markdown_path.replace('.md', '.html')
+            session_dir = os.path.dirname(markdown_path)
+            
+            # Check available tools
+            has_pandoc = shutil.which('pandoc')
+            has_wkhtmltopdf = shutil.which('wkhtmltopdf')
+            has_xelatex = shutil.which('xelatex')
+            has_pdflatex = shutil.which('pdflatex')
+            
+            if not has_pandoc:
+                print("⚠️ pandoc not found - skipping PDF generation")
+                print("   Install with: sudo apt-get install pandoc")
+                return None
+            
+            # Strategy 1: Try pandoc with LaTeX if available
+            if has_xelatex or has_pdflatex:
+                pdf_engine = 'xelatex' if has_xelatex else 'pdflatex'
+                cmd = [
+                    'pandoc', markdown_path, '-o', pdf_path,
+                    f'--pdf-engine={pdf_engine}',
+                    '-V', 'geometry:margin=1in',
+                    '-V', 'fontsize=11pt',
+                    '--toc', '--toc-depth=2',
+                    '--highlight-style=tango',
+                    '--resource-path', session_dir,
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, cwd=session_dir, timeout=180)
+                if result.returncode == 0:
+                    print(f"📄 PDF generated (LaTeX): {pdf_path}")
+                    return pdf_path
+                print(f"⚠️ LaTeX PDF failed, trying HTML method...")
+            
+            # Strategy 2: Pandoc → HTML → wkhtmltopdf (if available)
+            if has_wkhtmltopdf:
+                # Create a CSS file to ensure images fit within page bounds
+                css_content = """
+/* Ensure images fit within page bounds */
+img {
+    max-width: 100% !important;
+    max-height: 650px !important;
+    height: auto !important;
+    width: auto !important;
+    display: block;
+    margin: 10px auto;
+    page-break-inside: avoid;
+}
+/* Better table styling */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 15px 0;
+    font-size: 10pt;
+    page-break-inside: avoid;
+}
+th, td {
+    border: 1px solid #ddd;
+    padding: 6px 8px;
+    text-align: left;
+}
+th {
+    background-color: #f5f5f5;
+    font-weight: bold;
+}
+/* Better heading spacing */
+h1, h2, h3 {
+    page-break-after: avoid;
+    margin-top: 20px;
+}
+/* Code blocks */
+pre, code {
+    font-size: 9pt;
+    background-color: #f8f8f8;
+    border-radius: 3px;
+    overflow-x: auto;
+}
+/* Page breaks */
+.page-break {
+    page-break-before: always;
+}
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+}
+"""
+                css_path = os.path.join(session_dir, '_report_style.css')
+                with open(css_path, 'w') as f:
+                    f.write(css_content)
+                
+                # First convert to HTML with embedded images and custom CSS
+                # Use --self-contained for pandoc 2.x, --embed-resources for 3.x
+                html_cmd = [
+                    'pandoc', markdown_path, '-o', html_path,
+                    '--standalone',
+                    '--self-contained',  # Works for pandoc 2.x (--embed-resources is 3.x only)
+                    '--toc', '--toc-depth=2',
+                    '--highlight-style=tango',
+                    '-V', 'title=OmniCellAgent Analysis Report',
+                    '--resource-path', session_dir,
+                    '-c', css_path,  # Include custom CSS
+                ]
+                result = subprocess.run(html_cmd, capture_output=True, text=True, cwd=session_dir, timeout=120)
+                if result.returncode == 0:
+                    # Convert HTML to PDF
+                    pdf_cmd = [
+                        'wkhtmltopdf',
+                        '--enable-local-file-access',
+                        '--margin-top', '20mm',
+                        '--margin-bottom', '20mm',
+                        '--margin-left', '15mm',
+                        '--margin-right', '15mm',
+                        html_path, pdf_path
+                    ]
+                    result2 = subprocess.run(pdf_cmd, capture_output=True, text=True, cwd=session_dir, timeout=180)
+                    if result2.returncode == 0:
+                        print(f"📄 PDF generated (wkhtmltopdf): {pdf_path}")
+                        # Clean up intermediate files
+                        try:
+                            os.remove(html_path)
+                            os.remove(css_path)
+                        except:
+                            pass
+                        return pdf_path
+                    else:
+                        print(f"⚠️ wkhtmltopdf failed: {result2.stderr[:200] if result2.stderr else 'No error message'}")
+                else:
+                    print(f"⚠️ Pandoc HTML conversion failed: {result.stderr[:200] if result.stderr else 'No error message'}")
+                
+                # Clean up CSS file if we get here
+                try:
+                    os.remove(css_path)
+                except:
+                    pass
+                else:
+                    print(f"⚠️ Pandoc HTML conversion failed: {result.stderr[:200] if result.stderr else 'No error message'}")
+            
+            # Strategy 3: Generate standalone HTML (always works)
+            html_cmd = [
+                'pandoc', markdown_path, '-o', html_path,
+                '--standalone',
+                '--toc', '--toc-depth=2',
+                '--highlight-style=tango',
+                '-V', 'title=OmniCellAgent Analysis Report',
+                '--resource-path', session_dir,
+                '--metadata', f'date={datetime.now().strftime("%Y-%m-%d")}',
+                '-c', 'https://cdn.jsdelivr.net/npm/water.css@2/out/water.css',  # Nice CSS
+            ]
+            result = subprocess.run(html_cmd, capture_output=True, text=True, cwd=session_dir, timeout=60)
+            if result.returncode == 0:
+                print(f"📄 HTML report generated: {html_path}")
+                print("   (PDF requires: wkhtmltopdf or texlive-xetex)")
+                return html_path  # Return HTML path instead
+            
+            print(f"⚠️ Could not generate PDF or HTML: {result.stderr[:300]}")
+            return None
+                    
+        except subprocess.TimeoutExpired:
+            print("⚠️ PDF generation timed out")
+            return None
+        except Exception as e:
+            print(f"⚠️ Error generating PDF: {e}")
+            return None
+    
+    def _save_report(self, query: str, report: str, state: AgentState = None) -> Optional[str]:
+        """Save the report to a file with appendix, then compile to PDF"""
         try:
             sessions_base = get_path('sessions.base', absolute=True, create=True)
             session_dir = os.path.join(sessions_base, self.session_id)
@@ -1474,9 +1898,26 @@ query: {query}
 ---
 
 """
+            # Generate appendix from state if available
+            appendix = ""
+            if state:
+                try:
+                    appendix = self._generate_appendix(state)
+                    print("📎 Appendix generated with state metadata")
+                except Exception as e:
+                    print(f"⚠️ Could not generate appendix: {e}")
             
+            # Write full report with appendix
+            full_report = header + report + appendix
             with open(report_path, 'w', encoding='utf-8') as f:
-                f.write(header + report)
+                f.write(full_report)
+            
+            print(f"📝 Markdown report saved: {report_path}")
+            
+            # Compile to PDF
+            pdf_path = self._compile_pdf(report_path)
+            if pdf_path:
+                print(f"✅ Report available as both MD and PDF")
             
             return report_path
             

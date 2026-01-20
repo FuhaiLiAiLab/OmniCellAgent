@@ -583,8 +583,8 @@ def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5
     # =========================================================================
     # STATIC MATPLOTLIB PLOT (PNG)
     # =========================================================================
-    # Set up the figure
-    plt.figure(figsize=(12, 10))
+    # Set up the figure with better aspect ratio for volcano plots
+    fig, ax = plt.subplots(figsize=(10, 8))
     
     # Create a color map for the categories
     color_map = {'Upregulated': 'red', 'Downregulated': 'blue', 'Not Significant': 'grey'}
@@ -599,57 +599,77 @@ def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5
         alpha=0.6,
         s=50,
         edgecolor=None,
-        linewidth=0
+        linewidth=0,
+        ax=ax
     )
     
     # Add threshold lines
-    plt.axhline(y=-np.log10(p_value_threshold), linestyle='--', color='black', alpha=0.3)
-    plt.axvline(x=log2fc_threshold, linestyle='--', color='black', alpha=0.3)
-    plt.axvline(x=-log2fc_threshold, linestyle='--', color='black', alpha=0.3)
+    ax.axhline(y=-np.log10(p_value_threshold), linestyle='--', color='black', alpha=0.3)
+    ax.axvline(x=log2fc_threshold, linestyle='--', color='black', alpha=0.3)
+    ax.axvline(x=-log2fc_threshold, linestyle='--', color='black', alpha=0.3)
     
     # Identify top significant genes to label
     sig_genes = plot_df[plot_df['FDR'] < p_value_threshold].copy()
     sig_genes['importance'] = sig_genes['neg_log10_fdr'] * abs(sig_genes['log2_fold_change'])
     
-    # Get top genes to label
-    top_genes = sig_genes.sort_values('importance', ascending=False).head(highlight_top_n)
+    # Get top genes to label (limit to fewer for cleaner plot)
+    n_labels = min(highlight_top_n, 12)  # Limit labels to avoid crowding
+    top_genes = sig_genes.sort_values('importance', ascending=False).head(n_labels)
     
-    # Add labels for the top genes
-    for _, gene in top_genes.iterrows():
-        plt.text(
-            gene['log2_fold_change'], 
-            gene['neg_log10_fdr'],
+    # Calculate axis limits first (needed for label constraints)
+    max_y = min(np.nanmax(plot_df['neg_log10_fdr']), 50)
+    x_max = min(np.nanmax(abs(plot_df['log2_fold_change'])), 10)
+    
+    # Set axis limits early so adjustText respects them
+    ax.set_xlim(-x_max * 1.1, x_max * 1.1)
+    ax.set_ylim(0, max_y * 1.1)
+    
+    # Simple annotation approach - more reliable than adjustText for this use case
+    # Place labels with slight offset and white background for readability
+    for i, (_, gene) in enumerate(top_genes.iterrows()):
+        x_pos = gene['log2_fold_change']
+        y_pos = gene['neg_log10_fdr']
+        
+        # Determine text alignment based on position
+        if x_pos > 0:
+            ha = 'left'
+            x_offset = 0.15
+        else:
+            ha = 'right'
+            x_offset = -0.15
+        
+        # Stagger y offset slightly to reduce overlap
+        y_offset = 0.3 + (i % 3) * 0.2
+        
+        ax.annotate(
             gene['Name'],
-            fontsize=9,
-            ha='center',
-            va='center',
-            bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.2')
+            xy=(x_pos, y_pos),
+            xytext=(x_pos + x_offset, y_pos + y_offset),
+            fontsize=7,
+            ha=ha,
+            va='bottom',
+            fontweight='normal',
+            bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', boxstyle='round,pad=0.15'),
+            arrowprops=dict(arrowstyle='-', color='gray', alpha=0.5, lw=0.5,
+                          connectionstyle='arc3,rad=0.1')
         )
         
     # Set plot labels and title
-    plt.xlabel('log2 Fold Change', fontsize=14)
-    plt.ylabel('-log10(FDR)', fontsize=14)
-    plt.title(f"{plot_title}\n(Up: {n_up}, Down: {n_down}, FDR < {p_value_threshold}, |log2FC| > {log2fc_threshold})", 
-              fontsize=16)
+    ax.set_xlabel('log2 Fold Change', fontsize=12)
+    ax.set_ylabel('-log10(FDR)', fontsize=12)
+    ax.set_title(f"{plot_title}\n(Up: {n_up}, Down: {n_down}, FDR < {p_value_threshold}, |log2FC| > {log2fc_threshold})", 
+              fontsize=12, pad=10)
     
     # Add a legend
-    plt.legend(title='Differential Expression', loc='lower right', frameon=True)
+    ax.legend(title='Differential Expression', loc='lower right', frameon=True, fontsize=9)
     
     # Customize the plot
-    plt.grid(True, linestyle='--', alpha=0.3)
-    
-    # Adjust axes to show the most interesting region
-    max_y = min(np.nanmax(plot_df['neg_log10_fdr']), 50)
-    plt.ylim(0, max_y * 1.05)
-    
-    x_max = min(np.nanmax(abs(plot_df['log2_fold_change'])), 10)
-    plt.xlim(-x_max * 1.05, x_max * 1.05)
+    ax.grid(True, linestyle='--', alpha=0.3)
     
     # Save the PNG plot
-    plt.tight_layout()
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
+    fig.savefig(save_path, dpi=150, bbox_inches='tight', pad_inches=0.2, facecolor='white')
+    plt.close(fig)
     print(f"Volcano plot (PNG) saved to {save_path}")
     
     # =========================================================================
@@ -730,6 +750,15 @@ def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5
         html_path = save_path.replace('.png', '.html')
         fig.write_html(html_path, include_plotlyjs='cdn')
         print(f"Volcano plot (HTML) saved to {html_path}")
+        
+        # Also export a high-quality PNG from Plotly (better than matplotlib for this)
+        # This will be used in the PDF report
+        try:
+            # Use kaleido for static export if available
+            fig.write_image(save_path, width=1200, height=960, scale=2)
+            print(f"Volcano plot (PNG from Plotly) saved to {save_path}")
+        except Exception as e:
+            print(f"Note: Could not export PNG from Plotly ({e}), using matplotlib version")
         
     except ImportError:
         print("Warning: plotly not installed. Skipping interactive HTML volcano plot.")
