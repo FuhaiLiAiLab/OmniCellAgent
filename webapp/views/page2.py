@@ -66,33 +66,16 @@ layout = dbc.Container([
     dcc.Store(id='session-id', storage_type='session'),
     dcc.Interval(id='message-updater', interval=3000, n_intervals=0, disabled=False),
     
-    # Title Section
-    html.Div([
-        html.Span("Multi-Agentic System for Single-Cell Omics Research", 
-                 style={'color': '#ffb74d', 'font-size': '30px', 'font-weight': '600', 'font-family': 'Times New Roman, serif'}),
-        html.Span([
-            html.Span(" by "),
-            html.A("FuhaiLiAiLab", 
-                   href="https://profiles.wustl.edu/en/persons/fuhai-li", 
-                   target="_blank",
-                   style={'color': '#4b225c', 'text-decoration': 'none'}),
-            html.Span(" | "),
-            html.A("GitHub", 
-                   href="https://github.com/fuhailiailab", 
-                   target="_blank",
-                   style={'color': '#4b225c', 'text-decoration': 'none'})
-        ], style={'color': '#4b225c', 'font-size': '22px', 'font-style': 'italic', 'font-family': 'Times New Roman, serif', 'margin-left': '20px'})
-    ], style={'display': 'flex', 'justify-content': 'flex-start', 'align-items': 'center', 'margin': '20px 0 15px 0'}),
-
-    # Main Content Area
+    # Main Content Area - title is now in navbar
     dbc.Row([
         # Left Panel - Final Results
         dbc.Col([
             html.Div([
-                html.H4("📝 Final Results", style={'margin-bottom': '15px', 'color': '#4b225c'}),
+                html.H4("📝 Final Results", style={'margin-bottom': '15px', 'color': '#5d4037', 
+                        'font-family': 'Georgia, Cambria, serif'}),
                 html.Div(id='final-results-content', children=[
                     html.P("Results will appear here after processing...", 
-                          style={'color': '#6c757d', 'font-style': 'italic'})
+                          style={'color': '#8d6e63', 'font-style': 'italic', 'font-family': 'Georgia, serif'})
                 ])
             ], className='results-panel')
         ], width=6),
@@ -101,83 +84,98 @@ layout = dbc.Container([
         dbc.Col([
             html.Div([
                 html.Div([
-                    html.H4("🔧 Step-wise Process Details", style={'margin-bottom': '15px', 'color': '#4b225c', 'display': 'inline-block'}),
+                    html.H4("🔧 Step-wise Process Details", style={'margin-bottom': '15px', 'color': '#5d4037', 
+                            'display': 'inline-block', 'font-family': 'Georgia, Cambria, serif'}),
                     html.Div([
                         dbc.Button("Expand All", id='expand-all-button', n_clicks=0, 
                                   color='light', size='sm', 
-                                  style={'margin-right': '5px', 'border-radius': '0', 'font-size': '0.8rem'}),
+                                  style={'margin-right': '5px', 'border-radius': '0', 'font-size': '13px',
+                                         'background-color': '#efebe9', 'border-color': '#d7ccc8', 'color': '#5d4037',
+                                         'font-family': 'Georgia, serif'}),
                         dbc.Button("Collapse All", id='collapse-all-button', n_clicks=0, 
                                   color='light', size='sm', 
-                                  style={'border-radius': '0', 'font-size': '0.8rem'})
+                                  style={'border-radius': '0', 'font-size': '13px',
+                                         'background-color': '#efebe9', 'border-color': '#d7ccc8', 'color': '#5d4037',
+                                         'font-family': 'Georgia, serif'})
                     ], style={'float': 'right', 'margin-top': '10px'})
                 ], style={'overflow': 'hidden', 'margin-bottom': '15px'}),
                 html.Div(id='process-details-content', children=[
                     html.P("Process steps will appear here during execution...", 
-                          style={'color': '#6c757d', 'font-style': 'italic'})
+                          style={'color': '#8d6e63', 'font-style': 'italic', 'font-family': 'Georgia, serif'})
                 ])
             ], className='process-panel')
         ], width=6)
-    ], style={'margin-bottom': '20px'}),
+    ], style={'margin-bottom': '10px'}),
     
-    # Input Section with Team Config
+    # Input Section with Team Config - clean, minimal styling
     html.Div([
         dbc.Row([
-            # Team Configuration
+            # Team Configuration - left aligned, compact
             dbc.Col([
-                html.Div([
-                    html.Label("Team Configuration:", style={'font-weight': 'bold', 'margin-bottom': '8px', 'font-size': '0.9rem'}),
-                    dcc.RadioItems(
-                        id='team-type-selector',
-                        options=[
-                            # {'label': ' Simple Assistant', 'value': 'simple'},
-                            {'label': ' AutoGen Research Team', 'value': 'magentic'},
-                            {'label': ' LangGraph Research Team', 'value': 'langgraph'}
-                        ],
-                        value='langgraph',
-                        inline=False,
-                        style={'font-size': '0.85rem'}
-                    )
-                ], className='team-config')
-            ], width=3),
+                html.Label("Team:", style={'font-weight': '500', 'margin-bottom': '5px', 
+                           'font-size': '13px', 'font-family': 'Georgia, serif', 'color': '#5d4037', 'display': 'block'}),
+                dcc.RadioItems(
+                    id='team-type-selector',
+                    options=[
+                        {'label': ' AutoGen', 'value': 'magentic'},
+                        {'label': ' LangGraph', 'value': 'langgraph'}
+                    ],
+                    value='langgraph',
+                    inline=False,
+                    style={'font-size': '13px', 'font-family': 'Georgia, serif', 'color': '#5d4037'}
+                )
+            ], width=2, style={'padding-top': '5px'}),
             
-            # Text Input
+            # Text Input - no border, clean
             dbc.Col([
                 dcc.Textarea(
                     id='user-input',
                     placeholder='Enter your bio-medical research question or task...',
                     style={
                         'width': '100%', 
-                        'height': '120px',
+                        'height': '130px',
                         'resize': 'vertical',
-                        'border': '1px solid #e0e0e0',
+                        'border': 'none',
+                        'border-bottom': '1px solid #d7ccc8',
                         'border-radius': '0',
-                        'padding': '10px',
-                        'font-family': 'Times New Roman, Times, serif',
-                        'color': '#4b225c'
+                        'padding': '8px 0',
+                        'font-family': 'Georgia, serif',
+                        'font-size': '14px',
+                        'color': '#5d4037',
+                        'outline': 'none',
+                        'background': 'transparent'
                     }
                 )
-            ], width=7),
+            ], width=8),
             
-            # Action Buttons
+            # Action Buttons - compact, muted colors
             dbc.Col([
                 dbc.Button('Send', id='send-button', n_clicks=0, 
-                          color='primary', size='lg', 
-                          style={'width': '100%', 'height': '40px', 'margin-bottom': '5px', 'border-radius': '0'}),
+                          color='primary', size='sm', 
+                          style={'width': '100%', 'height': '32px', 'margin-bottom': '3px', 'border-radius': '0',
+                                 'background-color': '#6b8e9f', 'border-color': '#5a7d8e', 
+                                 'font-family': 'Georgia, serif', 'font-size': '13px'}),
                 dbc.Button('Stop', id='stop-button', n_clicks=0, 
                           color='danger', size='sm', 
-                          style={'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '0'}),
-                dbc.Button('New Session', id='new-chat-button', n_clicks=0, 
+                          style={'width': '100%', 'height': '32px', 'margin-bottom': '3px', 'border-radius': '0',
+                                 'background-color': '#c9a0a0', 'border-color': '#b89090', 
+                                 'font-family': 'Georgia, serif', 'font-size': '13px'}),
+                dbc.Button('New', id='new-chat-button', n_clicks=0, 
                           color='secondary', size='sm', 
-                          style={'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '0'}),
-                dbc.Button('📥 Download Session', id='download-session-button', n_clicks=0, 
+                          style={'width': '100%', 'height': '32px', 'margin-bottom': '3px', 'border-radius': '0',
+                                 'background-color': '#a8a8a8', 'border-color': '#989898', 
+                                 'font-family': 'Georgia, serif', 'font-size': '13px'}),
+                dbc.Button('📥 Save', id='download-session-button', n_clicks=0, 
                           color='success', size='sm', 
-                          style={'width': '100%', 'height': '35px', 'border-radius': '0'}),
+                          style={'width': '100%', 'height': '32px', 'border-radius': '0',
+                                 'background-color': '#8fa888', 'border-color': '#7f9878', 
+                                 'font-family': 'Georgia, serif', 'font-size': '13px'}),
                 dcc.Download(id='download-session-zip')
             ], width=2)
-        ])
-    ], className='input-section')
+        ], align='start')
+    ], style={'padding': '10px 0'})
     
-], fluid=True, style={'max-width': '1400px'}, className="mt-4")
+], fluid=True, style={'max-width': '98%', 'padding': '10px 20px'})
 
 ###############################################################################
 ########### AGENT PAGE CALLBACKS - BioRAG UI Functionality ###########

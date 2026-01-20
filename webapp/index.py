@@ -18,10 +18,42 @@ from webapp.views import login, error, page1, page2, profile, user_admin, landin
 navBar = dbc.Navbar(
     children=[
         dbc.Container([
-            dbc.NavbarBrand("agent.omni-cells.com", href="/", className="ms-2"),
+            html.Div([
+                # Left: OmniCellAgent title
+                html.Span("OmniCellAgent", 
+                         style={'font-family': 'Palatino Linotype, Palatino, Book Antiqua, Georgia, serif', 
+                                'font-size': '28px', 'font-weight': '600', 'letter-spacing': '2px',
+                                'color': '#fff'}),
+                # Vertical bar separator
+                html.Span("|", style={'color': 'rgba(255,255,255,0.4)', 'margin': '0 15px', 'font-size': '28px', 
+                                      'font-weight': '300'}),
+                # Right: Stacked subtitle and links
+                html.Div([
+                    html.Div("Multi-Agentic System for Single-Cell Omics Research", 
+                            style={'color': 'rgba(255,255,255,0.85)', 'font-size': '13px', 
+                                   'font-family': 'Georgia, Cambria, serif', 'letter-spacing': '0.5px'}),
+                    html.Div([
+                        html.Span("by ", style={'color': 'rgba(255,255,255,0.5)', 'font-size': '11px', 
+                                                'font-family': 'Georgia, serif', 'font-style': 'italic'}),
+                        html.A("FuhaiLiAiLab", href="https://fuhailiailab.github.io", target="_blank",
+                               style={'color': 'rgba(255,255,255,0.7)', 'font-size': '11px', 
+                                      'font-family': 'Georgia, serif', 'text-decoration': 'none', 
+                                      'font-style': 'italic'}),
+                        html.Span(" | ", style={'color': 'rgba(255,255,255,0.4)', 'font-size': '11px'}),
+                        html.A("GitHub", href="https://github.com/FuhaiLiAiLab/OmniCellAgent", target="_blank",
+                               style={'color': 'rgba(255,255,255,0.7)', 'font-size': '11px', 
+                                      'font-family': 'Georgia, serif', 'text-decoration': 'none', 
+                                      'font-style': 'italic'})
+                    ], style={'margin-top': '2px'})
+                ], style={'display': 'inline-block', 'vertical-align': 'middle'})
+            ], style={'display': 'flex', 'align-items': 'center'}),
             dbc.NavbarToggler(id="navbar-toggler"),
             dbc.Collapse(
-                dbc.Nav(
+                dbc.Nav([
+                    dbc.NavLink("Agent", href="/page2", className="nav-link",
+                               style={'color': 'rgba(255,255,255,0.9)', 'font-family': 'Georgia, serif', 
+                                      'font-size': '14px'})
+                ],
                     id='navBar',
                     className="ms-auto",
                     navbar=True,
@@ -29,12 +61,12 @@ navBar = dbc.Navbar(
                 id="navbar-collapse",
                 navbar=True,
             ),
-        ])
+        ], fluid=True)
     ],
-    color="primary",
     dark=True,
     sticky="top",
-    className='navbar navbar-expand-lg navbar-dark bg-primary',
+    style={'background': 'linear-gradient(135deg, #5d4037 0%, #4e342e 50%, #3e2723 100%)',
+           'padding': '10px 20px', 'box-shadow': '0 2px 8px rgba(0,0,0,0.15)'}
 )
 
 

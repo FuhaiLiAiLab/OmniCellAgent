@@ -7695,8 +7695,8 @@ a.text-dark:hover, a.text-dark:focus {
   border: 1px solid #e0e0e0;
   border-radius: 0;
   padding: 15px;
-  min-height: 450px;
-  max-height: 450px;
+  height: calc(100vh - 280px);
+  min-height: 250px;
   overflow-y: auto;
   box-shadow: 0 2px 8px rgba(75, 34, 92, 0.08);
   font-family: "Times New Roman", Times, serif;
@@ -7761,8 +7761,8 @@ a.text-dark:hover, a.text-dark:focus {
   border: 1px solid #e0e0e0;
   border-radius: 0;
   padding: 20px;
-  min-height: 450px;
-  max-height: 450px;
+  height: calc(100vh - 280px);
+  min-height: 250px;
   overflow-y: auto;
   box-shadow: 0 2px 8px rgba(75, 34, 92, 0.08);
   font-family: "Times New Roman", Times, serif;

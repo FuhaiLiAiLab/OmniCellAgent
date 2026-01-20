@@ -1276,12 +1276,22 @@ app.layout = dbc.Container([
             html.Img(src='/assets/dash-logo-stripe.svg', 
                      style={'height': '60px', 'width': 'auto', 'margin-right': '20px', 'vertical-align': 'middle'}),
             html.Div([
-                html.H1("agent.omni-cell.com", 
-                        style={'color': '#ffb74d', 'font-size': '36px', 'font-weight': '600', 'font-family': 'Times New Roman, serif', 'margin': '0'}),
-                html.H2("Multi-Agentic System for Bio-medical Research", 
-                        style={'color': '#4b225c', 'font-size': '24px', 'font-weight': '400', 'font-family': 'Times New Roman, serif', 'margin': '5px 0 0 0'}),
-                html.H3("Powered by Advanced AI", 
-                        style={'color': '#7e57c2', 'font-size': '18px', 'font-weight': '300', 'font-family': 'Times New Roman, serif', 'margin': '5px 0 0 0', 'font-style': 'italic'})
+                html.H1("OmniCellAgent", 
+                        style={'color': '#2c1810', 'font-size': '42px', 'font-weight': '600', 
+                               'font-family': 'Palatino Linotype, Palatino, Book Antiqua, Georgia, serif', 
+                               'margin': '0', 'letter-spacing': '2px'}),
+                html.H2("Multi-Agentic System for Single-Cell Omics Research", 
+                        style={'color': '#5d4037', 'font-size': '20px', 'font-weight': '400', 
+                               'font-family': 'Georgia, Cambria, Times New Roman, serif', 
+                               'margin': '8px 0 0 0', 'letter-spacing': '0.5px'}),
+                html.Span("by ", style={'color': '#8d6e63', 'font-size': '14px', 'font-family': 'Georgia, serif', 'font-style': 'italic'}),
+                html.A("FuhaiLiAiLab", href="https://fuhailiailab.github.io", target="_blank",
+                       style={'color': '#7b5e57', 'font-size': '14px', 'font-family': 'Georgia, serif', 
+                              'text-decoration': 'none', 'font-style': 'italic'}),
+                html.Span(" | ", style={'color': '#a1887f', 'font-size': '14px'}),
+                html.A("GitHub", href="https://github.com/FuhaiLiAiLab/OmniCellAgent", target="_blank",
+                       style={'color': '#7b5e57', 'font-size': '14px', 'font-family': 'Georgia, serif', 
+                              'text-decoration': 'none', 'font-style': 'italic'})
             ], style={'display': 'inline-block', 'vertical-align': 'middle'})
         ], style={'display': 'flex', 'align-items': 'center', 'justify-content': 'center'})
     ], style={'text-align': 'center', 'margin': '20px 0 30px 0'}),
@@ -1291,10 +1301,11 @@ app.layout = dbc.Container([
         # Left Panel - Final Results (equal width)
         dbc.Col([
             html.Div([
-                html.H4("📝 Final Results", style={'margin-bottom': '15px', 'color': '#4b225c'}),
+                html.H4("📝 Final Results", style={'margin-bottom': '15px', 'color': '#5d4037', 
+                        'font-family': 'Georgia, Cambria, serif'}),
                 html.Div(id='final-results-content', children=[
                     html.P("Results will appear here after processing...", 
-                          style={'color': '#6c757d', 'font-style': 'italic'})
+                          style={'color': '#8d6e63', 'font-style': 'italic', 'font-family': 'Georgia, serif'})
                 ])
             ], className='results-panel')
         ], width=6),  # Changed back from 4 to 6
@@ -1303,19 +1314,22 @@ app.layout = dbc.Container([
         dbc.Col([
             html.Div([
                 html.Div([
-                    html.H4("🔧 Step-wise Process Details", style={'margin-bottom': '15px', 'color': '#4b225c', 'display': 'inline-block'}),
+                    html.H4("🔧 Step-wise Process Details", style={'margin-bottom': '15px', 'color': '#5d4037', 
+                            'display': 'inline-block', 'font-family': 'Georgia, Cambria, serif'}),
                     html.Div([
                         dbc.Button("Expand All", id='expand-all-button', n_clicks=0, 
                                   color='light', size='sm', 
-                                  style={'margin-right': '5px', 'border-radius': '0', 'font-size': '0.8rem'}),
+                                  style={'margin-right': '5px', 'border-radius': '4px', 'font-size': '0.8rem',
+                                         'background-color': '#efebe9', 'border-color': '#d7ccc8', 'color': '#5d4037'}),
                         dbc.Button("Collapse All", id='collapse-all-button', n_clicks=0, 
                                   color='light', size='sm', 
-                                  style={'border-radius': '0', 'font-size': '0.8rem'})
+                                  style={'border-radius': '4px', 'font-size': '0.8rem',
+                                         'background-color': '#efebe9', 'border-color': '#d7ccc8', 'color': '#5d4037'})
                     ], style={'float': 'right', 'margin-top': '10px'})
                 ], style={'overflow': 'hidden', 'margin-bottom': '15px'}),
                 html.Div(id='process-details-content', children=[
                     html.P("Process steps will appear here during execution...", 
-                          style={'color': '#6c757d', 'font-style': 'italic'})
+                          style={'color': '#8d6e63', 'font-style': 'italic', 'font-family': 'Georgia, serif'})
                 ])
             ], className='process-panel')
         ], width=6)  # Changed back from 8 to 6
@@ -1360,20 +1374,24 @@ app.layout = dbc.Container([
                 )
             ], width=5),
             
-            # Action Buttons (primary)
+            # Action Buttons (primary) - muted, comfortable colors
             dbc.Col([
                 dbc.Button('Send', id='send-button', n_clicks=0, 
                           color='primary', size='lg', 
-                          style={'width': '100%', 'height': '40px', 'margin-bottom': '5px', 'border-radius': '0'}),
+                          style={'width': '100%', 'height': '40px', 'margin-bottom': '5px', 'border-radius': '4px',
+                                 'background-color': '#6b8e9f', 'border-color': '#5a7d8e', 'font-family': 'Georgia, serif'}),
                 dbc.Button('Stop', id='stop-button', n_clicks=0, 
                           color='danger', size='sm', 
-                          style={'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '0'}),
+                          style={'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '4px',
+                                 'background-color': '#c9a0a0', 'border-color': '#b89090', 'font-family': 'Georgia, serif'}),
                 dbc.Button('New Session', id='new-chat-button', n_clicks=0, 
                           color='secondary', size='sm', 
-                          style={'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '0'}),
+                          style={'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '4px',
+                                 'background-color': '#a8a8a8', 'border-color': '#989898', 'font-family': 'Georgia, serif'}),
                 dbc.Button('📥 Download', id='download-session-button', n_clicks=0, 
                           color='success', size='sm', 
-                          style={'width': '100%', 'height': '35px', 'border-radius': '0'}),
+                          style={'width': '100%', 'height': '35px', 'border-radius': '4px',
+                                 'background-color': '#8fa888', 'border-color': '#7f9878', 'font-family': 'Georgia, serif'}),
                 dcc.Download(id='download-session-zip')
             ], width=2),
             
@@ -1381,7 +1399,8 @@ app.layout = dbc.Container([
             dbc.Col([
                 dbc.Button('🔄 Continue Chat', id='hitl-continue-button', n_clicks=0, 
                           color='info', size='lg', 
-                          style={'width': '100%', 'height': '120px', 'border-radius': '0', 'font-size': '1rem'},
+                          style={'width': '100%', 'height': '120px', 'border-radius': '4px', 'font-size': '1rem',
+                                 'background-color': '#8fa8b8', 'border-color': '#7f98a8', 'font-family': 'Georgia, serif'},
                           title='Continue conversation with follow-up question')
             ], id='hitl-controls-col', width=2, style={'display': 'none'})
         ])
@@ -1392,16 +1411,16 @@ app.layout = dbc.Container([
         html.A("[lab]", 
                href="https://fuhailiailab.github.io", 
                target="_blank",
-               style={'color': '#4b225c', 'text-decoration': 'none', 'font-family': 'Times New Roman, serif', 'font-size': '16px', 'margin-right': '15px'}),
+               style={'color': '#7b5e57', 'text-decoration': 'none', 'font-family': 'Georgia, serif', 'font-size': '14px', 'margin-right': '15px'}),
         html.A("[github]", 
-               href="https://github.com/fuhailiailab", 
+               href="https://github.com/FuhaiLiAiLab/OmniCellAgent", 
                target="_blank",
-               style={'color': '#4b225c', 'text-decoration': 'none', 'font-family': 'Times New Roman, serif', 'font-size': '16px', 'margin-right': '15px'}),
+               style={'color': '#7b5e57', 'text-decoration': 'none', 'font-family': 'Georgia, serif', 'font-size': '14px', 'margin-right': '15px'}),
         html.A("[paper]", 
                href="https://www.biorxiv.org/content/10.1101/2025.07.31.667797v1", 
                target="_blank",
-               style={'color': '#4b225c', 'text-decoration': 'none', 'font-family': 'Times New Roman, serif', 'font-size': '16px'})
-    ], style={'text-align': 'center', 'margin': '30px 0 20px 0', 'padding': '20px 0', 'border-top': '1px solid #e0e0e0'})
+               style={'color': '#7b5e57', 'text-decoration': 'none', 'font-family': 'Georgia, serif', 'font-size': '14px'})
+    ], style={'text-align': 'center', 'margin': '30px 0 20px 0', 'padding': '20px 0', 'border-top': '1px solid #d7ccc8'})
     
 ], fluid=True, style={'max-width': '1400px'})
 
@@ -2104,8 +2123,10 @@ def handle_user_actions(send_clicks, new_chat_clicks, stop_clicks, user_input, s
 
     session_id = session_data.get('id') if session_data else None
 
-    # Default stop button style (disabled and grayed out)
-    stop_button_style = {'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '0', 'opacity': '0.5'}
+    # Default stop button style (disabled and grayed out) - muted colors
+    stop_button_style = {'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '4px', 
+                         'opacity': '0.5', 'background-color': '#c9a0a0', 'border-color': '#b89090', 
+                         'font-family': 'Georgia, serif'}
     stop_button_disabled = True
 
     # --- ACTION 1: Stop Processing ---
@@ -2143,10 +2164,10 @@ def handle_user_actions(send_clicks, new_chat_clicks, stop_clicks, user_input, s
         STEP_STATES[new_session_id] = {}
         
         # Add welcome message to process details
-        add_process_step(new_session_id, "System", "New chat session started. Ready to assist with your bio-medical research questions.")
+        add_process_step(new_session_id, "System", "New chat session started. Ready to assist with your single-cell omics research.")
         
         # Add welcome message to left chat
-        add_left_chat_message(new_session_id, "System", "Welcome! I'm ready to help with your biomedical research questions.", "system")
+        add_left_chat_message(new_session_id, "System", "Welcome to OmniCellAgent! I'm ready to help with your biomedical research questions.", "system")
 
         return ({'id': new_session_id}, '', stop_button_style, stop_button_disabled)
 
@@ -2170,8 +2191,10 @@ def handle_user_actions(send_clicks, new_chat_clicks, stop_clicks, user_input, s
         # Start background processing
         start_processing_in_background(session_id, user_input, team_type)
         
-        # Enable stop button
-        stop_button_style = {'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '0', 'opacity': '1.0'}
+        # Enable stop button - muted colors
+        stop_button_style = {'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '4px', 
+                             'opacity': '1.0', 'background-color': '#c9a0a0', 'border-color': '#b89090', 
+                             'font-family': 'Georgia, serif'}
         stop_button_disabled = False
 
         return ({'id': session_id}, '', stop_button_style, stop_button_disabled)
@@ -2185,7 +2208,7 @@ def handle_user_actions(send_clicks, new_chat_clicks, stop_clicks, user_input, s
         STEP_STATES[session_id] = {}
         
         # Add welcome message
-        add_process_step(session_id, "System", "Welcome to the Multi-Agentic System for Bio-medical Research! Your session is ready.")
+        add_process_step(session_id, "System", "Welcome to OmniCellAgent! Your session is ready.")
         add_left_chat_message(session_id, "System", "Welcome! I'm ready to help with your biomedical research questions.", "system")
         
         return ({'id': session_id}, '', stop_button_style, stop_button_disabled)
@@ -2517,7 +2540,7 @@ def handle_continue_chat(continue_clicks, session_data, user_input):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Multi-Agentic System for Bio-medical Research UI')
+    parser = argparse.ArgumentParser(description='OmniCellAgent - Multi-Agentic System for Single-Cell Omics Research')
     parser.add_argument('--share', action='store_true', help='Create a shareable public URL using ngrok')
     parser.add_argument('--port', type=int, default=8050, help='Port to run the server on (default: 8050)')
     args = parser.parse_args()

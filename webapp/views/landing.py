@@ -11,46 +11,48 @@ layout = html.Div([
                         'height': '200px',
                         'width': 'auto',
                         'margin-bottom': '30px',
-                        'filter': 'drop-shadow(0 4px 8px rgba(75, 34, 92, 0.1))'
+                        'filter': 'drop-shadow(0 4px 8px rgba(93, 64, 55, 0.1))'
                     }),
-                    html.H2("agent.omni-cells.com", style={
-                        'color': '#4b225c',
-                        'font-family': 'Times New Roman, serif',
+                    html.H1("OmniCellAgent", style={
+                        'color': '#2c1810',
+                        'font-family': 'Palatino Linotype, Palatino, Book Antiqua, Georgia, serif',
                         'font-weight': '600',
-                        'margin-bottom': '20px',
+                        'font-size': '48px',
+                        'letter-spacing': '2px',
+                        'margin-bottom': '15px',
                         'text-align': 'center'
                     }),
                     html.P("AI Co-Scientist for Autonomous Single-Cell Omics Deep Research", style={
-                        'color': '#7e57c2',
-                        'font-family': 'Times New Roman, serif',
+                        'color': '#5d4037',
+                        'font-family': 'Georgia, Cambria, Times New Roman, serif',
                         'font-size': '18px',
                         'text-align': 'center',
                         'line-height': '1.4'
                     }),
-                    html.Hr(style={'border-color': '#e0e0e0', 'margin': '30px 0'}),
+                    html.Hr(style={'border-color': '#d7ccc8', 'margin': '30px 0'}),
                     
                     # Feature highlights
                     html.Div([
                         html.Div([
-                            html.I(className="fas fa-cogs", style={'color': '#4b225c', 'margin-right': '10px', 'font-size': '20px'}),
-                            html.Span("Advanced Agentic Orchestration Systems", style={'color': '#4b225c', 'font-family': 'Times New Roman, serif', 'font-size': '16px'})
+                            html.I(className="fas fa-cogs", style={'color': '#5d4037', 'margin-right': '10px', 'font-size': '20px'}),
+                            html.Span("Advanced Agentic Orchestration Systems", style={'color': '#5d4037', 'font-family': 'Georgia, serif', 'font-size': '16px'})
                         ], style={'margin-bottom': '15px', 'display': 'flex', 'align-items': 'center'}),
                         
                         html.Div([
-                            html.I(className="fas fa-database", style={'color': '#4b225c', 'margin-right': '10px', 'font-size': '20px'}),
-                            html.Span("Bio-Focused Specialized Database & Foundation Models", style={'color': '#4b225c', 'font-family': 'Times New Roman, serif', 'font-size': '16px'})
+                            html.I(className="fas fa-database", style={'color': '#5d4037', 'margin-right': '10px', 'font-size': '20px'}),
+                            html.Span("Bio-Focused Specialized Database & Foundation Models", style={'color': '#5d4037', 'font-family': 'Georgia, serif', 'font-size': '16px'})
                         ], style={'margin-bottom': '15px', 'display': 'flex', 'align-items': 'center'}),
                         
                         html.Div([
-                            html.I(className="fas fa-brain", style={'color': '#4b225c', 'margin-right': '10px', 'font-size': '20px'}),
-                            html.Span("Intelligent Research Automation & Discovery", style={'color': '#4b225c', 'font-family': 'Times New Roman, serif', 'font-size': '16px'})
+                            html.I(className="fas fa-brain", style={'color': '#5d4037', 'margin-right': '10px', 'font-size': '20px'}),
+                            html.Span("Intelligent Research Automation & Discovery", style={'color': '#5d4037', 'font-family': 'Georgia, serif', 'font-size': '16px'})
                         ], style={'margin-bottom': '30px', 'display': 'flex', 'align-items': 'center'})
                     ], style={'text-align': 'left', 'max-width': '450px', 'margin': '0 auto'}),
                     
-                    html.Hr(style={'border-color': '#e0e0e0', 'margin': '30px 0'}),
+                    html.Hr(style={'border-color': '#d7ccc8', 'margin': '30px 0'}),
                     html.P("Powered by Advanced AI", style={
-                        'color': '#8e8e8e',
-                        'font-family': 'Times New Roman, serif',
+                        'color': '#a1887f',
+                        'font-family': 'Georgia, serif',
                         'font-size': '14px',
                         'text-align': 'center',
                         'font-style': 'italic'
@@ -62,30 +64,30 @@ layout = html.Div([
                                href="https://fuhailiailab.github.io", 
                                target="_blank",
                                style={
-                                   'color': '#4b225c', 
+                                   'color': '#7b5e57', 
                                    'text-decoration': 'none', 
-                                   'font-family': 'Times New Roman, serif', 
-                                   'font-size': '16px', 
+                                   'font-family': 'Georgia, serif', 
+                                   'font-size': '14px', 
                                    'margin-right': '15px'
                                }),
                         html.A("[github]", 
-                               href="https://github.com/fuhailiailab", 
+                               href="https://github.com/FuhaiLiAiLab/OmniCellAgent", 
                                target="_blank",
                                style={
-                                   'color': '#4b225c', 
+                                   'color': '#7b5e57', 
                                    'text-decoration': 'none', 
-                                   'font-family': 'Times New Roman, serif', 
-                                   'font-size': '16px',
+                                   'font-family': 'Georgia, serif', 
+                                   'font-size': '14px',
                                    'margin-right': '15px'
                                }),
                         html.A("[paper]", 
                                href="https://www.biorxiv.org/content/10.1101/2025.07.31.667797v1", 
                                target="_blank",
                                style={
-                                   'color': '#4b225c', 
+                                   'color': '#7b5e57', 
                                    'text-decoration': 'none', 
-                                   'font-family': 'Times New Roman, serif', 
-                                   'font-size': '16px'
+                                   'font-family': 'Georgia, serif', 
+                                   'font-size': '14px'
                                })
                     ], style={'text-align': 'center', 'margin-top': '30px'})
                 ], style={
@@ -97,9 +99,9 @@ layout = html.Div([
                     'justify-content': 'center'
                 })
             ], style={
-                'background': 'linear-gradient(135deg, #f3e5f5 0%, #e3f2fd 45%, #ffe8d5 100%)',
+                'background': 'linear-gradient(135deg, #efebe9 0%, #fafafa 45%, #fff8e1 100%)',
                 'height': '100vh',
-                'box-shadow': '2px 0 10px rgba(75, 34, 92, 0.1)'
+                'box-shadow': '2px 0 10px rgba(93, 64, 55, 0.1)'
             })
         ], width=7, style={'padding': '0'}),
         
@@ -108,15 +110,15 @@ layout = html.Div([
             html.Div([
                 html.Div([
                     html.H3("Welcome to the Future of Research", style={
-                        'color': '#4b225c',
-                        'font-family': 'Times New Roman, serif',
+                        'color': '#5d4037',
+                        'font-family': 'Georgia, Cambria, serif',
                         'font-weight': '600',
                         'margin-bottom': '20px',
                         'text-align': 'center'
                     }),
                     html.P("Access powerful AI-driven tools designed specifically for biomedical research.", style={
-                        'color': '#8e8e8e',
-                        'font-family': 'Times New Roman, serif',
+                        'color': '#8d6e63',
+                        'font-family': 'Georgia, serif',
                         'margin-bottom': '40px',
                         'text-align': 'center',
                         'line-height': '1.6'
@@ -124,8 +126,8 @@ layout = html.Div([
                     
                     html.Div([
                         html.H5("Ready to get started?", style={
-                            'color': '#4b225c',
-                            'font-family': 'Times New Roman, serif',
+                            'color': '#5d4037',
+                            'font-family': 'Georgia, serif',
                             'font-weight': '500',
                             'margin-bottom': '30px',
                             'text-align': 'center'
@@ -135,18 +137,18 @@ layout = html.Div([
                             html.Button(
                                 children='Get Started',
                                 style={
-                                    'background': 'linear-gradient(145deg, #4b225c 0%, #3a2a47 100%)',
+                                    'background': 'linear-gradient(145deg, #6b8e9f 0%, #5a7d8e 100%)',
                                     'color': '#ffffff',
                                     'border': 'none',
-                                    'border-radius': '0',
+                                    'border-radius': '4px',
                                     'padding': '15px 40px',
-                                    'font-family': 'Times New Roman, serif',
+                                    'font-family': 'Georgia, serif',
                                     'font-weight': '500',
                                     'font-size': '16px',
                                     'width': '100%',
                                     'cursor': 'pointer',
                                     'transition': 'all 0.3s ease',
-                                    'box-shadow': '0 2px 8px rgba(75, 34, 92, 0.2)'
+                                    'box-shadow': '0 2px 8px rgba(107, 142, 159, 0.3)'
                                 }
                             ),
                             href="/page2",
@@ -154,17 +156,17 @@ layout = html.Div([
                         ),
                         
                         html.Div([
-                            html.Hr(style={'border-color': '#e0e0e0', 'margin': '40px 0 30px 0'}),
+                            html.Hr(style={'border-color': '#d7ccc8', 'margin': '40px 0 30px 0'}),
                             html.P([
                                 "New to the platform? Learn more about our ",
                                 html.A("research capabilities", href="https://fuhailiailab.github.io", target="_blank", style={
-                                    'color': '#4b225c',
+                                    'color': '#7b5e57',
                                     'text-decoration': 'none'
                                 })
                             ], style={
                                 'text-align': 'center',
-                                'color': '#8e8e8e',
-                                'font-family': 'Times New Roman, serif',
+                                'color': '#a1887f',
+                                'font-family': 'Georgia, serif',
                                 'font-size': '14px',
                                 'line-height': '1.6'
                             })
@@ -181,7 +183,7 @@ layout = html.Div([
                     'justify-content': 'center'
                 })
             ], style={
-                'background': '#ffffff',
+                'background': '#fafafa',
                 'height': '100vh'
             })
         ], width=5, style={'padding': '0'})
