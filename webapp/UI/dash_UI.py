@@ -793,6 +793,12 @@ STEP_STATES = {}  # session_id -> {step_index: {"is_open": bool, "user_interacte
 # Track background threads and cancellation tokens for stopping
 BACKGROUND_THREADS = {}  # session_id -> {"thread": thread_object, "stop_event": threading.Event(), "cancellation_token": CancellationToken}
 
+# Session state for incremental conversation (simplified from HITL)
+SESSION_STATE = {}  # session_id -> {"adapter": adapter, "can_continue": bool, "loop": event_loop, "history": []}
+
+# Dedicated event loops per session to avoid "attached to different loop" errors
+SESSION_LOOPS = {}  # session_id -> {"loop": asyncio.AbstractEventLoop, "thread": threading.Thread}
+
 # --- Backward Compatibility Placeholders ---
 # These are maintained for compatibility with other UI components (like page2.py)
 # They are not used in the main dash_UI.py but may be referenced by legacy code
@@ -800,6 +806,23 @@ PENDING_USER_INPUTS = {}  # Placeholder for backward compatibility
 MESSAGE_QUEUES = {}       # Placeholder for backward compatibility  
 FINAL_RESULTS = {}        # Placeholder for backward compatibility
 COLLAPSE_STATE = {}       # Placeholder for backward compatibility
+
+
+# --- Session Helper Functions ---
+def _mark_can_continue(session_id: str):
+    """Mark that the session can continue with a follow-up query."""
+    if session_id in SESSION_STATE:
+        SESSION_STATE[session_id]["can_continue"] = True
+
+
+def _on_final_result(session_id: str, content: str):
+    """
+    Handle final result: add to chat and mark session as ready for continuation.
+    """
+    append_to_final_result(session_id, content)
+    _mark_can_continue(session_id)
+    print(f"[HITL] Session {session_id} ready for continuation")
+
 
 # --- Helper Function to Create an Autogen Team ---
 def create_autogen_team(session_id, use_simple_team=False, team_type='magentic'):
@@ -829,8 +852,15 @@ def create_autogen_team(session_id, use_simple_team=False, team_type='magentic')
             process_step=add_process_step,
             left_chat=add_left_chat_message,
             multimedia=add_multimedia_process_step,
-            final_result=lambda sid, content: append_to_final_result(sid, content)
+            final_result=lambda sid, content: _on_final_result(sid, content)
         )
+        
+        # Store adapter reference for continuation support with history
+        SESSION_STATE[session_id] = {
+            "adapter": adapter,
+            "can_continue": False,  # Set to True after report is generated
+            "history": []  # Track conversation history for continuation
+        }
         
         print(f"[DEBUG] Created LangGraph adapter for session {session_id}")
         
@@ -1328,9 +1358,9 @@ app.layout = dbc.Container([
                         'color': '#4b225c'
                     }
                 )
-            ], width=7),
+            ], width=5),
             
-            # Action Buttons
+            # Action Buttons (primary)
             dbc.Col([
                 dbc.Button('Send', id='send-button', n_clicks=0, 
                           color='primary', size='lg', 
@@ -1341,11 +1371,19 @@ app.layout = dbc.Container([
                 dbc.Button('New Session', id='new-chat-button', n_clicks=0, 
                           color='secondary', size='sm', 
                           style={'width': '100%', 'height': '35px', 'margin-bottom': '5px', 'border-radius': '0'}),
-                dbc.Button('📥 Download Session', id='download-session-button', n_clicks=0, 
+                dbc.Button('📥 Download', id='download-session-button', n_clicks=0, 
                           color='success', size='sm', 
                           style={'width': '100%', 'height': '35px', 'border-radius': '0'}),
                 dcc.Download(id='download-session-zip')
-            ], width=2)
+            ], width=2),
+            
+            # Continue Button (appears after report completes)
+            dbc.Col([
+                dbc.Button('🔄 Continue Chat', id='hitl-continue-button', n_clicks=0, 
+                          color='info', size='lg', 
+                          style={'width': '100%', 'height': '120px', 'border-radius': '0', 'font-size': '1rem'},
+                          title='Continue conversation with follow-up question')
+            ], id='hitl-controls-col', width=2, style={'display': 'none'})
         ])
     ], className='input-section'),
     
@@ -1730,12 +1768,20 @@ def start_processing_in_background(session_id, user_input, team_type):
     """Start agent processing in a background thread with proper cancellation support.
     
     Supports both AutoGen-based (magentic/simple) and LangGraph-based agents.
+    Uses a dedicated event loop per session to avoid "attached to different loop" errors.
     
     Args:
         session_id: Unique session identifier
         user_input: The user's query/task
         team_type: 'simple', 'magentic', or 'langgraph'
     """
+    
+    # Check if there's already processing happening - stop it first
+    if session_id in BACKGROUND_THREADS:
+        print(f"[DEBUG] Stopping existing processing for session {session_id} before starting new one")
+        stop_processing(session_id)
+        # Give it a moment to clean up
+        time.sleep(0.3)
     
     def process_agent_response():
         try:
@@ -1750,7 +1796,7 @@ def start_processing_in_background(session_id, user_input, team_type):
                 add_process_step(session_id, "System", "🛑 Processing cancelled before starting")
                 return
             
-            # Get or create session (always create new if stopped to prevent reuse issues)
+            # Get or create session
             if session_id not in SESSIONS or SESSIONS[session_id] is None:
                 print(f"[DEBUG] Creating new agent system for session {session_id}, team_type={team_type}")
                 SESSIONS[session_id] = create_autogen_team(session_id, team_type=team_type)
@@ -1765,9 +1811,13 @@ def start_processing_in_background(session_id, user_input, team_type):
                 agent_system = session_data['system']
                 actual_team_type = session_data.get('team_type', 'magentic')
                 
-                # Create a new event loop for this thread
+                # Create a new event loop for this thread - this is critical
+                # Each thread needs its own event loop for asyncio to work properly
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                
+                # Store the loop in session state for potential reuse
+                SESSION_LOOPS[session_id] = {"loop": loop, "thread": threading.current_thread()}
                 
                 try:
                     async def run_with_cancellation():
@@ -1783,9 +1833,31 @@ def start_processing_in_background(session_id, user_input, team_type):
                         try:
                             # Different execution paths for different agent types
                             if actual_team_type == 'langgraph':
-                                # LangGraph adapter - use run_stream
+                                # LangGraph adapter - check if this is a continuation
                                 print(f"[DEBUG] Running LangGraph adapter for session {session_id}")
-                                await agent_system.run_stream(user_input, stop_event=stop_event)
+                                
+                                # Check if we have previous state to continue from
+                                session_info = SESSION_STATE.get(session_id, {})
+                                adapter = session_info.get("adapter")
+                                history = session_info.get("history", [])
+                                
+                                if adapter and history:
+                                    # This is a continuation - use continue_conversation
+                                    print(f"[DEBUG] Continuing conversation with {len(history)} previous rounds")
+                                    add_process_step(session_id, "System", f"🔄 Continuing from previous analysis ({len(history)} rounds)")
+                                    await adapter.continue_conversation(user_input, stop_event=stop_event)
+                                else:
+                                    # First run - use run_stream
+                                    await agent_system.run_stream(user_input, stop_event=stop_event)
+                                
+                                # Store query in history for future continuation
+                                if session_id in SESSION_STATE:
+                                    if "history" not in SESSION_STATE[session_id]:
+                                        SESSION_STATE[session_id]["history"] = []
+                                    SESSION_STATE[session_id]["history"].append({
+                                        "query": user_input,
+                                        "timestamp": datetime.now().isoformat()
+                                    })
                             else:
                                 # AutoGen-based system - use run_stream_for_ui
                                 print(f"[DEBUG] Running AutoGen system for session {session_id}")
@@ -1838,6 +1910,8 @@ def start_processing_in_background(session_id, user_input, team_type):
                             loop.close()
                         except Exception as close_error:
                             print(f"[DEBUG] Error closing loop: {close_error}")
+                        # Remove from session loops
+                        SESSION_LOOPS.pop(session_id, None)
             else:
                 add_process_step(session_id, "System", "❌ Error: Invalid session data")
                     
@@ -1929,7 +2003,18 @@ def stop_processing(session_id):
         except Exception as e:
             print(f"[DEBUG] Error cancelling token: {e}")
         
-        # Clean up the agent system immediately
+        # Clean up the event loop for this session
+        if session_id in SESSION_LOOPS:
+            try:
+                loop_info = SESSION_LOOPS[session_id]
+                loop = loop_info.get("loop")
+                if loop and loop.is_running():
+                    print(f"[DEBUG] Stopping event loop for session {session_id}")
+                    loop.call_soon_threadsafe(loop.stop)
+            except Exception as e:
+                print(f"[DEBUG] Error stopping event loop: {e}")
+        
+        # Clean up the agent system immediately but keep adapter for history
         try:
             if session_id in SESSIONS and isinstance(SESSIONS[session_id], dict):
                 agent_system = SESSIONS[session_id].get('system')
@@ -1939,13 +2024,13 @@ def stop_processing(session_id):
                     if hasattr(agent_system, 'team'):
                         agent_system.team = None
                 
-                # Clear the session immediately
-                SESSIONS[session_id] = None
+                # Don't clear SESSIONS[session_id] completely - keep it for history/continuation
+                # SESSIONS[session_id] = None
         except Exception as e:
             print(f"[DEBUG] Error during agent system cleanup: {e}")
         
         # Wait for threads to finish with proportional timeout
-        thread_timeout = min(20.0, PROCESSING_TIMEOUT / 150)  # Proportional to main timeout, max 20s
+        thread_timeout = min(5.0, PROCESSING_TIMEOUT / 600)  # Shorter timeout for faster interrupt
         processing_thread = BACKGROUND_THREADS[session_id]["thread"]
         monitor_thread = BACKGROUND_THREADS[session_id].get("monitor_thread")
         
@@ -1956,6 +2041,7 @@ def stop_processing(session_id):
         # Update status and clean up tracking
         PROCESSING_STATUS[session_id] = {"status": "stopped", "task_id": None}
         BACKGROUND_THREADS.pop(session_id, None)
+        SESSION_LOOPS.pop(session_id, None)
         
         add_process_step(session_id, "System", "🛑 Processing stopped by user")
 
@@ -2042,6 +2128,8 @@ def handle_user_actions(send_clicks, new_chat_clicks, stop_clicks, user_input, s
             PROCESS_DETAILS.pop(session_id, None)
             STEP_STATES.pop(session_id, None)
             BACKGROUND_THREADS.pop(session_id, None)
+            SESSION_STATE.pop(session_id, None)  # Clean up session state
+            SESSION_LOOPS.pop(session_id, None)  # Clean up event loops
 
         # Generate unique session ID with timestamp for better organization
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -2343,7 +2431,89 @@ def download_session_zip(n_clicks, n_intervals, session_data):
     elif current_status.get("status") == "error":
         return None, "❌ Error - Try Again"
     
-    return None, "📥 Download Session"
+    return None, "📥 Download"
+
+
+# --- Continue Chat Callbacks ---
+
+@app.callback(
+    Output('hitl-controls-col', 'style'),
+    Input('message-updater', 'n_intervals'),
+    State('session-id', 'data'),
+    prevent_initial_call=True
+)
+def update_continue_button_visibility(n_intervals, session_data):
+    """Show Continue button after report is complete."""
+    if not session_data or 'id' not in session_data:
+        return {'display': 'none'}
+    
+    session_id = session_data['id']
+    session_info = SESSION_STATE.get(session_id, {})
+    
+    # Show when can_continue is True (report completed)
+    if session_info.get("can_continue", False):
+        return {'display': 'block'}
+    else:
+        return {'display': 'none'}
+
+
+@app.callback(
+    Output('user-input', 'value', allow_duplicate=True),
+    Input('hitl-continue-button', 'n_clicks'),
+    State('session-id', 'data'),
+    State('user-input', 'value'),
+    prevent_initial_call=True
+)
+def handle_continue_chat(continue_clicks, session_data, user_input):
+    """Handle Continue button - start new conversation round."""
+    ctx = callback_context
+    if not ctx.triggered or not session_data:
+        return dash.no_update
+    
+    session_id = session_data.get('id')
+    
+    if not session_id or session_id not in SESSION_STATE:
+        return dash.no_update
+    
+    session_info = SESSION_STATE[session_id]
+    adapter = session_info.get("adapter")
+    
+    if not adapter:
+        return dash.no_update
+    
+    if not session_info.get("can_continue"):
+        add_process_step(session_id, "System", "⚠️ Cannot continue - wait for report to complete")
+        return dash.no_update
+    
+    if not user_input or not user_input.strip():
+        add_process_step(session_id, "System", "⚠️ Please enter a follow-up question first")
+        return dash.no_update
+    
+    # Reset continue state
+    SESSION_STATE[session_id]["can_continue"] = False
+    
+    # Add user message to chat
+    add_left_chat_message(session_id, "User", user_input, "user")
+    add_process_step(session_id, "User", f"🔄 **Follow-up**: {user_input[:100]}...")
+    
+    # Start continuation in background
+    def continue_conversation_bg():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(
+                adapter.continue_conversation(user_input)
+            )
+            # Mark can_continue again after completion
+            _mark_can_continue(session_id)
+            loop.close()
+        except Exception as e:
+            add_process_step(session_id, "System", f"❌ Error continuing: {e}")
+    
+    thread = threading.Thread(target=continue_conversation_bg, daemon=True)
+    thread.start()
+    
+    return ''
 
 
 if __name__ == '__main__':

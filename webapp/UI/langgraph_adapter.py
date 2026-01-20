@@ -7,6 +7,7 @@ and the Dash UI. It handles:
 2. Converting LangGraph events to UI-compatible messages
 3. Managing session directories and file outputs
 4. Supporting HTML visualization embeds in the UI
+5. Incremental conversation support
 """
 
 import asyncio
@@ -44,6 +45,7 @@ class UILangGraphAdapter:
     - Provides streaming execution that yields UI-compatible events
     - Converts agent phase transitions, tool calls, and results to UI messages
     - Handles multimedia outputs (plots, HTML files) for UI rendering
+    - Supports incremental conversation across multiple rounds
     """
     
     def __init__(self, session_id: str, model_name: str = "gemini-3-pro-preview"):
@@ -59,6 +61,12 @@ class UILangGraphAdapter:
         self.agent: Optional[LangGraphOmniCellAgent] = None
         self.session_dir: Optional[str] = None
         
+        # Conversation state for incremental chat
+        self.round_number = 1
+        self.conversation_summaries: List[str] = []
+        self.last_query: Optional[str] = None
+        self.last_report: Optional[str] = None
+        
         # Callbacks for UI updates
         self._process_step_callback: Optional[Callable] = None
         self._left_chat_callback: Optional[Callable] = None
@@ -70,15 +78,7 @@ class UILangGraphAdapter:
                       left_chat: Callable = None, 
                       multimedia: Callable = None,
                       final_result: Callable = None):
-        """
-        Set callbacks for UI updates.
-        
-        Args:
-            process_step: Callback for process step updates (session_id, agent, content, **kwargs)
-            left_chat: Callback for chat messages (session_id, sender, content, msg_type)
-            multimedia: Callback for multimedia content (session_id, agent, content, media_type, media_url)
-            final_result: Callback for final results (session_id, content)
-        """
+        """Set callbacks for UI updates."""
         self._process_step_callback = process_step
         self._left_chat_callback = left_chat
         self._multimedia_callback = multimedia
@@ -86,56 +86,42 @@ class UILangGraphAdapter:
     
     async def initialize(self):
         """Initialize the LangGraph agent with session-specific directory."""
-        # Create session directory inside webapp/sessions
         self.session_dir = os.path.join(SESSIONS_DIR, self.session_id)
         os.makedirs(self.session_dir, exist_ok=True)
         
-        # Create the agent - this will also set global session dir for tools
         self.agent = LangGraphOmniCellAgent(
             model_name=self.model_name,
             session_id=self.session_id
         )
+        self._emit_process_step("System", f"🔧 LangGraph Agent initialized (model: {self.model_name})")
         
-        # Override the session directory to use webapp/sessions path
         self.agent.session_dir = self.session_dir
-        # Also set the global for tools
         import agent.langgraph_agent as lg_module
         lg_module._GLOBAL_SESSION_DIR = self.session_dir
         lg_module._GLOBAL_SESSION_ID = self.session_id
         
-        self._emit_process_step("System", f"🔧 LangGraph Agent initialized (model: {self.model_name})")
         print(f"[LangGraph Adapter] Initialized for session {self.session_id}")
         print(f"[LangGraph Adapter] Session directory: {self.session_dir}")
     
     def _emit_process_step(self, agent: str, content: str, is_tool_call: bool = False):
-        """Emit a process step to the UI."""
         if self._process_step_callback:
             self._process_step_callback(self.session_id, agent, content, is_tool_call=is_tool_call)
     
     def _emit_left_chat(self, sender: str, content: str, msg_type: str = "assistant"):
-        """Emit a chat message to the left panel."""
         if self._left_chat_callback:
             self._left_chat_callback(self.session_id, sender, content, msg_type)
     
     def _emit_multimedia(self, agent: str, content: str, media_type: str, media_url: str):
-        """Emit a multimedia process step."""
         if self._multimedia_callback:
             self._multimedia_callback(self.session_id, agent, content, 
                                       media_type=media_type, media_url=media_url)
     
     def _emit_final_result(self, content: str):
-        """Emit the final result to the UI."""
         if self._final_result_callback:
             self._final_result_callback(self.session_id, content)
     
     def _convert_path_to_web_url(self, file_path: str) -> str:
-        """
-        Convert an absolute file path to a web-accessible URL.
-        
-        Paths under webapp/sessions/ become /assets/sessions/...
-        """
         sessions_dir_str = str(SESSIONS_DIR)
-        
         if file_path.startswith(sessions_dir_str):
             relative_path = file_path[len(sessions_dir_str):].lstrip('/')
             return f"/assets/sessions/{relative_path}"
@@ -143,29 +129,18 @@ class UILangGraphAdapter:
             idx = file_path.find('/sessions/')
             relative_part = file_path[idx + len('/sessions/'):].lstrip('/')
             return f"/assets/sessions/{relative_part}"
-        
-        # Return as-is if we can't convert
         return file_path
     
     def _get_media_type(self, file_path: str) -> str:
-        """Determine the media type based on file extension."""
         ext = os.path.splitext(file_path)[1].lower()
         if ext == '.html':
             return "html"
         elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg']:
             return "image"
-        else:
-            return "file"
+        return "file"
     
     def _process_omic_result(self, result_content: Any):
-        """
-        Process OmicMiningAgent results to extract and display visualizations.
-        
-        Args:
-            result_content: Result from the omic analysis tool
-        """
         try:
-            # Parse the result if it's a string
             if isinstance(result_content, str):
                 try:
                     result_dict = json.loads(result_content)
@@ -180,7 +155,6 @@ class UILangGraphAdapter:
             else:
                 return
             
-            # Extract plot paths
             plot_paths = result_dict.get('plot_paths', [])
             if not isinstance(plot_paths, list):
                 return
@@ -188,88 +162,53 @@ class UILangGraphAdapter:
             for plot_path in plot_paths:
                 if not plot_path or not os.path.exists(plot_path):
                     continue
-                
                 web_url = self._convert_path_to_web_url(plot_path)
                 media_type = self._get_media_type(plot_path)
                 filename = os.path.basename(plot_path)
-                
-                self._emit_multimedia(
-                    "OmicMiningAgent",
-                    f"🧬 Generated visualization: {filename}",
-                    media_type=media_type,
-                    media_url=web_url
-                )
-                print(f"[LangGraph Adapter] Emitted multimedia: {media_type} - {web_url}")
-                
+                self._emit_multimedia("OmicMiningAgent", f"🧬 Generated visualization: {filename}",
+                                      media_type=media_type, media_url=web_url)
         except Exception as e:
             print(f"[LangGraph Adapter] Error processing omic result: {e}")
     
     def _scan_session_for_visualizations(self):
-        """
-        Scan the session directory for visualization files and emit them to the UI.
-        Called after agent execution to ensure all plots are displayed.
-        """
         if not self.session_dir or not os.path.exists(self.session_dir):
             return
         
-        # Directories to scan for visualizations
         viz_dirs = [
             ("volcano_plots", "Volcano Plot"),
             ("enrichment_plots", "Enrichment Plot"),
             ("enrichment_results", "Enrichment Results"),
             ("plots", "Analysis Plot")
         ]
-        
         emitted_files = set()
         
         for subdir, label_prefix in viz_dirs:
             dir_path = os.path.join(self.session_dir, subdir)
             if not os.path.exists(dir_path):
                 continue
-            
             for root, dirs, files in os.walk(dir_path):
                 for file in sorted(files):
                     if file.startswith('.'):
                         continue
-                    
                     ext = os.path.splitext(file)[1].lower()
                     if ext not in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.html']:
                         continue
-                    
                     file_path = os.path.join(root, file)
                     if file_path in emitted_files:
                         continue
-                    
                     emitted_files.add(file_path)
                     web_url = self._convert_path_to_web_url(file_path)
                     media_type = self._get_media_type(file_path)
-                    
-                    self._emit_multimedia(
-                        "Visualization",
-                        f"📊 {label_prefix}: {file}",
-                        media_type=media_type,
-                        media_url=web_url
-                    )
+                    self._emit_multimedia("Visualization", f"📊 {label_prefix}: {file}",
+                                          media_type=media_type, media_url=web_url)
     
     async def run_stream(self, task: str, stop_event=None) -> str:
-        """
-        Run the LangGraph agent and stream results to the UI.
-        
-        Args:
-            task: The user's query/task
-            stop_event: Optional threading.Event to check for cancellation
-            
-        Returns:
-            The final report string
-        """
         if not self.agent:
             await self.initialize()
         
         try:
-            # Emit starting message
             self._emit_process_step("Orchestrator", f"📋 Starting analysis: {task[:100]}...")
             
-            # Build the initial state
             initial_state: AgentState = {
                 "query": task,
                 "session_id": self.session_id,
@@ -280,63 +219,46 @@ class UILangGraphAdapter:
                 "messages": [],
                 "agent_outputs": {},
                 "shared_data": {
-                    "top_genes": [],
-                    "paper_dois": [],
-                    "pathways": [],
-                    "disease": "",
-                    "cell_type": "",
+                    "top_genes": [], "paper_dois": [], "pathways": [],
+                    "disease": "", "cell_type": "",
                 },
                 "process_log": [],
                 "final_report": None,
                 "status": "planning"
             }
             
-            # Use astream_events for real-time streaming
-            # Note: LangGraph's compiled graph supports astream for state updates
             final_state = None
             step_count = 0
             
             async for event in self.agent.graph.astream(initial_state):
-                # Check for cancellation
                 if stop_event and stop_event.is_set():
                     self._emit_process_step("System", "🛑 Processing cancelled by user")
                     raise asyncio.CancelledError("Processing stopped by user")
                 
-                # Process the event - event is a dict with node names as keys
                 for node_name, state_update in event.items():
                     step_count += 1
-                    
-                    # Update final_state with the latest
                     if final_state is None:
                         final_state = {**initial_state}
                     final_state.update(state_update)
-                    
-                    # Emit UI updates based on the node/phase
                     await self._process_graph_event(node_name, state_update, final_state, step_count)
             
-            # Scan for any visualizations we might have missed
             self._scan_session_for_visualizations()
-            
-            # Get the final report
             final_report = final_state.get("final_report", "No report generated") if final_state else "No report generated"
             
-            # Emit final result
+            self.last_query = task
+            self.last_report = final_report
+            
             self._emit_process_step("Final", "✅ Analysis completed successfully!")
             self._emit_final_result(final_report)
             
-            # Save the report using UI's report saving (which adds visualization appendix)
             try:
-                # Import here to avoid circular imports
                 from webapp.UI.dash_UI import save_session_report
                 report_path = save_session_report(self.session_id, final_report, task)
                 if report_path:
-                    report_filename = os.path.basename(report_path)
-                    self._emit_process_step("System", f"📄 Report saved: {report_filename}")
+                    self._emit_process_step("System", f"📄 Report saved: {os.path.basename(report_path)}")
             except Exception as e:
                 print(f"[LangGraph Adapter] Error saving report via UI: {e}")
-                # Fallback: the agent already saves its own report
             
-            # Save conversation log
             if final_state:
                 self.agent._save_conversation_log(task, final_state)
             
@@ -347,44 +269,27 @@ class UILangGraphAdapter:
             raise
         except Exception as e:
             import traceback
-            error_msg = f"Error during analysis: {str(e)}"
-            self._emit_process_step("System", f"❌ {error_msg}")
+            self._emit_process_step("System", f"❌ Error during analysis: {str(e)}")
             print(f"[LangGraph Adapter] Error: {traceback.format_exc()}")
             raise
     
     async def _process_graph_event(self, node_name: str, state_update: Dict, 
                                     full_state: Dict, step_count: int):
-        """
-        Process a LangGraph event and emit appropriate UI updates.
-        
-        Args:
-            node_name: Name of the graph node that produced the update
-            state_update: The state changes from this node
-            full_state: The complete current state
-            step_count: Current step number
-        """
-        status = full_state.get("status", "")
-        
         if node_name == "planner":
-            # Planning phase
             plan = state_update.get("plan", [])
             if plan:
                 plan_summary = "\n".join([
                     f"  {i+1}. [{t['assigned_agent']}] {t['description'][:60]}..."
                     for i, t in enumerate(plan)
                 ])
-                self._emit_process_step(
-                    "Orchestrator", 
-                    f"📋 **Research Plan Created** ({len(plan)} tasks):\n{plan_summary}"
-                )
+                self._emit_process_step("Orchestrator", 
+                    f"📋 **Research Plan Created** ({len(plan)} tasks):\n{plan_summary}")
         
         elif node_name == "executor":
-            # Execution phase - emit task progress
             current_idx = full_state.get("current_task_index", 0)
             plan = full_state.get("plan", [])
             
             if current_idx > 0 and current_idx <= len(plan):
-                # The just-completed task
                 completed_task = plan[current_idx - 1]
                 agent_name = completed_task.get("assigned_agent", "Agent")
                 task_desc = completed_task.get("description", "")[:80]
@@ -392,14 +297,9 @@ class UILangGraphAdapter:
                 
                 if task_status == "completed":
                     result = completed_task.get("result", "")
+                    self._emit_process_step(agent_name,
+                        f"✅ **Task Completed**: {task_desc}...\n\n{self._truncate_result(result)}")
                     
-                    # Emit the task completion
-                    self._emit_process_step(
-                        agent_name,
-                        f"✅ **Task Completed**: {task_desc}...\n\n{self._truncate_result(result)}"
-                    )
-                    
-                    # Check for omic results with plot paths
                     if agent_name == "OmicMiningAgent":
                         agent_outputs = full_state.get("agent_outputs", {})
                         task_id = completed_task.get("id")
@@ -407,55 +307,78 @@ class UILangGraphAdapter:
                             output = agent_outputs[task_id]
                             if isinstance(output, dict) and "result" in output:
                                 self._process_omic_result(output.get("result"))
-                    
+                
                 elif task_status == "failed":
                     error = completed_task.get("error", "Unknown error")
-                    self._emit_process_step(
-                        agent_name,
-                        f"❌ **Task Failed**: {task_desc}...\nError: {error}"
-                    )
+                    self._emit_process_step(agent_name,
+                        f"❌ **Task Failed**: {task_desc}...\nError: {error}")
             
-            # Show next task if there is one
             if current_idx < len(plan):
                 next_task = plan[current_idx]
-                self._emit_process_step(
-                    next_task.get("assigned_agent", "Agent"),
-                    f"🔄 **Starting Task {current_idx + 1}/{len(plan)}**: {next_task.get('description', '')[:80]}..."
-                )
+                self._emit_process_step(next_task.get("assigned_agent", "Agent"),
+                    f"🔄 **Starting Task {current_idx + 1}/{len(plan)}**: {next_task.get('description', '')[:80]}...")
         
         elif node_name == "replanner":
             revision_count = state_update.get("plan_revision_count", 0)
-            self._emit_process_step(
-                "Orchestrator",
-                f"🔄 **Re-planning** (attempt {revision_count}): Adjusting strategy based on results..."
-            )
+            self._emit_process_step("Orchestrator",
+                f"🔄 **Re-planning** (attempt {revision_count}): Adjusting strategy based on results...")
         
         elif node_name == "reporter":
-            self._emit_process_step(
-                "Reporter",
-                "📄 **Generating Final Report**..."
-            )
+            self._emit_process_step("Reporter", "📄 **Generating Final Report**...")
     
     def _truncate_result(self, result: str, max_length: int = 1500) -> str:
-        """Truncate a result string for display."""
         if not result:
             return ""
         result_str = str(result)
         if len(result_str) > max_length:
             return result_str[:max_length] + f"\n\n[... truncated ({len(result_str)} chars total)]"
         return result_str
+    
+    async def continue_conversation(self, new_query: str, stop_event=None) -> str:
+        """Continue conversation with a new query, building on previous rounds."""
+        if not self.agent:
+            await self.initialize()
+        
+        self.round_number += 1
+        self._emit_process_step("System",
+            f"🔄 **Continuing Conversation** (Round {self.round_number})\n"
+            f"Building on {len(self.conversation_summaries)} previous rounds...")
+        
+        context_prefix = ""
+        if self.conversation_summaries:
+            context_prefix = "## Previous Analysis Context\n\n"
+            for i, summary in enumerate(self.conversation_summaries, 1):
+                context_prefix += f"### Round {i}:\n{summary}\n\n"
+            context_prefix += "---\n\n## New Query\n\n"
+        
+        enhanced_query = context_prefix + new_query
+        result = await self.run_stream(enhanced_query, stop_event)
+        
+        summary = self._generate_round_summary(new_query, result)
+        self.conversation_summaries.append(summary)
+        self.last_query = new_query
+        self.last_report = result
+        
+        return result
+    
+    def _generate_round_summary(self, query: str, report: str) -> str:
+        summary_parts = [f"Query: {query[:200]}"]
+        if "Key Findings" in report:
+            start = report.find("Key Findings")
+            end = report.find("\n#", start + 1)
+            if end == -1:
+                end = start + 1000
+            summary_parts.append(f"Findings: {report[start:end][:500]}")
+        if "Hypothesis" in report:
+            start = report.find("Hypothesis")
+            end = report.find("\n#", start + 1)
+            if end == -1:
+                end = start + 500
+            summary_parts.append(f"Hypotheses: {report[start:end][:300]}")
+        return "\n".join(summary_parts)
 
 
 def create_langgraph_adapter(session_id: str, 
                               model_name: str = "gemini-3-pro-preview") -> UILangGraphAdapter:
-    """
-    Factory function to create a configured LangGraph adapter for the UI.
-    
-    Args:
-        session_id: Session identifier from the UI
-        model_name: Model to use
-        
-    Returns:
-        Configured UILangGraphAdapter instance
-    """
+    """Factory function to create a configured LangGraph adapter for the UI."""
     return UILangGraphAdapter(session_id=session_id, model_name=model_name)
