@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Conda environment name
-CONDA_ENV="autogen-dev"
+CONDA_ENV="langgraph-dev"
 
 # Read Neo4j path from config (paths.yaml)
 NEO4J_HOME=$(conda run -n "$CONDA_ENV" python -c "import yaml; print(yaml.safe_load(open('$PROJECT_ROOT/configs/paths.yaml'))['external']['neo4j_home'])" 2>/dev/null)

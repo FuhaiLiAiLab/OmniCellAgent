@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Conda environment name
-CONDA_ENV="autogen-dev"
+CONDA_ENV="langgraph-dev"
 
 # Create logs directory if it doesn't exist
 LOG_DIR="$PROJECT_ROOT/logs/service-logs"
