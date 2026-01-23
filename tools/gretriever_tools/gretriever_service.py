@@ -25,7 +25,7 @@ from datetime import datetime
 
 # Optimize CPU threading BEFORE importing torch
 # i9-13900KF: 8 P-cores (16 threads) + 16 E-cores = 32 total
-NUM_THREADS = 24  # Balance between parallelism and overhead
+NUM_THREADS = 24  # Testing optimal thread count
 os.environ['OMP_NUM_THREADS'] = str(NUM_THREADS)
 os.environ['MKL_NUM_THREADS'] = str(NUM_THREADS)
 
