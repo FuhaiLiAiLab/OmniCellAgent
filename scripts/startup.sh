@@ -33,8 +33,8 @@ echo "Started Neo4j"
 nohup conda run -n "$CONDA_ENV" python "$PROJECT_ROOT/tools/scientist_rag_tools/scientist_tool.py" > "$LOG_DIR/scientist_tool.log" 2>&1 &
 echo "Started Scientist RAG Tool"
 
-# Start GRetriever Service (port 8001)
-nohup conda run -n "$CONDA_ENV" python "$PROJECT_ROOT/tools/gretriever_tools/gretriever_service.py" > "$LOG_DIR/gretriever_service_output.log" 2>&1 &
+# Start GRetriever Service (port 8001) - uses autogen-dev for torch/torch_geometric
+nohup conda run -n "autogen-dev" python "$PROJECT_ROOT/tools/gretriever_tools/gretriever_service.py" > "$LOG_DIR/gretriever_service_output.log" 2>&1 &
 echo "Started GRetriever Service"
 
 # Start Omic Fetch Analysis Workflow Microservice (commented out - already integrated)

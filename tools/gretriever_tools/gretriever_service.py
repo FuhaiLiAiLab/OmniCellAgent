@@ -23,7 +23,15 @@ from typing import Dict, Any, Optional, List
 from contextlib import asynccontextmanager
 from datetime import datetime
 
+# Optimize CPU threading BEFORE importing torch
+# i9-13900KF: 8 P-cores (16 threads) + 16 E-cores = 32 total
+NUM_THREADS = 24  # Balance between parallelism and overhead
+os.environ['OMP_NUM_THREADS'] = str(NUM_THREADS)
+os.environ['MKL_NUM_THREADS'] = str(NUM_THREADS)
+
 import torch
+torch.set_num_threads(NUM_THREADS)
+
 import numpy as np
 import pandas as pd
 import yaml
@@ -47,6 +55,7 @@ from torch_geometric.data import Data, Batch
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.info(f"CPU optimization: Using {NUM_THREADS} threads (P-cores only)")
 
 # Global variables for model and configurations
 g_retriever_wrapper = None
@@ -86,23 +95,24 @@ class StatusResponse(BaseModel):
 class GRetrieverWrapper:
     """Wrapper class for G-Retriever model with lazy loading"""
     
-    def __init__(self, hidden_channels=1536, num_gnn_layers=4, llm='meta-llama/Llama-3.1-8B-Instruct', weight_path=''):
+    def __init__(self, hidden_channels=1536, num_gnn_layers=4, llm='meta-llama/Llama-3.1-8B-Instruct', weight_path='', device='cpu'):
         self.hidden_channels = hidden_channels
         self.num_gnn_layers = num_gnn_layers
         self.llm_model_name = llm
         self.weight_path = weight_path
         self.model = None
         self.is_loaded = False
+        self.device = device  # Force CPU by default
         
     def load_model(self):
         """Load the model components"""
         if self.is_loaded:
             return
             
-        logger.info("Loading G-Retriever model...")
+        logger.info(f"Loading G-Retriever model on device: {self.device}")
         
-        # Initialize LLM
-        self.llm = LLM(model_name=self.llm_model_name, num_params=8)
+        # Initialize LLM - force CPU
+        self.llm = LLM(model_name=self.llm_model_name, num_params=8, dtype=torch.float32)
         
         # Initialize GNN
         self.gnn = GAT(
@@ -116,15 +126,25 @@ class GRetrieverWrapper:
         # Initialize G-Retriever
         self.model = GRetriever(llm=self.llm, gnn=self.gnn)
         
+        # Move model to specified device (CPU)
+        self.model = self.model.to(self.device)
+        
         # Load weights if provided
         if self.weight_path and os.path.exists(self.weight_path):
             logger.info(f"Loading weights from {self.weight_path}")
             state_dict = self.model.state_dict()
-            loaded_state_dict = torch.load(self.weight_path, map_location='cuda' if torch.cuda.is_available() else 'cpu')
+            loaded_state_dict = torch.load(self.weight_path, map_location=self.device)
             state_dict.update(loaded_state_dict)
             self.model.load_state_dict(state_dict, strict=False)
         else:
             logger.warning(f"Weight path not found: {self.weight_path}")
+        
+        # Compile model for faster inference (PyTorch 2.0+)
+        try:
+            self.model = torch.compile(self.model, mode="reduce-overhead")
+            logger.info("Model compiled with torch.compile()")
+        except Exception as e:
+            logger.warning(f"torch.compile() failed, using eager mode: {e}")
         
         self.is_loaded = True
         logger.info("G-Retriever model loaded successfully")
@@ -134,8 +154,11 @@ class GRetrieverWrapper:
         if not self.is_loaded:
             raise RuntimeError("Model not loaded. Call load_model() first.")
         
+        # Ensure batch tensors are on the correct device
+        batch = batch.to(self.device)
+        
         self.model.eval()
-        with torch.no_grad():
+        with torch.no_grad(), torch.inference_mode():
             return self.model.inference(
                 batch.question,
                 batch.x,
@@ -469,11 +492,12 @@ async def initialize_service():
     neo4j_config, openai_client = load_env_and_create_clients()
     retrieval_config, algo_config = load_configs()
     
-    # Initialize model wrapper - use path from config
+    # Initialize model wrapper - use path from config, force CPU
     g_retriever_model_path = get_path('models.gretriever', absolute=True)
 
     g_retriever_wrapper = GRetrieverWrapper(
-        weight_path=g_retriever_model_path
+        weight_path=g_retriever_model_path,
+        device='cpu'  # Force CPU to avoid GPU memory issues
     )
     
     # Load model in background

@@ -17,6 +17,17 @@ bash scripts/test_services.sh
 bash scripts/stop_services.sh
 ```
 
+
+
+```bash
+
+# Run all default test cases from scratch
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate langgraph-dev && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in pancreatic ductal adenocarcinoma (PDAC)?" --session-id PDAC-test && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in Alzheimer's Disease?" --session-id AD-test && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in Lung Cancer?" --session-id LungCancer-test
+
+```
+
+
+
 ### 2. Run AI Agent Analysis
 
 **Simple Query (Literature Research):**
