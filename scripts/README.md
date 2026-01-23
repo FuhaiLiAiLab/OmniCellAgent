@@ -25,7 +25,7 @@ bash scripts/startup.sh
 
 **Configuration:**
 - Reads Neo4j path from `configs/paths.yaml`
-- Uses conda environment: `autogen-dev`
+- Uses conda environment: `langgraph-dev`
 - Logs are saved to `logs/service-logs/`
 
 ### 2. `test_services.sh` - Test All Services
@@ -162,7 +162,7 @@ curl http://localhost:7474
 2. Check conda environment:
    ```bash
    conda env list
-   conda activate autogen-dev  # or conda init first
+   conda activate langgraph-dev  # or conda init first
    ```
 
 3. View service logs:
@@ -181,7 +181,7 @@ curl http://localhost:7474
 3. Restart individual service:
    ```bash
    pkill -f "python.*scientist_tool"
-   conda run -n autogen-dev python tools/scientist_rag_tools/scientist_tool.py &
+   conda run -n langgraph-dev python tools/scientist_rag_tools/scientist_tool.py &
    ```
 
 ### Configuration Issues
@@ -194,4 +194,4 @@ curl http://localhost:7474
 - All scripts use relative paths based on project root
 - Configuration is centralized in `configs/paths.yaml`
 - Services run in background using `nohup`
-- Use `conda run -n autogen-dev` to avoid conda init issues
+- Use `conda run -n langgraph-dev` to avoid conda init issues

@@ -1510,8 +1510,18 @@ Generate 3-5 ranked hypotheses. **EACH hypothesis MUST include**:
 - **Limitations**: Sample size, cell heterogeneity, batch effects, etc.
 - **Confounders**: Stromal contamination, treatment history, cohort bias
 
-**5.5 Top 3 Minimal Validation Actions**
-Prioritized list of the most information-gaining experiments/analyses that could quickly validate or refute top hypotheses.
+**5.5 Minimal Experiment Set (≤3 experiments)**
+For EACH top hypothesis, propose up to 3 validation experiments in this format:
+
+| Experiment | Readout (Quantitative) | Controls | Support Criteria | Refute Criteria |
+|------------|------------------------|----------|------------------|-----------------|
+| e.g., siRNA knockdown of BDP1 in iPSC-neurons | qPCR: Pol III targets (5S rRNA, tRNAs); Western: BDP1, p-tau | Scrambled siRNA, untreated | >50% reduction in Pol III targets AND >30% reduction in p-tau | <20% change in either metric |
+
+Include:
+- **Primary readout**: Quantitative metric (fold-change, %, IC50, etc.)
+- **Positive control**: Known modulator or reference condition
+- **Negative control**: Vehicle, scrambled, or isotype
+- **Clear decision criteria**: Specific thresholds for "supports" vs "refutes"
 
 ### Step 6: Conclusions
 - Key actionable findings (ranked by confidence and impact)
@@ -1524,6 +1534,7 @@ Prioritized list of the most information-gaining experiments/analyses that could
 - Emphasize INTERSECTION of evidence sources
 - Generate testable hypotheses with mechanism descriptions
 - All citations must include DOI or PMID
+- **IMPORTANT**: If no evidence exists for a claim, explicitly state "No direct evidence found" - do NOT fabricate or extrapolate unsupported claims
 """
         
         response = await self.llm.ainvoke([
@@ -1538,18 +1549,27 @@ Prioritized list of the most information-gaining experiments/analyses that could
    - Enrichment plots: ![Enrichment](enrichment_results/enrichment_plots/filename.png)
 
 **Advanced Hypothesis Framework (MedHypoRank-GenePath):**
-- Generate 8-15 gene-pathway-anchored hypotheses per report
+- Generate 3-5 gene-pathway-anchored hypotheses per report
 - Each hypothesis MUST: anchor to specific Gene(s)→Pathway(s)→Phenotype chain
-- Score each hypothesis (0-100) using subscores: Novelty(20), Literature(15), Mechanism(20), Feasibility(15), Significance(15), Data(10), Cross-validation(5)
+- Score each hypothesis (0-100) using subscores
 - Distinguish: 1=confirmatory (existing literature), 2=incremental extension, 3=novel discovery
 - For novel hypotheses: justify what makes them NEW vs existing literature
-- Propose specific validation experiments: In-Vitro (cell lines, assays) → In-Vivo (animal models) → Translational (patient samples)
+
+**Minimal Experiment Design (REQUIRED for each hypothesis):**
+- Propose ≤3 experiments with: quantitative readouts, proper controls, clear support/refute criteria
+- Example format: "If [intervention], expect [measurable outcome] in [timeframe]. Support: >X% change. Refute: <Y% change."
+
+**Evidence Standards:**
+- ONLY make claims supported by the data or literature provided
+- If no evidence exists for a connection, explicitly state: "No direct evidence found"
+- Do NOT fabricate, hallucinate, or extrapolate unsupported claims
+- Distinguish between "supported by data", "suggested by literature", and "speculative"
 
 **Scoring Rubric:**
 - 0-30: Weak support, speculative
 - 31-60: Moderate support, some mechanistic basis
 - 61-80: Strong support, clear mechanism, testable
-- 81-100: Exceptional, multiple converging evidence lines, high clinical potential
+- 81-100: Exceptional, multiple converging evidence lines
 
 Keep tables concise. Prioritize actionable, testable hypotheses over confirmatory observations."""),
             HumanMessage(content=reporting_prompt)

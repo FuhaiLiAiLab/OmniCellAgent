@@ -21,13 +21,13 @@ bash scripts/stop_services.sh
 
 **Simple Query (Literature Research):**
 ```bash
-conda run -n autogen-dev python agent/simple_magentic_agent.py \
+conda run -n langgraph-dev python agent/simple_magentic_agent.py \
   --query "What are the key therapeutic targets for Alzheimer's Disease?"
 ```
 
 **Full Analysis Pipeline (with Omic Data):**
 ```bash
-conda run -n autogen-dev python agent/simple_magentic_agent.py \
+conda run -n langgraph-dev python agent/simple_magentic_agent.py \
   --query "Analyze lung cancer: find relevant genes, perform differential expression analysis, and identify therapeutic targets. Use Omni cell mining agent to do enrichment" \
   --session-id "lung_cancer_analysis"
 ```
@@ -44,12 +44,18 @@ Results will be saved in `webapp/sessions/lung_cancer_analysis/` including:
 ### 3. Launch Web UI
 
 ```bash
-conda run -n autogen-dev python webapp/index.py
-# Access at http://localhost:8050
+# Via startup script (recommended - starts all services)
+bash scripts/startup.sh
+# Access locally at http://localhost:8050
+# Public access at https://agent.omni-cells.com
+
+# Or standalone
+conda run -n langgraph-dev python webapp/index.py
 ```
 
 The Web UI provides:
-- **Session Management**: Each conversation creates a unique session ID (e.g., `session_20251218_143022_a1b2c3d4`)
+- **Responsive Layout**: Auto-adjusts to screen size for optimal viewing
+- **Session Management**: Each conversation creates a unique session ID
 - **Real-time Progress**: See step-by-step agent reasoning and tool calls
 - **Visualization**: Plots and figures from analysis are displayed inline
 - **Output Storage**: All session outputs saved in `webapp/sessions/<session_id>/`
@@ -58,8 +64,8 @@ The Web UI provides:
 
 ```bash
 # Create conda environment
-conda create -n autogen-dev python=3.10
-conda activate autogen-dev
+conda create -n langgraph-dev python=3.10
+conda activate langgraph-dev
 
 # Install dependencies
 pip install -r requirements.txt --no-deps
