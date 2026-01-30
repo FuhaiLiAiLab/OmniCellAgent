@@ -35,7 +35,7 @@ async def lifespan(app: Starlette):
     
     # Initialize components
     storage = FileStorage(base_dir="./fasta2a_storage")
-    worker = LangGraphWorker(storage=storage, model_name="gemini-2.0-flash-exp")
+    worker = LangGraphWorker(storage=storage)  # Use agent's default model
     broker = InMemoryBroker(storage=storage, worker=worker, max_concurrent_tasks=2)
     
     # Start broker

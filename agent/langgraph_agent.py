@@ -54,6 +54,7 @@ from tools.pubmed_tools.query_pubmed_tool import query_medical_research_async
 from tools.google_search_tools.google_search_w3m import google_search, web_search_tool
 # Lite PubMed search (no PDF download, just metadata + abstracts)
 from langchain_community.tools.pubmed.tool import PubmedQueryRun
+from langchain_community.utilities.pubmed import PubMedAPIWrapper
 from tools.scientist_rag_tools.scientist_tool import scientist_rag_tool_wrapper
 from tools.gretriever_tools.gretriever_client import gretriever_tool
 
@@ -415,7 +416,9 @@ async def pubmed_search_tool(query: str) -> str:
 
 
 # Create lite PubMed tool instance (no PDF download, just metadata + abstracts from NCBI)
-_pubmed_lite = PubmedQueryRun()
+# Configured to retrieve 20 papers (increased from default of 3)
+_pubmed_api_wrapper = PubMedAPIWrapper(top_k_results=20, doc_content_chars_max=5000)
+_pubmed_lite = PubmedQueryRun(api_wrapper=_pubmed_api_wrapper)
 
 @tool
 def pubmed_lite_tool(query: str) -> str:
@@ -423,6 +426,7 @@ def pubmed_lite_tool(query: str) -> str:
     Lightweight PubMed search - returns abstracts and metadata only (NO PDF download).
     Much faster than full pubmed_search_tool but doesn't provide full paper content.
     Use this for quick literature overview or when PDF download is not needed.
+    Retrieves up to 20 papers per query.
     
     Args:
         query: Search query for PubMed

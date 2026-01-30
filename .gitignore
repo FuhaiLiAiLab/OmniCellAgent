@@ -15,6 +15,7 @@ configs/*.env
 *.crt
 *.p12
 *.pfx
+fasta2a_storage/*
 
 # Credentials and secrets
 .credentials

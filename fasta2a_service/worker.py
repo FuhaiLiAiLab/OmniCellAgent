@@ -240,9 +240,10 @@ class ArtifactExtractor:
 class LangGraphWorker:
     """Worker that executes LangGraph agent tasks"""
     
-    def __init__(self, storage: FileStorage, model_name: str = "gemini-2.0-flash-exp"):
+    def __init__(self, storage: FileStorage, model_name: Optional[str] = None, timeout: int = 2000):
         self.storage = storage
-        self.model_name = model_name
+        self.model_name = model_name  # None means use agent default
+        self.timeout = timeout  # Timeout in seconds for long-running queries
     
     async def execute_task(self, task: Task, context_state: Optional[Dict[str, Any]] = None) -> Task:
         """
@@ -261,10 +262,16 @@ class LangGraphWorker:
             self.storage.save_task(task)
             
             # Create agent instance
-            agent = LangGraphOmniCellAgent(
-                model_name=self.model_name,
-                session_id=task.context_id  # Use context_id as session_id
-            )
+            if self.model_name:
+                agent = LangGraphOmniCellAgent(
+                    model_name=self.model_name,
+                    session_id=task.context_id  # Use context_id as session_id
+                )
+            else:
+                # Use default configuration from agent
+                agent = LangGraphOmniCellAgent(
+                    session_id=task.context_id  # Use context_id as session_id
+                )
             
             # If we have previous context, we could restore some state here
             # For now, LangGraph agent creates fresh state each time
