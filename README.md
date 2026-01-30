@@ -2,6 +2,24 @@
 
 ![](webapp/assets/dash-logo-stripe.svg)
 
+## 🎥 YouTube Video Description (Landing Page)
+
+
+
+Meet OmniCellAgent — an AI Co-Scientist for autonomous single-cell omics deep research. This platform combines advanced agentic orchestration systems with bio-focused specialized databases and foundation models to accelerate biomedical discovery. Explore intelligent research automation, transparent step-by-step progress, and rich visual outputs that bring complex analyses to life.
+
+Whether you're exploring disease mechanisms, prioritizing targets, or synthesizing literature and omics data, OmniCellAgent helps you move from questions to insights faster.
+
+Learn more and follow the lab here: https://www.youtube.com/@FuhaiLiAILab
+
+Additional links:
+- Lab: https://fuhailiailab.github.io
+- GitHub: https://github.com/FuhaiLiAiLab/OmniCellAgent
+- Paper: https://www.biorxiv.org/content/10.1101/2025.07.31.667797v1
+
+demo at https://agent.omni-cells.com
+ (might not always be up due to maintainence and updates)
+
 ## 🚀 Quick Start
 
 ### 1. Start All Services
@@ -22,7 +40,7 @@ bash scripts/stop_services.sh
 ```bash
 
 # Run all default test cases from scratch
-source ~/miniconda3/etc/profile.d/conda.sh && conda activate langgraph-dev && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in pancreatic ductal adenocarcinoma (PDAC)?" --session-id PDAC-test && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in Alzheimer's Disease?" --session-id AD-test && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in Lung Cancer?" --session-id LungCancer-test
+source ~/miniconda3/etc/profile.d/conda.sh && conda activate langgraph-dev && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in pancreatic ductal adenocarcinoma (PDAC)?" --session-id PDAC-test && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in Alzheimer's Disease?" --session-id AD-test && python -m agent.langgraph_agent --query "What are the key dysfunctional genes and pathways in Lung adenocarcinoma (LUAD)?" --session-id LungCancer-test
 
 ```
 
@@ -73,16 +91,159 @@ The Web UI provides:
 
 ### 4. Installation
 
+#### 4.1 Environment & Core Dependencies
+
 ```bash
-# Create conda environment
+# Create conda environment (Python 3.8+ recommended, 3.10 tested)
 conda create -n langgraph-dev python=3.10
 conda activate langgraph-dev
 
-# Install dependencies
-pip install -r requirements.txt --no-deps
+# Install graphviz (required for KEGG pathway tools)
+conda install anaconda::graphviz
 
-# Configure paths in configs/paths.yaml
-# Set Neo4j path, OmniCellTOSG path, etc.
+# Install Python dependencies
+pip install -r requirements.txt --no-deps
+```
+
+**Key Libraries**: The system requires PyTorch and graph-processing libraries compatible with joint GNN and LLM modeling for OmniCellTOSG integration.
+
+#### 4.2 Configuration Files Setup
+
+**Create environment file** (`configs/db.env`):
+```bash
+# Copy example file
+cp configs/db.env.example configs/db.env
+
+# Edit with your credentials
+# NEO4J_URI=bolt://localhost:7687
+# NEO4J_USER=neo4j
+# NEO4J_PASSWORD=your_password
+# GOOGLE_API_KEY=your_google_api_key
+# OPENAI_API_KEY=your_openai_key
+```
+
+**Create paths configuration** (`configs/paths.yaml`):
+```bash
+# Copy example file
+cp configs/paths.yaml.example configs/paths.yaml
+
+# Edit paths to point to your local directories
+# Key paths to configure:
+# - neo4j_path: Path to Neo4j database directory
+# - omnicelltosg_root: Path to OmniCellTOSG dataset
+# - sessions_base: Where to store analysis sessions
+```
+
+**Example paths.yaml structure**:
+```yaml
+neo4j:
+  database_path: "/path/to/neo4j-community-2025.03.0"
+  
+omnicelltosg:
+  dataset_root: "/path/to/OmniCellTOSG/CellTOSG_dataset_v2"
+  checkpoint_dir: "/path/to/checkpoints"
+
+sessions:
+  base: "./webapp/sessions"
+  
+cache:
+  author_kb: "./cache/author_kb"
+  omic_data: "./cache/omic_data"
+```
+
+#### 4.3 Neo4j Database Setup
+
+**Install Neo4j** (version 5.23+ recommended):
+```bash
+# Follow official instructions for your OS
+# https://neo4j.com/docs/operations-manual/current/installation/
+
+# Install required plugins:
+# - GenAI plugin: https://neo4j.com/docs/cypher-manual/current/genai-integrations/
+# - Graph Data Science library: https://neo4j.com/docs/graph-data-science/current/installation/
+```
+
+**Load PrimeKG Dataset**:
+- Option 1: Run the Jupyter notebook `data-loading/stark_prime_neo4j_loading.ipynb`
+- Option 2: Download database dump from AWS S3: `s3://gds-public-dataset/stark-prime-neo4j523`
+
+**Start Neo4j**:
+```bash
+# Navigate to Neo4j installation directory
+cd /path/to/neo4j-community-2025.03.0
+
+# Start in background
+nohup bin/neo4j console > logs/neo4j_log.out 2>&1 &
+
+# Verify it's running
+curl http://localhost:7474
+```
+
+#### 4.4 OmniCellTOSG Dataset & Model Setup
+
+**Download the dataset**:
+```bash
+# Option 1: Download from HuggingFace
+# Visit: https://huggingface.co/datasets/FuhaiLiAiLab/OmniCellTOSG_Dataset
+
+# Option 2: Use the official repository download script
+git clone https://github.com/FuhaiLiAiLab/OmniCellTOSG.git
+cd OmniCellTOSG
+# Follow download instructions in the repository
+```
+
+**Configure dataset path**:
+```bash
+# Edit configs/paths.yaml and set:
+# omnicelltosg:
+#   dataset_root: "/path/to/OmniCellTOSG/CellTOSG_dataset_v2"
+```
+
+**Download pre-trained model checkpoints**:
+```bash
+# Create checkpoint directory
+mkdir -p checkpoints
+
+# Download OmniCell-v1 weights
+# Place in checkpoints/ directory to enable inference
+```
+
+**Data Loader Configuration**:
+When using OmniCellTOSG in your code:
+```python
+from tools.omic_tools.data_loader import CellTOSGDataLoader
+
+# Point to your local dataset path
+loader = CellTOSGDataLoader(
+    root='../OmniCellTOSG/CellTOSG_dataset_v2'
+)
+```
+
+**Pre-training and Fine-tuning** (optional):
+```bash
+# Pre-training: Learn topological patterns and interaction mechanisms
+python pretrain.py
+
+# Downstream tasks: Disease classification, cell-type identification
+python train.py
+
+# Tutorials: Extract cell embeddings
+jupyter notebook Tutorial_Cluster_blood.ipynb
+```
+
+#### 4.5 Additional Services Setup
+
+**R Environment for KEGG Pathway Analysis**:
+```bash
+# Install required R packages
+cd enrichment
+bash install_r_package.sh
+```
+
+**Verify all paths are configured**:
+```bash
+# Check that all required directories exist
+python -c "from utils.path_config import get_path; print('Config OK')"
 ```
 
 ---
@@ -154,99 +315,164 @@ See
 
 If you used the enrichment study part, please also cite OmniCellTOSG https://arxiv.org/abs/2504.02148 
 
-# Troubleshoot
+# Troubleshooting
 
-## Todo
-- add autogen_ext.memory.canvas to store memory
-- line 487-488, **tool call** messages are ignored. source: autogen_agentchat\teams\_group_chat\_magentic_one\_magentic_one_orchestrator.py 
-- line 493, **tool call summary*** is added to the message thread instead
+## Common Issues
 
-
-## Neo4j Installation
-### The database & dataset
-Install the Neo4j database (and relevant JDK) by following [official instructions](https://neo4j.com/docs/operations-manual/current/installation/linux/debian/#debian-installation).
-You'll also need the Neo4j [GenAI plugin](https://neo4j.com/docs/cypher-manual/current/genai-integrations/#_installation) and the Neo4j [Graph Data Science library](https://neo4j.com/docs/graph-data-science/current/installation/).
-
-With the database installed and running, you can load the STaRK-Prime dataset by running the python notebook in `data-loading/stark_prime_neo4j_loading.ipynb`.
-Alternatively, obtain a database dump at AWS S3 (bucket at gds-public-dataset/stark-prime-neo4j523) for database version 5.23.
-
-
-## Prerequisite
-
-
-Data downloading
-
-
-Use sftp to connect to server
-
-
-
-
-
-### Biomedical Tool Setup
-
-To Install keggtools require **graphviz**, you need to use conda to install first:
-
+### API Key Issues
+Ensure your `.env` file is in the project root with:
+```bash
+GOOGLE_API_KEY=your_key_here
+OPENAI_API_KEY=your_key_here
 ```
+
+Load in Python with:
+```python
+from dotenv import load_dotenv
+load_dotenv()
+```
+
+### Neo4j Connection Issues
+- Verify Neo4j is running: `curl http://localhost:7474`
+- Check credentials in `configs/db.env` match your Neo4j setup
+- Ensure ports 7474 and 7687 are not blocked
+
+### OmniCellTOSG Data Loading Issues
+- Verify dataset path in `configs/paths.yaml` points to the correct directory
+- Ensure you have downloaded the full CellTOSG_dataset_v2
+- Check that `df_all` metadata contains required fields: tissue, tissue_general, disease, cell_type
+
+### Graphviz Installation Issues
+If KEGG pathway visualization fails, ensure graphviz is installed via conda:
+```bash
 conda install anaconda::graphviz
 ```
 
-### Python Environment Setup
-Once the **graphviz** is installed, you can set up the rest of the Python environment by running the following commands in the terminal:
-```
-pip install -r requirement.txt
-```
-
-### API Key Setup
-
-
-Place a .env file in the Folder
+### Service Connection Issues
+Check service logs:
+```bash
+tail -f logs/service-logs/scientist_tool.log
+tail -f logs/service-logs/gretriever_service_output.log
 ```
 
-from dotenv import load_dotenv
+## Known Limitations
 
-load_dotenv()  
+- **Memory management**: Tool call messages are not preserved in long-running conversations to prevent context overflow (see `autogen_agentchat/teams/_group_chat/_magentic_one/_magentic_one_orchestrator.py` lines 487-488)
+- **Tool call summaries**: Summary messages are added to thread instead of full tool responses (line 493)
 
+## Todo
+- Add `autogen_ext.memory.canvas` for persistent memory storage
+- Implement better context window management for long-running sessions
+
+---
+
+## 🚀 Running the Agent
+
+### Quick Start (Recommended)
+
+**Use the automated startup script**:
+```bash
+# Start all services (Neo4j, RAG tools, microservices)
+bash scripts/startup.sh
+
+# Test all services are running
+bash scripts/test_services.sh
+
+# Access Web UI at http://localhost:8050
 ```
 
-## Run the agent
+This handles all services automatically. The manual steps below are provided for **troubleshooting** and understanding the system architecture.
 
-### First step: Start the Scientist RAG
+### Manual Startup (For Troubleshooting)
 
-```
-python tools/scientist_tool.py
-```
+Read these steps to understand what `scripts/startup.sh` does internally, or to debug service issues.
 
-or use nohup to run it in the background
-```
-nohup python tools/scientist_tool.py > logs/scientist_tool_output.log 2>&1 &
-```
+#### Step 1: Start Neo4j Database
+```bash
+# Navigate to Neo4j installation directory
+cd /path/to/neo4j-community-2025.03.0
 
-### Second step: Start the G-Retriever Tool
+# Start in background
+nohup bin/neo4j console > logs/neo4j_log.out 2>&1 &
 
-#### First, Start Neo4j Database
-Go to the directory where Neo4j is installed, and run the following command to start the database (supposed to be installed in `/neo4j-community-2025.03.0`):
-
-```
-nohup /bin/neo4j console > /logs/neo4j_log.out 2>&1 &
-```
-#### Second, Start the G-Retriever Service
-
-```
-python tools/gretriever_service.py
+# Verify it's running
+curl http://localhost:7474
 ```
 
+#### Step 2: Start Scientist RAG Service
+```bash
+# Option 1: Foreground
+python tools/scientist_rag_tools/scientist_tool.py
 
-### Third step: Start the Magentic Agent
+# Option 2: Background (recommended)
+nohup python tools/scientist_rag_tools/scientist_tool.py > logs/scientist_tool_output.log 2>&1 &
 
-```
-python magentic_agent.py --task "What are the key dysfunctional signaling targets in microglia of AD?" --task_id "1" --mode magentic > logs/results.txt
+# Verify
+curl http://localhost:8000/health
 ```
 
-Or put in UI:
+#### Step 3: Start G-Retriever Service
+```bash
+# Option 1: Foreground
+python tools/gretriever_tools/gretriever_service.py
+
+# Option 2: Background (recommended)  
+nohup python tools/gretriever_tools/gretriever_service.py > logs/gretriever_service_output.log 2>&1 &
+
+# Verify
+curl http://localhost:8001/health
 ```
-What are the key dysfunctional signaling targets in microglia of AD, based on the internal database?
+
+#### Step 4: Run the Agent
+
+**Command Line Interface**:
+```bash
+# Basic query
+python agent/simple_magentic_agent.py \
+  --task "What are the key dysfunctional signaling targets in microglia of AD?" \
+  --task_id "1" \
+  --mode magentic > logs/results.txt
+
+# With LangGraph agent (full pipeline)
+python -m agent.langgraph_agent \
+  --query "What are the key dysfunctional genes and pathways in pancreatic ductal adenocarcinoma?" \
+  --session-id PDAC-test
 ```
+
+**Web UI**:
+```bash
+# Start web interface
+python webapp/index.py
+
+# Access at http://localhost:8050
+# Example query: "What are the key dysfunctional signaling targets in microglia of AD, based on the internal database?"
+```
+
+### Stop All Services
+```bash
+bash scripts/stop_services.sh
+```
+
+### Testing Individual Modules
+
+Many modules include testing code in their `__main__` block for easy standalone testing:
+
+```bash
+# Test individual tools directly
+python tools/scientist_rag_tools/scientist_tool.py    # Starts RAG service
+python tools/gretriever_tools/gretriever_service.py   # Starts GRetriever service
+python tools/omic_tools/omic_fetch_analysis_workflow.py  # Test omic workflow
+python tools/pubmed_tools/query_pubmed_tool.py        # Test PubMed search
+python tools/google_search_tools/google_search_w3m.py # Test Google search
+
+# Test utilities
+python utils/path_config.py                           # Verify path configuration
+python tools/omic_tools/ner_tool.py                   # Test NER extraction
+```
+
+This makes it easy to isolate and debug specific components without running the full agent system.
+
+---
 
 
 

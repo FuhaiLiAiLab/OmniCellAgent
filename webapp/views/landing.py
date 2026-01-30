@@ -80,6 +80,16 @@ layout = html.Div([
                                    'font-size': '14px',
                                    'margin-right': '15px'
                                }),
+                           html.A("[youtube]", 
+                               href="https://www.youtube.com/@FuhaiLiAILab", 
+                               target="_blank",
+                               style={
+                                'color': '#7b5e57', 
+                                'text-decoration': 'none', 
+                                'font-family': 'Georgia, serif', 
+                                'font-size': '14px',
+                                'margin-right': '15px'
+                               }),
                         html.A("[paper]", 
                                href="https://www.biorxiv.org/content/10.1101/2025.07.31.667797v1", 
                                target="_blank",

@@ -1,0 +1,15 @@
+# FastA2A Service Dependencies
+# Install with: pip install -r fasta2a_service/requirements.txt
+
+# Core web framework
+starlette>=0.40.0
+uvicorn[standard]>=0.32.0
+
+# HTTP client for examples
+requests>=2.32.0
+
+# Optional: Official FastA2A package (not required for current implementation)
+# fasta2a>=0.1.0
+
+# Note: This service also requires all OmniCellAgent dependencies
+# Install those from the main requirements.txt first
