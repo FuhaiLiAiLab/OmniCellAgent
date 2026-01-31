@@ -20,6 +20,26 @@ Additional links:
 demo at https://agent.omni-cells.com
  (might not always be up due to maintainence and updates)
 
+## 🤝 Agent-to-Agent (A2A) Protocol Support
+
+OmniCellAgent now supports the **FastA2A protocol**, enabling seamless integration with other AI agents like GitHub Copilot and Claude. This allows external tools to leverage OmniCellAgent's biomedical research capabilities through a standard HTTP API.
+
+**Quick Start:**
+```bash
+# Start the A2A server (port 8021)
+cd fasta2a_service
+conda activate a2a-dev
+nohup python server.py > server.log 2>&1 &
+```
+
+**Key Features:**
+- ✅ Full A2A protocol compliance (task submission, polling, artifacts)
+- ✅ Async task processing with status tracking
+- ✅ Comprehensive biomedical research capabilities (omics, literature, pathways)
+- ✅ Compatible with GitHub Copilot, Claude, and other A2A-enabled tools
+
+See [fasta2a_service/README.md](fasta2a_service/README.md) for detailed documentation and API reference.
+
 ## 🚀 Quick Start
 
 ### 1. Start All Services
