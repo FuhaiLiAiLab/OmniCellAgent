@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "omnicell": {
+      "command": "conda",
+      "args": [
+        "run",
+        "-n",
+        "a2a-dev",
+        "python",
+        "/home/hao/BioProtocol/OmniCellAgent/mcp_tools/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/hao/BioProtocol/OmniCellAgent"
+      }
+    }
+  }
+}

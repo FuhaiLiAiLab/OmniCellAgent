@@ -20,9 +20,34 @@ Additional links:
 demo at https://agent.omni-cells.com
  (might not always be up due to maintainence and updates)
 
-## 🤝 Agent-to-Agent (A2A) Protocol Support
+## 🤝 AI Agent Integration
 
-OmniCellAgent now supports the **FastA2A protocol**, enabling seamless integration with other AI agents like GitHub Copilot and Claude. This allows external tools to leverage OmniCellAgent's biomedical research capabilities through a standard HTTP API.
+OmniCellAgent supports multiple protocols for integration with AI agents and development tools:
+
+### Model Context Protocol (MCP)
+
+Integrate OmniCellAgent with Claude Desktop, VS Code, and other MCP-enabled tools.
+
+**Quick Start:**
+```bash
+# Run MCP server
+cd mcp_tools
+conda activate a2a-dev
+python server.py
+```
+
+**Available Tools:**
+- 🔬 `search_pubmed` - PubMed literature search with full-text extraction
+- 🌐 `search_web` - Google Custom Search with content extraction
+- 🧬 `search_knowledge_graph` - Neo4j biomedical knowledge graph queries
+- 👨‍🔬 `query_scientist_knowledge` - RAG over specific author's publications
+- 📊 `analyze_omics_data` - Comprehensive single-cell omics analysis
+
+See [mcp_tools/README.md](mcp_tools/README.md) for detailed documentation and Claude Desktop setup.
+
+### Agent-to-Agent (A2A) Protocol
+
+HTTP-based async protocol for agent-to-agent communication.
 
 **Quick Start:**
 ```bash
@@ -33,12 +58,11 @@ nohup python server.py > server.log 2>&1 &
 ```
 
 **Key Features:**
-- ✅ Full A2A protocol compliance (task submission, polling, artifacts)
 - ✅ Async task processing with status tracking
-- ✅ Comprehensive biomedical research capabilities (omics, literature, pathways)
-- ✅ Compatible with GitHub Copilot, Claude, and other A2A-enabled tools
+- ✅ Long-running biomedical research workflows (5-30 minutes)
+- ✅ Full A2A protocol compliance (task submission, polling, artifacts)
 
-See [fasta2a_service/README.md](fasta2a_service/README.md) for detailed documentation and API reference.
+See [fasta2a_service/README.md](fasta2a_service/README.md) for API reference.
 
 ## 🚀 Quick Start
 
