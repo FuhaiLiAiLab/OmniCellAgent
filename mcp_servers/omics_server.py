@@ -1,28 +1,19 @@
-"""
-Omics Analysis MCP Server
-
-Exposes single-cell omics analysis workflow via MCP protocol.
-Port: 9005 (SSE) or stdio
-"""
-
+"""Omics Analysis MCP Server - Port 9005"""
 import os
 import sys
 import asyncio
 from typing import Optional
 
-# Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
 from fastmcp import FastMCP
 from dotenv import load_dotenv
 
-# Import omic tools
 sys.path.insert(0, os.path.join(project_root, 'tools', 'omic_tools'))
 from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
 
 load_dotenv(os.path.join(project_root, '.env'))
-
 # Initialize MCP server
 mcp = FastMCP("Omics Analysis Tools 📊")
 

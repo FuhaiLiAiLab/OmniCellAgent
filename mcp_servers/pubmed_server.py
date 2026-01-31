@@ -1,15 +1,8 @@
-"""
-PubMed MCP Server
-
-Exposes PubMed search and paper retrieval tools via MCP protocol.
-Port: 9001 (SSE) or stdio
-"""
-
+"""PubMed MCP Server - Port 9001"""
 import os
 import sys
 from typing import Optional
 
-# Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
@@ -18,8 +11,6 @@ from tools.pubmed_tools.query_pubmed_tool import query_medical_research_async
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(project_root, '.env'))
-
-# Initialize MCP server
 mcp = FastMCP("PubMed Research Tools 📚")
 
 

@@ -1,14 +1,7 @@
-"""
-Scientist RAG MCP Server
-
-Exposes author-specific RAG tools via MCP protocol.
-Port: 9004 (SSE) or stdio
-"""
-
+"""Scientist RAG MCP Server - Port 9004"""
 import os
 import sys
 
-# Add project root to path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
@@ -17,8 +10,6 @@ from tools.scientist_rag_tools.scientist_tool import scientist_rag_tool_wrapper
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(project_root, '.env'))
-
-# Initialize MCP server
 mcp = FastMCP("Scientist RAG Tools 👨‍🔬")
 
 
