@@ -1,0 +1,45 @@
+# Expert Scientist Configuration
+# ================================
+# IMPORTANT: Copy this file to experts.yaml and fill in real author names.
+# Do NOT commit experts.yaml — it is gitignored (configs/* rule).
+#
+# Each expert maps to a real researcher whose PubMed publications are fetched
+# and built into a per-expert RAG knowledge base. The real_name is used ONLY
+# for the initial PubMed query and is NEVER exposed to the agent or end users.
+#
+# Fields:
+#   real_name   — PubMed author query string, e.g. "Smith J" (PRIVATE, never logged)
+#   alias       — Anonymized expert name visible to the agent (must match ScientistsAgent expert keys)
+#   domain      — Short domain tag
+#   description — Domain description for tool metadata
+#   cache_key   — Folder name under cache/author_kb/ for the cached KB
+#   top_k       — Max papers to fetch per author
+
+experts:
+  - real_name: "CHANGE_ME"
+    alias: "GenomicsExpert"
+    domain: "genomics"
+    description: "Genomics, gene regulation, functional genomics, cancer genomics"
+    cache_key: "genomics_expert"
+    top_k: 100
+
+  - real_name: "CHANGE_ME"
+    alias: "NeuroscienceExpert"
+    domain: "neuroscience"
+    description: "Neuroscience, neurodegeneration, neuroinflammation"
+    cache_key: "neuroscience_expert"
+    top_k: 100
+
+  - real_name: "CHANGE_ME"
+    alias: "LongevityBiostatsExpert"
+    domain: "longevity_biostats"
+    description: "Longevity, aging biology, biostatistics, epigenetic clocks"
+    cache_key: "longevity_biostats_expert"
+    top_k: 100
+
+  - real_name: "CHANGE_ME"
+    alias: "BioinformaticsExpert"
+    domain: "bioinformatics"
+    description: "Bioinformatics, single-cell analysis, systems biology"
+    cache_key: "bioinformatics_expert"
+    top_k: 100

@@ -52,6 +52,9 @@ paperscraper
 ProCyongraphlets/
 
 configs/*
+# Allow example config templates to be committed
+!configs/*.example
+!configs/experts.yaml.example
 
 
 webapp/cache/*

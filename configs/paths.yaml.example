@@ -1,0 +1,62 @@
+# Path Configuration for bioRAG
+# All paths can be absolute or relative to the project root
+# Relative paths are recommended for portability
+
+# IMPORTANT: Copy this file to paths.yaml and update the paths for your system
+# Do NOT commit paths.yaml - it may contain system-specific or sensitive paths
+
+# Base directories
+base:
+  project_root: "."
+  cache: "cache"
+  logs: "logs"
+  configs: "configs"
+
+# Cache directories
+cache:
+  upload_file: "cache/upload_file"
+  author_kb: "cache/author_kb"
+  author_kb_copy: "cache/author_kb_copy"
+  old_author_kb: "cache/old_author_kb"
+  pubmed_jsonl: "cache/PudMed_DB/jsonl_cache"
+  pubmed_doi: "cache/PudMed_DB/doi_cache"
+  cl: "cache/cl"
+  omic_data: "cache/omic_data"
+  pytermino: "cache/pytermino"
+  qa: "cache/QA"
+
+# Data directories
+data:
+  dataset_outputs: "dataset_outputs"
+  differential_expression: "dataset_outputs/differential_expression"
+  volcano_plots: "dataset_outputs/volcano_plots"
+  enrichment_results: "dataset_outputs/enrichment_results"
+  enrichment_plots: "dataset_outputs/enrichment_results/enrichment_plots"
+  plot: "dataset_outputs/plot"
+
+# External data sources (UPDATE THESE PATHS FOR YOUR SYSTEM)
+external:
+  # Neo4j home directory - update this path for your system
+  # Example: "/home/username/Applications/neo4j-community-2025.10.1"
+  neo4j_home: "/path/to/neo4j-community"
+  
+  # OmniCellTOSG root directory - update this path for your system
+  # Example: "/home/username/Projects/OmniCellTOSG"
+  omnicell_root: "/path/to/OmniCellTOSG"
+  
+  # OmniCellTOSG data root - update this path for your system
+  # Example: "/home/username/Projects/OmniCellTOSG/OmniCellTOSG_Dataset"
+  omnicell_data_root: "/path/to/OmniCellTOSG_Dataset"
+  
+  # BioMedGraphica directory - update this path for your system
+  # Example: "/home/username/Projects/OmniCellTOSG/OmniCellTOSG_Dataset/BioMedGraphica-Conn"
+  biomedgraphica_dir: "/path/to/BioMedGraphica-Conn"
+  
+  # Huggingface cache - update this path for your system
+  # Example: "/home/username/.cache/huggingface/hub"
+  huggingface_cache: "/path/to/huggingface/hub"
+
+# Log directories
+logs:
+  base: "logs"
+  service: "logs/service-logs"

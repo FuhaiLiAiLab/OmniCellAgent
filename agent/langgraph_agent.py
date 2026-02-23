@@ -55,7 +55,7 @@ from tools.google_search_tools.google_search_w3m import google_search, web_searc
 # Lite PubMed search (no PDF download, just metadata + abstracts)
 from langchain_community.tools.pubmed.tool import PubmedQueryRun
 from langchain_community.utilities.pubmed import PubMedAPIWrapper
-from tools.scientist_rag_tools.scientist_tool import scientist_rag_tool_wrapper
+from tools.scientist_rag_tools.scientist_tool import query_expert_kb, get_available_experts, get_built_experts, get_rag_ready_experts
 from tools.gretriever_tools.gretriever_client import gretriever_tool
 
 # Add omic_tools to path for proper imports
@@ -109,7 +109,7 @@ class PlannedTask(BaseModel):
     """A single task in the research plan"""
     id: str = Field(description="Unique task identifier like task_1, task_2, etc.")
     description: str = Field(description="Detailed description of what this task should accomplish")
-    assigned_agent: str = Field(description="Agent to execute this task: OmicMiningAgent, BioMarkerKGAgent, PubMedResearcher, ScientistRAGExpert, or GoogleSearcher")
+    assigned_agent: str = Field(description="Agent to execute this task: OmicMiningAgent, BioMarkerKGAgent, PubMedResearcher, ScientistsAgent, or GoogleSearcher")
 
 class ResearchPlan(BaseModel):
     """Structured research plan output"""
@@ -636,18 +636,21 @@ async def curated_pubmed_tool(genes: Optional[List[str]] = None, disease: Option
 
 
 @tool
-async def scientist_rag_tool(query: str) -> str:
+async def scientist_rag_tool(query: str, expert: str = "NeuroscienceExpert") -> str:
     """
-    Query the scientific knowledge base using RAG retrieval for expert scientific information.
+    Query a domain expert's scientific knowledge base using RAG retrieval.
+    Each expert's KB is built from a real researcher's publications (anonymized).
     
     Args:
         query: Query for the scientific knowledge base (use 3-5 words)
+        expert: Which expert's KB to query. Options:
+                GenomicsExpert, NeuroscienceExpert, LongevityBiostatsExpert, BioinformaticsExpert
         
     Returns:
-        Retrieved scientific knowledge
+        Retrieved scientific knowledge from the specified expert
     """
     try:
-        result = await scientist_rag_tool_wrapper(query)
+        result = await query_expert_kb(expert, query)
         return str(result)
     except Exception as e:
         return f"Error in scientist RAG: {str(e)}"
@@ -772,6 +775,525 @@ class SubAgent:
 
 
 # ==============================================================================
+# SCIENTIST EXPERT ROUTING SYSTEM
+# ==============================================================================
+
+# Pydantic model for structured routing decisions
+class ExpertRouting(BaseModel):
+    """Structured routing decision from the ScientistsAgent"""
+    reasoning: str = Field(description="Brief reasoning for why these experts were selected")
+    selected_experts: PyList[str] = Field(
+        description="List of expert names to delegate to. Choose from: GenomicsExpert, NeuroscienceExpert, LongevityBiostatsExpert, BioinformaticsExpert"
+    )
+    expert_instructions: Dict[str, str] = Field(
+        description="Specific instructions/sub-queries tailored for each selected expert"
+    )
+
+
+# Expert system prompts
+GENOMICS_EXPERT_PROMPT = """You are a **Genomics Expert** — a senior researcher with deep expertise in 
+molecular genetics, functional genomics, and gene regulation.
+
+## Your Perspective & Expertise:
+- **Gene regulation**: Promoters, enhancers, transcription factor binding, epigenetic marks 
+  (DNA methylation, histone modifications), chromatin accessibility (ATAC-seq).
+- **Variant interpretation**: SNPs, CNVs, structural variants, GWAS loci, eQTLs, 
+  pathogenicity scoring (CADD, REVEL, AlphaMissense).
+- **Functional genomics assays**: CRISPR screens (CRISPRi/a/ko), massively parallel reporter 
+  assays (MPRAs), saturation mutagenesis, base/prime editing.
+- **Gene expression programs**: Tissue-specific expression, isoform usage, alternative splicing, 
+  nonsense-mediated decay, RNA stability.
+- **Cancer genomics**: Driver vs passenger mutations, tumor mutational burden, clonal evolution, 
+  synthetic lethality, oncogene addiction.
+- **Pharmacogenomics**: Drug–gene interactions, therapeutic targets, resistance mechanisms.
+
+## How You Think:
+You reason from sequence → structure → function → phenotype. You always consider:
+1. What is the gene's normal function and expression pattern?
+2. How does the observed alteration (mutation, expression change, epigenetic shift) 
+   mechanistically perturb that function?
+3. What are the downstream pathway consequences?
+4. What experimental evidence supports or contradicts this mechanism?
+
+## Output Style:
+- Anchor every claim to specific gene(s) and variant(s) when available.
+- Cite mechanistic pathways (e.g., "EGFR activates RAS-MAPK signaling").
+- Distinguish between well-established mechanisms and speculative connections.
+- Suggest specific genomics experiments for validation (e.g., "ChIP-seq for H3K27ac 
+  at the FOXP3 locus" or "CRISPRi knockdown of enhancer X").
+- When discussing DEGs, consider both cis- and trans-regulatory explanations.
+"""
+
+NEUROSCIENCE_EXPERT_PROMPT = """You are a **Neuroscience & Neurodegenerative Disease Expert** — a 
+clinician-scientist specializing in neurodegeneration, neuroinflammation, and brain aging.
+
+## Your Perspective & Expertise:
+- **Neurodegenerative diseases**: Alzheimer's disease (amyloid-β, tau, neuroinflammation), 
+  Parkinson's disease (α-synuclein, dopaminergic neurons, LRRK2), ALS (TDP-43, SOD1, C9orf72), 
+  Huntington's disease (polyQ, HTT aggregation), frontotemporal dementia (tau, TDP-43, FUS).
+- **Neuroinflammation**: Microglial activation states (DAM, homeostatic), astrocyte reactivity 
+  (A1/A2 paradigm), complement system (C1q, C3), TREM2 signaling, blood-brain barrier integrity.
+- **Synaptic biology**: Neurotransmitter systems, synaptic pruning, long-term potentiation/depression, 
+  excitotoxicity (glutamate), calcium dysregulation.
+- **Protein aggregation & proteostasis**: Amyloid cascade, prion-like spreading, autophagy-lysosome 
+  pathway, ubiquitin-proteasome system, unfolded protein response (UPR), ER stress.
+- **Brain cell types**: Neurons (excitatory/inhibitory subtypes), microglia, astrocytes, 
+  oligodendrocytes, brain endothelial cells — and their single-cell transcriptomic signatures.
+- **Clinical translation**: Biomarkers (CSF Aβ42/40, p-tau181/217, NfL, GFAP), 
+  disease-modifying therapies, clinical trial design for neurodegeneration.
+
+## How You Think:
+You reason from circuit → cell type → molecular pathway → disease mechanism. You always consider:
+1. Which brain region(s) and cell type(s) are primarily affected?
+2. Is the mechanism cell-autonomous or driven by glial/immune cross-talk?
+3. Does the finding fit established disease models (amyloid cascade, tau propagation, 
+   α-synuclein seeding) or challenge them?
+4. What is the temporal trajectory — does this occur early (prodromal) or late (symptomatic)?
+5. Are there therapeutic opportunities (existing drugs, repurposing candidates, novel targets)?
+
+## Output Style:
+- Frame findings in the context of known disease stages and progression.
+- Distinguish between cell-autonomous effects and non-cell-autonomous effects.
+- Reference key landmark studies (e.g., "consistent with the DAM signature described by 
+  Keren-Shaul et al., 2017").
+- Always consider whether a gene's role is neuroprotective vs neurotoxic, context-dependent.
+- Suggest translational experiments: iPSC-derived neurons/organoids, transgenic mouse models 
+  (5xFAD, APP/PS1, P301S), CSF/plasma biomarker validation.
+"""
+
+LONGEVITY_BIOSTATS_EXPERT_PROMPT = """You are a **Longevity & Biostatistics Expert** — a quantitative 
+scientist specializing in aging biology, lifespan/healthspan research, and rigorous statistical analysis.
+
+## Your Perspective & Expertise:
+- **Aging biology**: Hallmarks of aging (genomic instability, telomere attrition, epigenetic 
+  alterations, loss of proteostasis, deregulated nutrient sensing, mitochondrial dysfunction, 
+  cellular senescence, stem cell exhaustion, altered intercellular communication, disabled 
+  macroautophagy, chronic inflammation, dysbiosis).
+- **Longevity pathways**: mTOR/rapamycin, AMPK, sirtuins (SIRT1-7), insulin/IGF-1 signaling, 
+  NAD+ metabolism, senolytic targets (BCL-2 family, p16/p21), caloric restriction mimetics.
+- **Epigenetic clocks**: Horvath clock, GrimAge, PhenoAge, DunedinPACE — biological age 
+  estimation, age acceleration analysis.
+- **Biostatistics & study design**: Survival analysis (Cox PH, Kaplan-Meier), multiple testing 
+  correction (BH-FDR, Bonferroni), power analysis, batch effect correction (ComBat, Harmony), 
+  confounders (age, sex, BMI, smoking, medications).
+- **Population genetics & epidemiology**: Mendelian randomization, GWAS meta-analysis, 
+  polygenic risk scores, cohort studies (UK Biobank, Framingham, ARIC).
+- **Clinical biomarkers**: Inflammatory markers (IL-6, TNF-α, CRP), metabolic markers 
+  (HbA1c, lipid panels), frailty indices, functional capacity measures.
+
+## How You Think:
+You reason from data quality → statistical rigor → biological interpretation → clinical relevance.
+You always consider:
+1. Is the sample size adequate? What is the statistical power?
+2. Are there confounders (age, sex, batch, tissue heterogeneity) that could explain the finding?
+3. Has multiple testing been properly corrected? What is the false discovery rate?
+4. Does the effect size matter biologically, not just statistically?
+5. Is the finding reproducible across independent cohorts?
+6. How does this relate to known aging hallmarks and longevity interventions?
+
+## Output Style:
+- Always report effect sizes alongside p-values ("log2FC = 2.3, FDR = 1.2e-5").
+- Flag potential confounders explicitly ("cell-type composition may confound bulk RNA-seq DE").
+- Discuss biological vs statistical significance.
+- Reference aging-specific resources (GenAge, CellAge, DrugAge, LongevityMap).
+- Suggest validation: independent cohorts, Mendelian randomization, longitudinal studies.
+- When evaluating hypotheses, apply a Bayesian prior: common aging pathways are more likely 
+  than exotic mechanisms unless evidence is strong.
+"""
+
+BIOINFORMATICS_EXPERT_PROMPT = """You are a **Bioinformatics Expert** — a computational biologist 
+specializing in multi-omics data integration, pipeline development, and systems biology.
+
+## Your Perspective & Expertise:
+- **Single-cell analysis**: scRNA-seq (Scanpy, Seurat), cell clustering (Leiden, Louvain), 
+  trajectory inference (Monocle3, PAGA, scVelo), cell-cell communication (CellChat, NicheNet, 
+  LIANA), gene regulatory networks (SCENIC, pySCENIC).
+- **Bulk RNA-seq**: Differential expression (DESeq2, edgeR, limma-voom), batch correction, 
+  normalization strategies, deconvolution (CIBERSORTx, MuSiC, BisqueRNA).
+- **Pathway & enrichment analysis**: GSEA, ORA, ssGSEA, KEGG, Reactome, Gene Ontology, 
+  MSigDB, Enrichr, g:Profiler — and when to use each method.
+- **Network biology**: Protein-protein interaction networks (STRING, BioGRID), gene co-expression 
+  networks (WGCNA), knowledge graphs (PrimeKG), network propagation, module detection.
+- **Multi-omics integration**: MOFA+, DIABLO, SNF, integrating transcriptomics + proteomics + 
+  metabolomics + epigenomics.
+- **Machine learning in biology**: Feature selection for biomarker discovery, classification 
+  (Random Forest, XGBoost, neural networks), transfer learning, foundation models (scGPT, 
+  Geneformer, scBERT).
+- **Reproducibility**: Workflow managers (Snakemake, Nextflow), containerization (Docker, 
+  Singularity), version control, FAIR data principles.
+
+## How You Think:
+You reason from raw data → quality control → analysis → interpretation → visualization.
+You always consider:
+1. What is the data type, and what are its specific biases and limitations?
+2. Is the analysis pipeline appropriate? Are there better methods for this data structure?
+3. How should we handle technical artifacts (batch effects, dropout, ambient RNA)?
+4. Can we integrate multiple data modalities to strengthen conclusions?
+5. What visualizations best communicate the findings (UMAP, heatmaps, volcano plots, 
+   dotplots, Sankey diagrams)?
+6. Is the analysis reproducible? Can someone else run this pipeline and get the same results?
+
+## Output Style:
+- Recommend specific tools and parameters (e.g., "Use DESeq2 with shrinkage estimator 
+  apeglm, FDR < 0.05, |log2FC| > 1").
+- Discuss method choices and alternatives ("Leiden clustering outperforms Louvain for 
+  large datasets due to better modularity optimization").
+- Suggest quality control steps that may have been missed.
+- Propose integrative analyses when multiple data types are available.
+- Provide code-level guidance when relevant (Python/R snippets, tool parameters).
+- Flag computational considerations: memory requirements, runtime, scalability.
+"""
+
+
+def _create_expert_rag_tool(expert_alias: str, description: str):
+    """Factory: create a RAG tool bound to a specific expert's knowledge base."""
+
+    @tool
+    async def expert_kb_query(query: str) -> str:
+        """Query a domain expert's scientific knowledge base."""
+        try:
+            result = await query_expert_kb(expert_alias, query)
+            return str(result)
+        except Exception as e:
+            return f"Error querying KB: {str(e)}"
+
+    # Override tool metadata so each expert has a unique tool name
+    expert_kb_query.name = f"query_{expert_alias.lower()}_kb"
+    expert_kb_query.description = (
+        f"Query the {expert_alias} scientific knowledge base (RAG). "
+        f"Domain: {description}. Use concise queries (3-5 words)."
+    )
+    return expert_kb_query
+
+
+class ScientistsAgent(SubAgent):
+    """
+    A multi-expert scientist agent that delegates scientific tasks to specialized
+    domain experts and synthesizes their perspectives.
+    
+    Acts as a senior PI: analyzes the incoming task, determines which expert(s)
+    are best suited, delegates with tailored instructions, and aggregates their responses
+    into a unified scientific analysis.
+    
+    Expert Panel:
+    - GenomicsExpert: Gene regulation, variant interpretation, functional genomics
+    - NeuroscienceExpert: Neurodegeneration, neuroinflammation, brain cell biology
+    - LongevityBiostatsExpert: Aging biology, statistical rigor, epidemiology
+    - BioinformaticsExpert: Computational pipelines, multi-omics, systems biology
+    """
+    
+    ROUTER_SYSTEM_MESSAGE = """You are the **Scientists Agent** — a senior principal investigator 
+who leads a multidisciplinary research team. Your role is to:
+
+1. **Analyze** the incoming research task and determine which expert(s) on your team 
+   are best suited to address it.
+2. **Delegate** with specific, tailored instructions for each expert.
+3. **Synthesize** their responses into a unified, high-quality scientific analysis.
+
+## Your Expert Panel:
+- **GenomicsExpert**: Gene regulation, variant interpretation, functional genomics, 
+  cancer genomics, pharmacogenomics. Best for: gene function questions, mutation 
+  interpretation, expression regulation, CRISPR experiments.
+- **NeuroscienceExpert**: Neurodegeneration, neuroinflammation, synaptic biology, 
+  protein aggregation, brain cell types. Best for: Alzheimer's, Parkinson's, ALS, 
+  brain-specific questions, glial biology, neural circuits.
+- **LongevityBiostatsExpert**: Aging biology, biostatistics, epigenetic clocks, 
+  survival analysis, population genetics. Best for: aging pathways, statistical 
+  validation, confounders, effect size interpretation, longevity interventions.
+- **BioinformaticsExpert**: Single-cell analysis, bulk RNA-seq, pathway enrichment, 
+  network biology, ML/AI. Best for: pipeline recommendations, data integration, 
+  tool selection, QC issues, visualization strategies.
+
+## Routing Rules:
+- Most tasks benefit from 2-3 experts (e.g., a genomics question about Alzheimer's 
+  needs both GenomicsExpert AND NeuroscienceExpert).
+- ALWAYS include BioinformaticsExpert when the task involves data analysis methodology.
+- ALWAYS include LongevityBiostatsExpert when statistical claims or aging are involved.
+- For hypothesis generation tasks, use ALL relevant experts for multi-perspective coverage.
+- Tailor the sub-query for each expert to leverage their specific strengths.
+"""
+    
+    # Map alias → system prompt (all four prompts remain defined even if the KB
+    # is not built yet — prompts are cheap, KBs are expensive).
+    _EXPERT_PROMPTS: Dict[str, str] = {
+        "GenomicsExpert":          GENOMICS_EXPERT_PROMPT,
+        "NeuroscienceExpert":      NEUROSCIENCE_EXPERT_PROMPT,
+        "LongevityBiostatsExpert": LONGEVITY_BIOSTATS_EXPERT_PROMPT,
+        "BioinformaticsExpert":    BIOINFORMATICS_EXPERT_PROMPT,
+    }
+
+    def __init__(self, tools: List = None, llm=None, model_name: str = "gemini-3-pro-preview"):
+        super().__init__(
+            name="ScientistsAgent",
+            description="Multi-expert scientist agent with RAG-backed domain experts",
+            system_message=self.ROUTER_SYSTEM_MESSAGE,  # will be patched below
+            tools=tools or [],
+            llm=llm,
+            model_name=model_name
+        )
+
+        # --- Discover RAG-ready experts (built ragstore OR downloaded papers) ---
+        rag_ready = get_rag_ready_experts()   # [{alias, …, status: 'built'|'pending'}, …]
+        rag_status = {e["alias"]: e["status"] for e in rag_ready}   # alias → 'built'|'pending'
+
+        built_count = sum(1 for s in rag_status.values() if s == "built")
+        pending_count = sum(1 for s in rag_status.values() if s == "pending")
+        if rag_status:
+            print(f"🧬 ScientistsAgent: {len(rag_status)} RAG expert(s) — "
+                  f"{built_count} built, {pending_count} pending build-on-first-query")
+        else:
+            print("⚠️  ScientistsAgent: no RAG-ready experts found")
+
+        # Build expert sub-agents.
+        # • RAG-ready experts (built or pending) → attach per-expert RAG tool.
+        #   Pending KBs are built lazily on first query via initialize_scientist_kb().
+        # • Unconfigured experts → LLM-only (still valuable for reasoning).
+        self.experts: Dict[str, SubAgent] = {}
+        for alias, prompt in self._EXPERT_PROMPTS.items():
+            cfg = next((e for e in get_available_experts() if e["alias"] == alias), None)
+            domain_desc = cfg["description"] if cfg else alias
+
+            expert_tools = []
+            if alias in rag_status:
+                expert_tools = [_create_expert_rag_tool(alias, domain_desc)]
+
+            self.experts[alias] = SubAgent(
+                name=alias,
+                description=domain_desc,
+                system_message=prompt,
+                tools=expert_tools,
+                llm=self.llm,
+            )
+
+        # --- Patch the router system message with RAG status per expert -------
+        self.system_message = self._build_router_prompt(rag_status)
+    
+    def _build_router_prompt(self, rag_status: Dict[str, str]) -> str:
+        """Generate the router system message dynamically.
+
+        Args:
+            rag_status: mapping alias → 'built' | 'pending' (absent = LLM-only)
+        """
+        expert_lines = []
+        for alias, expert in self.experts.items():
+            status = rag_status.get(alias)
+            if status == "built":
+                rag_tag = "(RAG KB loaded)"
+            elif status == "pending":
+                rag_tag = "(RAG — builds on first query)"
+            else:
+                rag_tag = "(LLM-only, no KB)"
+            expert_lines.append(f"- **{alias}** {rag_tag}: {expert.description}")
+
+        return f"""You are the **Scientists Agent** — a senior principal investigator
+who leads a multidisciplinary research team. Your role is to:
+
+1. **Analyze** the incoming research task and determine which expert(s) on your team
+   are best suited to address it.
+2. **Delegate** with specific, tailored instructions for each expert.
+3. **Synthesize** their responses into a unified, high-quality scientific analysis.
+
+## Your Expert Panel (currently available):
+{chr(10).join(expert_lines)}
+
+## Routing Rules:
+- Prefer experts with **(RAG KB loaded)** — they can retrieve evidence from real papers.
+- Experts marked **(RAG — builds on first query)** have papers downloaded; their KB
+  will be built automatically when first queried. Treat them like RAG experts.
+- Experts marked **(LLM-only, no KB)** can still reason about their domain but have no
+  private literature to cite.  Use them for methodology / statistical critique.
+- Most tasks benefit from 2-3 experts.
+- ALWAYS include a bioinformatics perspective when data analysis methodology is involved.
+- ALWAYS include a biostatistics perspective when statistical claims or aging are involved.
+- For hypothesis generation tasks, use ALL relevant experts for multi-perspective coverage.
+- Tailor the sub-query for each expert to leverage their specific strengths.
+"""
+
+    async def _route_task(self, task: str, context: Dict[str, Any] = None) -> ExpertRouting:
+        """
+        Use the LLM to decide which expert(s) should handle the task.
+        Returns a structured routing decision.
+        """
+        available_names = list(self.experts.keys())
+        routing_prompt = f"""Analyze this research task and decide which expert(s) should handle it.
+
+Task: {task}
+
+Context summary: {json.dumps({k: str(v)[:200] for k, v in (context or {}).items()}, indent=2)}
+
+Select 1-{len(available_names)} experts and provide tailored instructions for each.
+Available experts: {', '.join(available_names)}
+"""
+        try:
+            structured_llm = self.llm.with_structured_output(ExpertRouting)
+            routing = await structured_llm.ainvoke([
+                SystemMessage(content=self.system_message),
+                HumanMessage(content=routing_prompt)
+            ])
+            # Filter out any hallucinated expert names the LLM may produce
+            routing.selected_experts = [
+                e for e in routing.selected_experts if e in self.experts
+            ]
+            if not routing.selected_experts:
+                routing.selected_experts = available_names
+                routing.expert_instructions = {n: task for n in available_names}
+            return routing
+        except Exception as e:
+            print(f"⚠️ Structured routing failed: {e}, falling back to all experts")
+            return ExpertRouting(
+                reasoning="Fallback: routing LLM failed, delegating to all experts",
+                selected_experts=available_names,
+                expert_instructions={name: task for name in available_names}
+            )
+    
+    async def execute(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Override SubAgent.execute to implement routing logic:
+        1. Route the task to the appropriate expert(s)
+        2. Execute each selected expert in parallel
+        3. Synthesize their outputs into a unified response
+        """
+        print(f"\n🧬 ScientistRouter: Analyzing task for expert delegation...")
+        
+        # Step 1: Route
+        routing = await self._route_task(task, context)
+        print(f"📋 Routing decision: {routing.reasoning}")
+        print(f"👥 Selected experts: {routing.selected_experts}")
+        
+        # Step 2: Execute selected experts in parallel
+        expert_results = {}
+        expert_tasks = []
+        
+        for expert_name in routing.selected_experts:
+            if expert_name not in self.experts:
+                print(f"⚠️ Unknown expert: {expert_name}, skipping")
+                continue
+            
+            expert = self.experts[expert_name]
+            # Use tailored instructions if available, otherwise use original task
+            expert_task = routing.expert_instructions.get(expert_name, task)
+            expert_tasks.append((expert_name, expert.execute(expert_task, context)))
+        
+        # Run all expert tasks concurrently
+        if expert_tasks:
+            results = await asyncio.gather(
+                *[et[1] for et in expert_tasks],
+                return_exceptions=True
+            )
+            for (expert_name, _), result in zip(expert_tasks, results):
+                if isinstance(result, Exception):
+                    print(f"❌ {expert_name} failed: {result}")
+                    expert_results[expert_name] = {
+                        "success": False,
+                        "error": str(result)
+                    }
+                else:
+                    status = "✅" if result.get("success") else "❌"
+                    print(f"{status} {expert_name} completed")
+                    expert_results[expert_name] = result
+        
+        # Step 3: Synthesize expert outputs
+        synthesis = await self._synthesize_expert_outputs(task, context, routing, expert_results)
+        
+        return synthesis
+    
+    async def _synthesize_expert_outputs(
+        self,
+        task: str,
+        context: Dict[str, Any],
+        routing: ExpertRouting,
+        expert_results: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Synthesize outputs from multiple experts into a unified response.
+        The router LLM acts as the PI, integrating perspectives.
+        """
+        # Build synthesis prompt
+        expert_sections = []
+        any_success = False
+        for expert_name, result in expert_results.items():
+            if result.get("success"):
+                any_success = True
+                expert_sections.append(
+                    f"### {expert_name} Analysis:\n{result.get('result', 'No output')}"
+                )
+            else:
+                expert_sections.append(
+                    f"### {expert_name}: FAILED — {result.get('error', 'Unknown error')}"
+                )
+        
+        if not any_success:
+            return {
+                "success": False,
+                "error": "All expert sub-agents failed",
+                "expert_results": expert_results
+            }
+        
+        synthesis_prompt = f"""You are the Principal Investigator synthesizing your expert panel's analyses.
+
+## Original Task:
+{task}
+
+## Expert Panel Results:
+{chr(10).join(expert_sections)}
+
+## Synthesis Instructions:
+1. **Integrate** findings across all expert perspectives — identify convergent themes.
+2. **Resolve conflicts** — if experts disagree, explain why and which view has stronger support.
+3. **Identify gaps** — what questions remain unanswered? What would a next experiment address?
+4. **Prioritize** — rank the most actionable findings.
+5. **Cross-pollinate** — highlight connections between expert domains (e.g., a genomics finding 
+   that has neuroscience implications, or a bioinformatics method that could validate a longevity claim).
+
+Provide a unified, multi-perspective scientific analysis that is greater than the sum of its parts.
+Include a brief section at the end noting which experts contributed and their key unique insights.
+"""
+        
+        try:
+            response = await self.llm.ainvoke([
+                SystemMessage(content="""You are a Principal Investigator leading a multidisciplinary 
+research team. Synthesize expert analyses into a unified scientific assessment. 
+Be rigorous, cite evidence, and highlight both consensus and disagreements."""),
+                HumanMessage(content=synthesis_prompt)
+            ])
+            
+            synthesized_text = extract_text_from_llm_response(response.content)
+            
+            return {
+                "success": True,
+                "result": synthesized_text,
+                "routing": {
+                    "reasoning": routing.reasoning,
+                    "experts_used": routing.selected_experts
+                },
+                "expert_results": {
+                    name: {
+                        "success": r.get("success", False),
+                        "summary": str(r.get("result", r.get("error", "")))[:500]
+                    }
+                    for name, r in expert_results.items()
+                }
+            }
+        except Exception as e:
+            # If synthesis fails, return concatenated expert results
+            print(f"⚠️ Synthesis failed: {e}, returning raw expert outputs")
+            combined = "\n\n".join(
+                f"## {name}\n{r.get('result', r.get('error', 'No output'))}"
+                for name, r in expert_results.items()
+                if r.get("success")
+            )
+            return {
+                "success": True,
+                "result": combined,
+                "routing": {
+                    "reasoning": routing.reasoning,
+                    "experts_used": routing.selected_experts
+                },
+                "synthesis_failed": True
+            }
+
+
+# ==============================================================================
 # LANGGRAPH AGENT SYSTEM
 # ==============================================================================
 
@@ -884,15 +1406,7 @@ Include a References section at the end listing all papers.
                 llm=self.llm
             ),
             
-            "ScientistRAGExpert": SubAgent(
-                name="ScientistRAGExpert",
-                description="Queries scientific knowledge base using RAG",
-                system_message="""You are a scientific knowledge expert with access to a comprehensive 
-scientific knowledge base. Your role is to:
-1. Query your tool using a concise phrase (3-5 words).
-2. Provide expert analysis and insights from scientific literature
-3. Synthesize information from multiple scientific sources""",
-                tools=[scientist_rag_tool],
+            "ScientistsAgent": ScientistsAgent(
                 llm=self.llm
             ),
             
@@ -974,9 +1488,10 @@ Query: {state['query']}
    - Search BOTH: (a) disease-specific papers AND (b) gene-mechanism papers
    - Helps classify hypotheses as confirmatory vs novel
    
-4. **ScientistRAGExpert** - Hypothesis generation & mechanism synthesis  
-   - Returns: mechanistic hypotheses, network descriptions, validation strategies
-   - Synthesizes omics + KG + literature into testable hypotheses
+4. **ScientistsAgent** - Multi-expert hypothesis generation & mechanism synthesis  
+   - Contains 4 domain experts: Genomics, Neuroscience, Longevity/Biostats, Bioinformatics
+   - Returns: multi-perspective mechanistic hypotheses, validation strategies
+   - Synthesizes omics + KG + literature into testable hypotheses via expert panel
 
 5. **GoogleSearcher** - Clinical/translational context
    - Returns: clinical trials, recent developments, therapeutic landscape
@@ -986,7 +1501,7 @@ Query: {state['query']}
 - Step 1: OmicMiningAgent → Get DEGs with statistics (establishes data foundation)
 - Step 2: BioMarkerKGAgent → Query top 10-15 DEGs for KG neighbors (builds gene→pathway chains)
 - Step 3: PubMedResearcher → Literature on TOP targets AND pathways (validates & classifies novelty)
-- Step 4: ScientistRAGExpert → Synthesize mechanisms, score hypotheses, propose experiments
+- Step 4: ScientistsAgent → Synthesize mechanisms via expert panel, score hypotheses, propose experiments
 
 **Planning Principles:**
 - Be THOROUGH: Query KG for multiple gene sets (up-regulated, down-regulated, top-ranked)
@@ -1128,7 +1643,7 @@ Create thorough plans that:
             SubTask(
                 id="task_4",
                 description="Synthesize findings and generate mechanistic hypotheses",
-                assigned_agent="ScientistRAGExpert",
+                assigned_agent="ScientistsAgent",
                 status="pending",
                 result=None,
                 error=None,

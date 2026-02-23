@@ -7,6 +7,7 @@ import sys
 import os
 import json
 import argparse
+import yaml
 
 # Add project root to Python path for absolute imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -14,6 +15,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 import asyncio
 from dotenv import load_dotenv
 import re
+import pymupdf          # PDF text extraction
+import aiofiles          # async file I/O
 
 from typing import List, Dict, Any, Optional
 
@@ -28,9 +31,6 @@ except ImportError:
     FASTAPI_AVAILABLE = False
     print("FastAPI not available. Install with: pip install fastapi uvicorn[standard]")
     exit(1)
-
-# Now the tools module can be found because we added the project root to sys.path
-from tools.pubmed_tools.get_papers_info_tools import get_papers_info
 
 from paperscraper.pubmed import get_and_dump_pubmed_papers
 from paperscraper.pdf import save_pdf_from_dump
@@ -101,14 +101,13 @@ class AuthorKnowledgeBase:
     Build and query a scientific knowledge base from an author's publications.
     """
 
-    def __init__(self, author_name: str, top_k: int = DEFAULT_TOP_K):
-        self.author_name = author_name
-        self.author_dir_name = self._sanitize_name(author_name)
+    def __init__(self, cache_key: str, pubmed_name: str = None, top_k: int = DEFAULT_TOP_K):
+        self.author_name = cache_key                  # Anonymized name for logging/display
+        self.pubmed_name = pubmed_name or cache_key    # Real name, ONLY for PubMed queries
+        self.author_dir_name = self._sanitize_name(cache_key)
         self.top_k = top_k
 
-        self.get_papers_info = get_papers_info
-
-        # Directory setup
+        # Directory setup — uses anonymized cache_key, NOT real author name
         self.working_dir = os.path.join(BASE_AUTHOR_DIR, self.author_dir_name, "ragstore")
         self.jsonl_cache_dir = os.path.join(BASE_AUTHOR_DIR, self.author_dir_name, "jsonl_cache")
         self.doi_cache_dir = os.path.join(BASE_AUTHOR_DIR, self.author_dir_name, "doi_cache")
@@ -134,72 +133,175 @@ class AuthorKnowledgeBase:
         return re.sub(r"[^\w\s-]", "-", name).replace(" ", "_").lower()
 
     def _pubmed_author_query(self) -> List[str]:
-        return [f"{self.author_name}[Author]"]
+        return [f"{self.pubmed_name}[Author]"]
+
+    # Minimum number of downloaded papers we consider acceptable.
+    MIN_PAPERS = 50
 
     async def fetch_and_cache_papers(self) -> str:
         query_terms = self._pubmed_author_query()
         output_path = os.path.join(self.jsonl_cache_dir, f"{self.author_dir_name}.jsonl")
 
-        print(f"🔍 Querying PubMed for papers by {self.author_name}...")
-        get_and_dump_pubmed_papers(query_terms, output_filepath=output_path)
+        # Step 1: Query PubMed metadata.
+        # Re-fetch if JSONL is missing *or* is stale (fewer entries than top_k).
+        need_refetch = True
+        if os.path.exists(output_path):
+            with open(output_path, 'r') as f:
+                existing_lines = f.readlines()
+            if len(existing_lines) >= self.top_k:
+                print(f"📄 PubMed metadata already cached for {self.author_name} "
+                      f"({len(existing_lines)} entries)")
+                need_refetch = False
+            else:
+                print(f"🔄 JSONL has only {len(existing_lines)} entries "
+                      f"(need {self.top_k}) — re-querying PubMed for {self.author_name}")
 
-        with open(output_path, 'r') as f:
-            lines = f.readlines()[:self.top_k]
+        if need_refetch:
+            print(f"🔍 Querying PubMed for papers by {self.author_name} "
+                  f"(max_results={self.top_k})...")
+            get_and_dump_pubmed_papers(query_terms, output_filepath=output_path)
 
-        with open(output_path, 'w') as f:
-            f.writelines(lines)
+            with open(output_path, 'r') as f:
+                lines = f.readlines()
+            total_found = len(lines)
+            lines = lines[:self.top_k]
+            with open(output_path, 'w') as f:
+                f.writelines(lines)
+            print(f"📋 PubMed returned {total_found} papers, kept top {len(lines)}")
 
-        save_pdf_from_dump(output_path, pdf_path=self.doi_cache_dir, key_to_save='doi')
+        # Step 2: Download PDFs/XMLs — wrap each paper in try/except so a single
+        #         network failure doesn't kill the entire pipeline.
+        #         save_pdf_from_dump already skips files that exist on disk.
+        existing_papers = self._count_doi_papers()
+        try:
+            save_pdf_from_dump(output_path, pdf_path=self.doi_cache_dir, key_to_save='doi')
+        except Exception as e:
+            print(f"⚠️  PDF download partially failed for {self.author_name}: {e}")
+
+        final_count = self._count_doi_papers()
+        new_downloads = final_count - existing_papers
+        print(f"📥 {final_count} papers in doi_cache for {self.author_name} "
+              f"({new_downloads} new downloads)")
+
+        if final_count < self.MIN_PAPERS:
+            print(f"⚠️  Only {final_count} papers downloaded (target ≥{self.MIN_PAPERS}). "
+                  f"Some papers may be paywalled or unavailable.")
         return self.doi_cache_dir
 
-    async def insert_papers_to_rag(self, papers: List[Dict[str, Any]]):
+    def _count_doi_papers(self) -> int:
+        """Count PDF/XML files in doi_cache."""
+        if not os.path.exists(self.doi_cache_dir):
+            return 0
+        return sum(1 for f in os.listdir(self.doi_cache_dir)
+                   if f.endswith('.pdf') or f.endswith('.xml'))
+
+    # ---- text extraction helpers ----
+
+    @staticmethod
+    async def _extract_text_from_pdf(file_path: str) -> str:
+        """Extract raw text from a PDF file."""
+        loop = asyncio.get_event_loop()
+        text = await loop.run_in_executor(
+            None,
+            lambda: chr(12).join(
+                [page.get_text() for page in pymupdf.open(file_path)]
+            ),
+        )
+        return text.strip()
+
+    @staticmethod
+    async def _extract_text_from_xml(file_path: str) -> str:
+        """Extract raw text from a PMC / Elsevier XML file."""
+        async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:
+            content = await f.read()
+        # Strip XML tags for a plain-text approximation
+        text = re.sub(r'<[^>]+>', ' ', content)
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+
+    async def _extract_texts_from_dir(self, paper_dir: str) -> List[str]:
+        """Extract text from every PDF/XML in *paper_dir*."""
+        texts: List[str] = []
+        files = sorted(os.listdir(paper_dir))
+        for fname in files:
+            fpath = os.path.join(paper_dir, fname)
+            try:
+                if fname.endswith('.pdf'):
+                    t = await self._extract_text_from_pdf(fpath)
+                elif fname.endswith('.xml'):
+                    t = await self._extract_text_from_xml(fpath)
+                else:
+                    continue
+                if t and len(t) > 100:          # skip near-empty files
+                    texts.append(t)
+                    print(f"  📄 Extracted {len(t):,} chars from {fname}")
+                else:
+                    print(f"  ⚠️  Skipped {fname} (too short: {len(t)} chars)")
+            except Exception as e:
+                print(f"  ❌ Failed to extract {fname}: {e}")
+        return texts
+
+    # ---- RAG insertion ----
+
+    async def insert_texts_to_rag(self, texts: List[str]):
+        """Insert a list of plain-text documents into the HyperRAG store."""
         if not self.rag:
             raise ValueError("RAG not initialized.")
 
-        # Create tasks for parallel insertion
-        tasks = []
-        for paper in papers:
-            if not paper["text"] or not paper["file_path"]:
-                continue
-            tasks.append(self.rag.ainsert(paper["text"]))
-        
-        # Use tqdm to create a progress bar
         from tqdm import tqdm
-        total = len(tasks)
-        
-        # Process in batches to prevent overwhelming resources
-        batch_size = 5  # Adjust based on your system capacity
+        batch_size = 5
         results = []
-        
-        with tqdm(total=total, desc=f"Inserting papers for {self.author_name}") as pbar:
-            for i in range(0, len(tasks), batch_size):
-                batch = tasks[i:i+batch_size]
+
+        with tqdm(total=len(texts), desc=f"Inserting papers for {self.author_name}") as pbar:
+            for i in range(0, len(texts), batch_size):
+                batch = [self.rag.ainsert(t) for t in texts[i:i + batch_size]]
                 batch_results = await asyncio.gather(*batch, return_exceptions=True)
-                
-                # Check for errors
-                for j, result in enumerate(batch_results):
-                    paper_idx = i + j
-                    if paper_idx < len(papers) and isinstance(result, Exception):
-                        print(f"[!] Insertion failed for {papers[paper_idx]['file_path']}: {result}")
-                
+                for j, res in enumerate(batch_results):
+                    if isinstance(res, Exception):
+                        print(f"  [!] Insertion failed for doc {i + j}: {res}")
                 results.extend(batch_results)
                 pbar.update(len(batch))
-                
-                # Small pause between batches to allow resource cleanup
                 await asyncio.sleep(0.1)
-        
         return results
+
+    # ---- main build pipeline ----
 
     async def build_knowledge_base(self, paper_dir: str = None):
         await self.initialize_rag()
-        
-        if os.path.exists(self.working_dir) and os.listdir(self.working_dir):
-            return
+
+        # 1. Already indexed? → skip
+        if os.path.exists(self.working_dir):
+            content_files = [f for f in os.listdir(self.working_dir)
+                            if f.endswith('.json') or f.endswith('.hgdb')]
+            if content_files:
+                print(f"📂 KB already built for {self.author_name}, loading from cache")
+                return
+
+        # 2. Papers already downloaded? Re-fetch if below MIN_PAPERS.
+        doi_files = [f for f in os.listdir(self.doi_cache_dir)
+                     if f.endswith('.pdf') or f.endswith('.xml')] \
+                    if os.path.exists(self.doi_cache_dir) else []
+
+        if len(doi_files) >= self.MIN_PAPERS:
+            print(f"📥 Found {len(doi_files)} papers in doi_cache for {self.author_name}, "
+                  f"skipping download (≥{self.MIN_PAPERS})")
+            paper_dir = self.doi_cache_dir
         else:
+            if doi_files:
+                print(f"📥 Found only {len(doi_files)} papers in doi_cache for {self.author_name} "
+                      f"(need ≥{self.MIN_PAPERS}), re-fetching...")
             paper_dir = await self.fetch_and_cache_papers()
-            papers = await self.get_papers_info(paper_dir)
-            await self.insert_papers_to_rag(papers)
-            print(f"✅ Knowledge base built for author: {self.author_name}")
+
+        # 3. Extract text directly from PDFs / XMLs
+        print(f"📖 Extracting text from papers in {paper_dir}")
+        texts = await self._extract_texts_from_dir(paper_dir)
+        if not texts:
+            print(f"⚠️  No usable paper text for {self.author_name} — KB will be empty")
+            return
+
+        # 4. Insert into HyperRAG
+        await self.insert_texts_to_rag(texts)
+        print(f"✅ KB built for {self.author_name}: {len(texts)} papers indexed")
 
     async def query_system(self, question: str) -> str:
         """
@@ -247,23 +349,23 @@ _global_kb_dict = None
 _author_mapping = {}
 _reverse_mapping = {}
 
-def initialize_author_mapping(real_authors: List[str]) -> Dict[str, str]:
+def initialize_author_mapping() -> Dict[str, str]:
     """
-    Create privacy-protected mapping from real author names to anonymized identifiers.
-    
-    Args:
-        real_authors: List of real author names
-        
-    Returns:
-        Dictionary mapping real names to anonymized names
+    Create privacy-protected mapping from real author names to anonymized expert aliases.
+    Uses EXPERT_SCIENTISTS config. Real names are never exposed externally.
     """
     global _author_mapping, _reverse_mapping
     
     if not _author_mapping:
-        for i, author in enumerate(real_authors, 1):
-            anonymous_name = f"Scientist {i}"
-            _author_mapping[author] = anonymous_name
-            _reverse_mapping[anonymous_name] = author
+        for scientist in EXPERT_SCIENTISTS:
+            real_name = scientist["real_name"]
+            alias = scientist["alias"]
+            if real_name != "CHANGE_ME":
+                _author_mapping[real_name] = alias
+                _reverse_mapping[alias] = real_name
+            else:
+                # Unconfigured experts: alias maps to itself
+                _reverse_mapping[alias] = alias
             
     
     return _author_mapping
@@ -284,56 +386,154 @@ async def initialize_scientist_kb():
     """Initialize the scientist knowledge bases globally."""
     global _global_kb_dict
     if _global_kb_dict is None:
-        print("Initializing scientist knowledge bases...")
+        print("Initializing expert scientist knowledge bases...")
         _global_kb_dict = await initialize_all_authors()
-        
-        # Initialize privacy mapping
-        real_authors = list(_global_kb_dict.keys())
-        initialize_author_mapping(real_authors)
+        initialize_author_mapping()
         
     return _global_kb_dict
 
-async def scientist_rag_tool_wrapper(author_name: str, question: str) -> str:
+async def scientist_rag_tool_wrapper(expert_alias: str, question: str) -> str:
     """
-    Wrapper function for AutoGen FunctionTool that handles kb_dict internally.
-    This function only takes author_name and question as parameters.
+    Query a domain expert's scientific knowledge base.
     
     Parameters:
-    - author_name (str): Name of the scientist/author to query (use display names like "Neuroscience Expert")
+    - expert_alias (str): Expert alias to query (e.g., "GenomicsExpert", "NeuroscienceExpert")
     - question (str): The scientific question to ask
     
     Returns:
-    - str: The response from the scientist's knowledge base or error message
+    - str: The response from the expert's knowledge base or error message
     
-    Available scientists:
-    - Neuroscience Expert (Alzheimer's disease research, amyloid-beta, tau proteins, neurodegeneration)
-    
-    Example usage:
-    scientist_rag_tool_wrapper("Neuroscience Expert", "What are the latest findings on Alzheimer's disease?")
+    Available experts (when configured):
+    - GenomicsExpert
+    - NeuroscienceExpert
+    - LongevityBiostatsExpert
+    - BioinformaticsExpert
     """
     try:
         # Initialize KB if not already done
         kb_dict = await initialize_scientist_kb()
         
-        # The author_name is the display name which is used directly as the key
-        if author_name not in kb_dict:
-            # Provide helpful error message with available scientists
+        if expert_alias not in kb_dict:
             available = list(kb_dict.keys())
-            return f"Error: Author '{author_name}' not found. Available scientists: {', '.join(available)}"
+            return f"Error: Expert '{expert_alias}' not found. Available experts: {', '.join(available)}"
         
-        # Call the actual tool with the display name
-        result = await scientist_rag_retrieval_tool(author_name, question, kb_dict, display_name=author_name)
+        result = await scientist_rag_retrieval_tool(expert_alias, question, kb_dict, display_name=expert_alias)
         
-        # Format the response for the LLM
         if "error" in result:
             return f"Error: {result['error']}"
         else:
-            return f"Retrieved from {author_name}'s knowledge base:\n\n{result['result']}"
+            return f"Retrieved from {expert_alias}'s knowledge base:\n\n{result['result']}"
             
     except Exception as e:
-        error_msg = f"Failed to query scientist knowledge base: {str(e)}"
+        error_msg = f"Failed to query {expert_alias} knowledge base: {str(e)}"
         print(error_msg)
         return error_msg
+
+
+async def query_expert_kb(expert_alias: str, question: str) -> str:
+    """
+    Query a specific expert's knowledge base by their alias.
+    Convenience wrapper for use by ScientistsAgent sub-experts.
+    
+    Args:
+        expert_alias: One of GenomicsExpert, NeuroscienceExpert,
+                      LongevityBiostatsExpert, BioinformaticsExpert
+        question: Scientific query (3-5 words work best)
+    
+    Returns:
+        Retrieved knowledge or error message
+    """
+    return await scientist_rag_tool_wrapper(expert_alias, question)
+
+
+def get_available_experts() -> List[Dict[str, str]]:
+    """Get list of configured expert aliases and their domains."""
+    return [
+        {"alias": e["alias"], "domain": e["domain"], "description": e["description"]}
+        for e in EXPERT_SCIENTISTS
+    ]
+
+
+def get_built_experts() -> List[Dict[str, str]]:
+    """Return only experts whose RAG knowledge bases are actually built on disk.
+
+    Scans each expert's ragstore directory for .json / .hgdb content files.
+    Papers in doi_cache but without a built ragstore are NOT included.
+
+    Returns:
+        List of dicts with keys: alias, domain, description, cache_key
+    """
+    built = []
+    for expert in EXPERT_SCIENTISTS:
+        cache_key = expert["cache_key"]
+        ragstore_dir = os.path.join(BASE_AUTHOR_DIR, cache_key, "ragstore")
+        if not os.path.isdir(ragstore_dir):
+            continue
+        content_files = [
+            f for f in os.listdir(ragstore_dir)
+            if f.endswith(".json") or f.endswith(".hgdb")
+        ]
+        if content_files:
+            built.append({
+                "alias": expert["alias"],
+                "domain": expert["domain"],
+                "description": expert["description"],
+                "cache_key": cache_key,
+            })
+    return built
+
+
+def get_rag_ready_experts() -> List[Dict[str, str]]:
+    """Return experts that can provide RAG — either already built or with papers to build from.
+
+    An expert is 'RAG-ready' if:
+    1. Its ragstore is already built (has .json/.hgdb files), OR
+    2. It has downloaded papers in doi_cache (KB will be built lazily on first query)
+
+    Experts whose real_name is 'CHANGE_ME' and have no cached data are excluded.
+
+    Returns:
+        List of dicts with keys: alias, domain, description, cache_key, status
+        status is 'built' (ragstore exists) or 'pending' (papers only, builds on first query)
+    """
+    ready = []
+    for expert in EXPERT_SCIENTISTS:
+        cache_key = expert["cache_key"]
+        ragstore_dir = os.path.join(BASE_AUTHOR_DIR, cache_key, "ragstore")
+        doi_cache_dir = os.path.join(BASE_AUTHOR_DIR, cache_key, "doi_cache")
+
+        # Check ragstore (already built)
+        has_ragstore = False
+        if os.path.isdir(ragstore_dir):
+            content_files = [f for f in os.listdir(ragstore_dir)
+                            if f.endswith(".json") or f.endswith(".hgdb")]
+            has_ragstore = bool(content_files)
+
+        # Check doi_cache (papers downloaded, can build on demand)
+        has_papers = False
+        if os.path.isdir(doi_cache_dir):
+            paper_files = [f for f in os.listdir(doi_cache_dir)
+                          if f.endswith(".pdf") or f.endswith(".xml")]
+            has_papers = len(paper_files) > 0
+
+        if has_ragstore or has_papers:
+            ready.append({
+                "alias": expert["alias"],
+                "domain": expert["domain"],
+                "description": expert["description"],
+                "cache_key": cache_key,
+                "status": "built" if has_ragstore else "pending",
+            })
+        elif expert["real_name"] != "CHANGE_ME":
+            # Configured but no papers yet — still include as pending
+            ready.append({
+                "alias": expert["alias"],
+                "domain": expert["domain"],
+                "description": expert["description"],
+                "cache_key": cache_key,
+                "status": "pending",
+            })
+    return ready
 
 
 # ---------- FastAPI Server Implementation ----------
@@ -369,20 +569,17 @@ def create_fastapi_app():
 
     @app.on_event("startup")
     async def startup_event():
-        """Initialize knowledge bases on startup"""
+        """Initialize expert knowledge bases on startup"""
         global kb_dict
-        print("Initializing knowledge bases for FastAPI server...")
+        print("Initializing expert knowledge bases for FastAPI server...")
         try:
             kb_dict = await initialize_all_authors()
+            initialize_author_mapping()
             
-            # Initialize privacy mapping
-            real_authors = list(kb_dict.keys())
-            initialize_author_mapping(real_authors)
-            
-            print(f"Successfully initialized {len(kb_dict)} knowledge bases")
-            print("Available scientists (anonymized):")
-            for anon_name in list_available_scientists():
-                print(f"  - {anon_name}")
+            print(f"Successfully initialized {len(kb_dict)} expert knowledge bases")
+            print("Available experts:")
+            for alias in kb_dict:
+                print(f"  - {alias}")
         except Exception as e:
             print(f"Error initializing knowledge bases: {e}")
             raise
@@ -467,22 +664,76 @@ def run_server(port=8000):
     )
 
 
-# Mapping from anonymized display names to internal database names
-SCIENTIST_ALIAS_MAP = {
-    "Neuroscience Expert": "neuroscience_expert",  # Maps display name to database folder name
-}
+# ==============================================================================
+# EXPERT SCIENTIST CONFIGURATION  (loaded from configs/experts.yaml)
+# ==============================================================================
+# The YAML file is gitignored — real author names never enter the repo.
+# See configs/experts.yaml.example for the template.
+#
+# Fields per expert:
+#   real_name   — PubMed author string (PRIVATE, used only for paper fetching)
+#   alias       — Anonymized name exposed to agents
+#   cache_key   — Folder under cache/author_kb/
+#   domain      — Short domain tag
+#   description — Domain description
+#   top_k       — Max papers to fetch
+# ==============================================================================
+
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+_EXPERTS_YAML = os.path.join(_PROJECT_ROOT, 'configs', 'experts.yaml')
+_EXPERTS_YAML_EXAMPLE = os.path.join(_PROJECT_ROOT, 'configs', 'experts.yaml.example')
+
+
+def _load_expert_config() -> List[Dict[str, Any]]:
+    """Load expert scientist config from configs/experts.yaml."""
+    yaml_path = _EXPERTS_YAML
+    if not os.path.exists(yaml_path):
+        # Fall back to the example template so the system still boots
+        yaml_path = _EXPERTS_YAML_EXAMPLE
+        print(f"⚠️  configs/experts.yaml not found — using example template. "
+              f"Copy configs/experts.yaml.example → configs/experts.yaml and fill in real names.")
+
+    with open(yaml_path, 'r') as f:
+        data = yaml.safe_load(f)
+
+    experts = data.get('experts', [])
+    if not experts:
+        print("⚠️  No experts defined in config file.")
+    return experts
+
+
+EXPERT_SCIENTISTS: List[Dict[str, Any]] = _load_expert_config()
+
+# Convenience lookups
+_EXPERT_BY_ALIAS = {e["alias"]: e for e in EXPERT_SCIENTISTS}
+_EXPERT_BY_DOMAIN = {e["domain"]: e for e in EXPERT_SCIENTISTS}
+
 
 async def initialize_all_authors():
-    scientists = [
-        {"name": "neuroscience_expert", "display_name": "Neuroscience Expert", "top_k": 25},
-    ]
-
+    """Build / load KBs for all configured expert scientists."""
     kb_dict = {}
-    for scientist in scientists:
-        kb = AuthorKnowledgeBase(scientist["name"], top_k=scientist["top_k"])
+    for scientist in EXPERT_SCIENTISTS:
+        real_name = scientist["real_name"]
+        alias = scientist["alias"]
+        cache_key = scientist["cache_key"]
+
+        # Check if KB is already cached on disk (skip PubMed fetch if so)
+        working_dir = os.path.join(BASE_AUTHOR_DIR, cache_key, "ragstore")
+        already_cached = os.path.exists(working_dir) and os.listdir(working_dir)
+
+        if real_name == "CHANGE_ME" and not already_cached:
+            print(f"⚠️  Skipping {alias}: real_name not configured and no cached KB found")
+            continue
+
+        kb = AuthorKnowledgeBase(
+            cache_key=cache_key,
+            pubmed_name=real_name if real_name != "CHANGE_ME" else None,
+            top_k=scientist["top_k"],
+        )
         await kb.build_knowledge_base(paper_dir=kb.doi_cache_dir)
-        # Use display_name as key for external API access
-        kb_dict[scientist["display_name"]] = kb
+        kb_dict[alias] = kb
+        print(f"✅ {alias} KB ready (cache: {cache_key})")
+
     return kb_dict
 
 
@@ -524,11 +775,11 @@ async def test_concurrent_queries(num_queries: int):
             query_start = time.time()
             try:
                 # Use display name for testing
-                available_scientists = list(kb_dict.keys())
-                test_scientist = available_scientists[0] if available_scientists else "Neuroscience Expert"
+                available_experts = list(kb_dict.keys())
+                test_expert = available_experts[0] if available_experts else "NeuroscienceExpert"
                 
                 result = await scientist_rag_tool_wrapper(
-                    test_scientist,
+                    test_expert,
                     f"{query_text} (Task {task_id})"
                 )
                 query_end = time.time()
@@ -645,11 +896,12 @@ if __name__ == "__main__":
         kb_dict_test = asyncio.run(initialize_scientist_kb())
         
         # Use display name for testing
-        available_scientists = list(kb_dict_test.keys())
-        test_scientist = available_scientists[0] if available_scientists else "Neuroscience Expert"
+        available_experts = list(kb_dict_test.keys())
+        test_expert = available_experts[0] if available_experts else "NeuroscienceExpert"
+        print(f"Testing with expert: {test_expert}")
         
         result = asyncio.run(scientist_rag_tool_wrapper(
-            test_scientist, 
+            test_expert, 
             "What are the latest findings on Alzheimer's disease?"
         ))
         print("Test result:", result)
