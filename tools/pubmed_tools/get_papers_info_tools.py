@@ -26,6 +26,10 @@ except ImportError:
     from get_paper_summary import get_paper_summary, has_error_content, get_paper_summary_async
 
 
+# Maximum raw text length to store per paper when LLM processing is disabled
+MAX_RAW_CONTENT_LENGTH = 8192
+
+
 ELSIVER_ID = "http://www.elsevier.com/xml/"
 PMC_ID = """key="article-id_pmc"""
 
@@ -147,6 +151,9 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
                             processed_text = await get_paper_summary_async(text=text, mine_type="text/plain")
                             if processed_text:
                                 paper_entry['llm_content'] = processed_text
+                        else:
+                            # Store raw extracted text for downstream use
+                            paper_entry['llm_content'] = text[:MAX_RAW_CONTENT_LENGTH]
                     else:
                         return None  # Return None for failed papers
                 else:
@@ -160,6 +167,9 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
                         processed_text = await get_paper_summary_async(text=text, mine_type="text/plain")
                         if processed_text:
                             paper_entry['llm_content'] = processed_text
+                    else:
+                        # Store raw extracted text for downstream use
+                        paper_entry['llm_content'] = text[:MAX_RAW_CONTENT_LENGTH]
                 else:
                     return None  # Return None for failed papers
             else:
@@ -182,8 +192,15 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
                         if processed_text and not has_error_content(processed_text) and len(processed_text.strip()) > 50:
                             paper_entry['llm_content'] = processed_text
                             print(f"[Debug] Successfully processed pdf with LLM: {file_name}")
+                        else:
+                            # LLM returned empty/error, fallback to raw text
+                            paper_entry['llm_content'] = extracted_text[:MAX_RAW_CONTENT_LENGTH]
                     except Exception as e:
                         print(f"[Debug] LLM processing failed for {file_name}: {e}, using raw content only")
+                        paper_entry['llm_content'] = extracted_text[:MAX_RAW_CONTENT_LENGTH]
+                else:
+                    # Store raw extracted text for downstream use (no LLM processing)
+                    paper_entry['llm_content'] = extracted_text[:MAX_RAW_CONTENT_LENGTH]
                 
                 print(f"[Debug] Successfully processed pdf: {file_name}")
             else:

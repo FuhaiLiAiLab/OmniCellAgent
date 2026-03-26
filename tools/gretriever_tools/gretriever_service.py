@@ -55,7 +55,7 @@ from torch_geometric.data import Data, Batch
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.info(f"CPU optimization: Using {NUM_THREADS} threads (P-cores only)")
+logger.info(f"CPU optimization: Using {NUM_THREADS} threads (detected {os.cpu_count()} CPUs)")
 
 # Global variables for model and configurations
 g_retriever_wrapper = None

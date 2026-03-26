@@ -30,7 +30,8 @@ class GRetrieverClient:
         if max_nodes is not None:
             payload["max_nodes"] = max_nodes
         
-        async with httpx.AsyncClient() as client:
+        # Increased timeout for CPU inference (can take 5-10+ minutes for complex queries)
+        async with httpx.AsyncClient(timeout=3600.0) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             return response.json()
@@ -214,9 +215,18 @@ async def gretriever_tool(query: str) -> str:
             print("No graph_data or json_file_saved found, returning raw result")
             return json.dumps(result, indent=2, ensure_ascii=False) if result else "No result returned"
             
+    except httpx.ConnectError as e:
+        error_msg = f"Connection error to GRetriever service at {client.base_url}: {str(e)}"
+        print(f"✗ Error: {error_msg}")
+        return error_msg
+    except httpx.TimeoutException as e:
+        error_msg = f"Timeout connecting to GRetriever service: {str(e)}"
+        print(f"✗ Error: {error_msg}")
+        return error_msg
     except Exception as e:
-        print(f"✗ Error: {e}")
-        return str(e)
+        error_msg = f"GRetriever error: {type(e).__name__}: {str(e)}"
+        print(f"✗ Error: {error_msg}")
+        return error_msg
 
 if __name__ == "__main__":
        query = "What is the name of the inflammatory disease that primarily targets the small intestine and is linked to Crohn's ileitis and jejunitis?"

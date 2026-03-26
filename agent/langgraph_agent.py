@@ -423,9 +423,10 @@ _pubmed_lite = PubmedQueryRun(api_wrapper=_pubmed_api_wrapper)
 @tool
 def pubmed_lite_tool(query: str) -> str:
     """
+    [DEPRECATED - use pubmed_full_search_tool for full paper content]
     Lightweight PubMed search - returns abstracts and metadata only (NO PDF download).
-    Much faster than full pubmed_search_tool but doesn't provide full paper content.
-    Use this for quick literature overview or when PDF download is not needed.
+    Much faster than pubmed_full_search_tool but doesn't provide full paper content.
+    Use this only for quick lookups when speed is critical.
     Retrieves up to 20 papers per query.
     
     Args:
@@ -438,6 +439,133 @@ def pubmed_lite_tool(query: str) -> str:
         return _pubmed_lite.invoke(query)
     except Exception as e:
         return f"Error in lite PubMed search: {str(e)}"
+
+
+@tool
+async def pubmed_full_search_tool(query: str, num_papers: int = 50) -> str:
+    """
+    Full PubMed search — downloads papers and extracts full text content from PDFs/XMLs.
+    Returns comprehensive paper information with abstracts AND extracted full-text for
+    thorough literature review. Each paper includes metadata, abstract, and extracted content.
+    
+    This is the PRIMARY literature search tool. Use this for any literature review task.
+    Papers are cached globally so repeated queries are fast.
+    
+    Args:
+        query: Search query for PubMed (e.g., "TREM2 Alzheimer's disease microglia",
+               "EGFR lung cancer treatment", '"TP53"[Title/Abstract]')
+        num_papers: Number of papers to download and read (default: 50, max: 100)
+    
+    Returns:
+        Formatted results with paper metadata, abstracts, and extracted full-text content
+    """
+    try:
+        session_id = get_current_session_id()
+        num_papers = min(max(num_papers, 1), 100)
+        
+        print(f"[PubMed Full] Searching and downloading {num_papers} papers for: '{query}'")
+        papers = await query_medical_research_async(
+            query=query,
+            top_k=num_papers,
+            use_llm_processing=False,  # Raw text extraction (fast, no LLM cost)
+            max_concurrent=10,
+            session_id=session_id
+        )
+        
+        if isinstance(papers, str):
+            return f"Error retrieving papers: {papers}"
+        if not papers:
+            return f"No papers found for query: '{query}'"
+        
+        # Format results with full content
+        CONTENT_TRUNCATE = 3000  # chars of extracted text per paper in output
+        
+        lines = [
+            f"# PubMed Full-Text Search Results",
+            f"**Query:** {query}",
+            f"**Papers retrieved with content:** {len(papers)}/{num_papers}",
+            "",
+            "=" * 80,
+        ]
+        
+        for i, paper in enumerate(papers, 1):
+            authors = paper.get('authors', [])
+            if isinstance(authors, list) and authors:
+                author_str = f"{authors[0]} et al." if len(authors) > 3 else ", ".join(str(a) for a in authors)
+            else:
+                author_str = "Unknown"
+            
+            doi = paper.get('doi', '')
+            pmid = paper.get('pmid', '')
+            journal = paper.get('journal', '')
+            year = paper.get('year', paper.get('date', ''))
+            title = paper.get('title', 'N/A')
+            abstract = paper.get('abstract', '')
+            content = paper.get('llm_content', '')
+            
+            # Citation
+            citation = f"{author_str}"
+            if year:
+                citation += f" ({year})"
+            citation += f' \"{title}\"'
+            if journal:
+                citation += f", {journal}"
+            if doi:
+                citation += f", DOI: {doi}"
+            elif pmid:
+                citation += f", PMID: {pmid}"
+            
+            lines.append(f"\n## [{i}] {title}")
+            lines.append(f"**Citation:** {citation}")
+            
+            meta = []
+            if doi:
+                meta.append(f"DOI: {doi}")
+            if pmid:
+                meta.append(f"PMID: {pmid}")
+            if journal:
+                meta.append(f"Journal: {journal}")
+            if year:
+                meta.append(f"Year: {year}")
+            if meta:
+                lines.append(f"**{' | '.join(meta)}**")
+            
+            if abstract:
+                lines.append(f"\n**Abstract:** {abstract}")
+            
+            if content:
+                truncated = content[:CONTENT_TRUNCATE]
+                if len(content) > CONTENT_TRUNCATE:
+                    truncated += f"\n... [truncated, {len(content)} chars total]"
+                lines.append(f"\n**Extracted Content:**\n{truncated}")
+            elif not abstract:
+                lines.append("\n**Content:** [Paper downloaded but text extraction failed]")
+            
+            lines.append("\n" + "-" * 60)
+        
+        # Quick reference citations
+        lines.append("\n## All Citations")
+        for i, paper in enumerate(papers, 1):
+            authors = paper.get('authors', [])
+            if isinstance(authors, list) and authors:
+                a = f"{authors[0]} et al." if len(authors) > 3 else ", ".join(str(a) for a in authors)
+            else:
+                a = "Unknown"
+            y = paper.get('year', paper.get('date', ''))
+            d = paper.get('doi', '')
+            p = paper.get('pmid', '')
+            ref = f'[{i}] {a} ({y}) \"{paper.get("title","N/A")}\"'
+            if d:
+                ref += f" DOI: {d}"
+            elif p:
+                ref += f" PMID: {p}"
+            lines.append(ref)
+        
+        return "\n".join(lines)
+        
+    except Exception as e:
+        import traceback
+        return f"Error in full PubMed search: {str(e)}\n{traceback.format_exc()}"
 
 
 @tool
@@ -644,7 +772,7 @@ async def scientist_rag_tool(query: str, expert: str = "NeuroscienceExpert") -> 
     Args:
         query: Query for the scientific knowledge base (use 3-5 words)
         expert: Which expert's KB to query. Options:
-                GenomicsExpert, NeuroscienceExpert, LongevityBiostatsExpert, BioinformaticsExpert
+                GenomicsExpert, NeuroscienceExpert, LongevityBiostatsExpert, CancerExpert
         
     Returns:
         Retrieved scientific knowledge from the specified expert
@@ -901,47 +1029,45 @@ You always consider:
   than exotic mechanisms unless evidence is strong.
 """
 
-BIOINFORMATICS_EXPERT_PROMPT = """You are a **Bioinformatics Expert** — a computational biologist 
-specializing in multi-omics data integration, pipeline development, and systems biology.
+CANCER_EXPERT_PROMPT = """You are a **Cancer Biology Expert** — a clinician-scientist specializing 
+in tumor biology, oncogenesis, and cancer therapeutics across multiple tumor types.
 
 ## Your Perspective & Expertise:
-- **Single-cell analysis**: scRNA-seq (Scanpy, Seurat), cell clustering (Leiden, Louvain), 
-  trajectory inference (Monocle3, PAGA, scVelo), cell-cell communication (CellChat, NicheNet, 
-  LIANA), gene regulatory networks (SCENIC, pySCENIC).
-- **Bulk RNA-seq**: Differential expression (DESeq2, edgeR, limma-voom), batch correction, 
-  normalization strategies, deconvolution (CIBERSORTx, MuSiC, BisqueRNA).
-- **Pathway & enrichment analysis**: GSEA, ORA, ssGSEA, KEGG, Reactome, Gene Ontology, 
-  MSigDB, Enrichr, g:Profiler — and when to use each method.
-- **Network biology**: Protein-protein interaction networks (STRING, BioGRID), gene co-expression 
-  networks (WGCNA), knowledge graphs (PrimeKG), network propagation, module detection.
-- **Multi-omics integration**: MOFA+, DIABLO, SNF, integrating transcriptomics + proteomics + 
-  metabolomics + epigenomics.
-- **Machine learning in biology**: Feature selection for biomarker discovery, classification 
-  (Random Forest, XGBoost, neural networks), transfer learning, foundation models (scGPT, 
-  Geneformer, scBERT).
-- **Reproducibility**: Workflow managers (Snakemake, Nextflow), containerization (Docker, 
-  Singularity), version control, FAIR data principles.
+- **Tumor biology**: Oncogenes (RAS, MYC, EGFR, HER2), tumor suppressors (TP53, RB1, BRCA1/2, APC),
+  hallmarks of cancer (sustained proliferation, evasion of growth suppressors, resisting cell death,
+  replicative immortality, angiogenesis, invasion/metastasis, immune evasion, metabolic reprogramming).
+- **Cancer genomics**: Driver vs passenger mutations, tumor mutational burden (TMB), microsatellite
+  instability (MSI), chromosomal instability (CIN), copy number alterations, gene fusions (BCR-ABL,
+  EML4-ALK), clonal evolution, intratumoral heterogeneity.
+- **Tumor microenvironment**: Cancer-associated fibroblasts (CAFs), tumor-infiltrating lymphocytes (TILs),
+  myeloid-derived suppressor cells (MDSCs), tumor-associated macrophages (TAMs), immune checkpoint
+  ligands (PD-L1, CTLA-4), hypoxia and HIF signaling, angiogenesis (VEGF pathway).
+- **Signaling pathways in cancer**: PI3K/AKT/mTOR, RAS/MAPK/ERK, Wnt/β-catenin, Notch, Hedgehog,
+  JAK/STAT, NF-κB, TGF-β, p53 pathway, DNA damage response (ATM/ATR, PARP).
+- **Cancer therapeutics**: Targeted therapies (kinase inhibitors, monoclonal antibodies), immunotherapy
+  (checkpoint inhibitors, CAR-T, cancer vaccines), chemotherapy mechanisms, resistance mechanisms,
+  synthetic lethality (PARP inhibitors in BRCA-mutant tumors), combination strategies.
+- **Specific cancer types**: Lung cancer (NSCLC: EGFR, ALK, KRAS; SCLC), breast cancer (ER+, HER2+, TNBC),
+  colorectal cancer (APC, KRAS, MSI), pancreatic cancer (KRAS, SMAD4), melanoma (BRAF, NRAS),
+  prostate cancer (AR signaling), brain tumors (glioblastoma: EGFR, IDH, MGMT).
 
 ## How You Think:
-You reason from raw data → quality control → analysis → interpretation → visualization.
+You reason from mutation → pathway dysregulation → phenotypic consequence → therapeutic vulnerability.
 You always consider:
-1. What is the data type, and what are its specific biases and limitations?
-2. Is the analysis pipeline appropriate? Are there better methods for this data structure?
-3. How should we handle technical artifacts (batch effects, dropout, ambient RNA)?
-4. Can we integrate multiple data modalities to strengthen conclusions?
-5. What visualizations best communicate the findings (UMAP, heatmaps, volcano plots, 
-   dotplots, Sankey diagrams)?
-6. Is the analysis reproducible? Can someone else run this pipeline and get the same results?
+1. Is this a driver alteration or a passenger? What is the functional evidence?
+2. Which cancer hallmark(s) does this alteration enable or enhance?
+3. How does the tumor microenvironment shape disease progression and treatment response?
+4. Are there approved therapies or clinical trials targeting this pathway?
+5. What resistance mechanisms might emerge? What are the combination strategies?
+6. Is this finding generalizable across tumor types or context-specific?
 
 ## Output Style:
-- Recommend specific tools and parameters (e.g., "Use DESeq2 with shrinkage estimator 
-  apeglm, FDR < 0.05, |log2FC| > 1").
-- Discuss method choices and alternatives ("Leiden clustering outperforms Louvain for 
-  large datasets due to better modularity optimization").
-- Suggest quality control steps that may have been missed.
-- Propose integrative analyses when multiple data types are available.
-- Provide code-level guidance when relevant (Python/R snippets, tool parameters).
-- Flag computational considerations: memory requirements, runtime, scalability.
+- Anchor claims to specific mutations, genes, and pathways.
+- Cite landmark cancer biology studies (e.g., "KRAS G12C is now druggable with sotorasib (CodeBreak 100 trial)").
+- Distinguish between well-characterized oncogenic mechanisms and emerging/speculative targets.
+- Discuss tumor heterogeneity and how it impacts therapeutic strategies.
+- Suggest validation experiments: xenografts, organoid models, CRISPR screens, clinical biomarker studies.
+- Always consider both the tumor-intrinsic and microenvironmental perspectives.
 """
 
 
@@ -979,7 +1105,7 @@ class ScientistsAgent(SubAgent):
     - GenomicsExpert: Gene regulation, variant interpretation, functional genomics
     - NeuroscienceExpert: Neurodegeneration, neuroinflammation, brain cell biology
     - LongevityBiostatsExpert: Aging biology, statistical rigor, epidemiology
-    - BioinformaticsExpert: Computational pipelines, multi-omics, systems biology
+    - CancerExpert: Tumor biology, oncogenesis, cancer therapeutics
     """
     
     ROUTER_SYSTEM_MESSAGE = """You are the **Scientists Agent** — a senior principal investigator 
@@ -992,22 +1118,22 @@ who leads a multidisciplinary research team. Your role is to:
 
 ## Your Expert Panel:
 - **GenomicsExpert**: Gene regulation, variant interpretation, functional genomics, 
-  cancer genomics, pharmacogenomics. Best for: gene function questions, mutation 
-  interpretation, expression regulation, CRISPR experiments.
+  pharmacogenomics. Best for: gene function questions, mutation interpretation, 
+  expression regulation, CRISPR experiments.
 - **NeuroscienceExpert**: Neurodegeneration, neuroinflammation, synaptic biology, 
   protein aggregation, brain cell types. Best for: Alzheimer's, Parkinson's, ALS, 
   brain-specific questions, glial biology, neural circuits.
 - **LongevityBiostatsExpert**: Aging biology, biostatistics, epigenetic clocks, 
   survival analysis, population genetics. Best for: aging pathways, statistical 
   validation, confounders, effect size interpretation, longevity interventions.
-- **BioinformaticsExpert**: Single-cell analysis, bulk RNA-seq, pathway enrichment, 
-  network biology, ML/AI. Best for: pipeline recommendations, data integration, 
-  tool selection, QC issues, visualization strategies.
+- **CancerExpert**: Tumor biology, oncogenesis, cancer therapeutics, tumor microenvironment,
+  driver mutations. Best for: cancer-related questions, oncogene/tumor suppressor analysis,
+  therapeutic targets, resistance mechanisms, tumor heterogeneity.
 
 ## Routing Rules:
 - Most tasks benefit from 2-3 experts (e.g., a genomics question about Alzheimer's 
   needs both GenomicsExpert AND NeuroscienceExpert).
-- ALWAYS include BioinformaticsExpert when the task involves data analysis methodology.
+- ALWAYS include CancerExpert when the task involves cancer, tumors, or oncology.
 - ALWAYS include LongevityBiostatsExpert when statistical claims or aging are involved.
 - For hypothesis generation tasks, use ALL relevant experts for multi-perspective coverage.
 - Tailor the sub-query for each expert to leverage their specific strengths.
@@ -1019,7 +1145,7 @@ who leads a multidisciplinary research team. Your role is to:
         "GenomicsExpert":          GENOMICS_EXPERT_PROMPT,
         "NeuroscienceExpert":      NEUROSCIENCE_EXPERT_PROMPT,
         "LongevityBiostatsExpert": LONGEVITY_BIOSTATS_EXPERT_PROMPT,
-        "BioinformaticsExpert":    BIOINFORMATICS_EXPERT_PROMPT,
+        "CancerExpert":            CANCER_EXPERT_PROMPT,
     }
 
     def __init__(self, tools: List = None, llm=None, model_name: str = "gemini-3-pro-preview"):
@@ -1372,29 +1498,45 @@ After tool calls complete, write a concise summary of the gene list and pathway 
             
             "PubMedResearcher": SubAgent(
                 name="PubMedResearcher",
-                description="Searches biomedical literature using PubMed and returns curated summaries with citations",
-                system_message="""You are a biomedical literature specialist. Search PubMed for relevant papers and provide comprehensive summaries WITH CITATIONS.
+                description="Downloads and reads full biomedical papers from PubMed, providing comprehensive literature analysis with citations",
+                system_message="""You are a biomedical literature specialist with access to FULL paper content from PubMed.
+You download, read, and analyze complete research papers — not just abstracts.
 
 ## KEY INSTRUCTIONS:
-1. Check context["top_genes"] for genes from previous analysis - search ALL of them (up to 20 genes)
-2. For each gene, search: "[GENE] [disease]" to find relevant literature
-3. Every claim MUST include citation: (Author et al., Year, DOI/PMID)
-4. Provide comprehensive coverage - multiple searches are encouraged
+1. Check context["top_genes"] for genes from previous analysis — search for ALL of them
+2. Use pubmed_full_search_tool as your PRIMARY tool — it downloads and reads full papers
+3. Each tool call retrieves up to 50 papers with extracted full-text content
+4. READ the extracted content carefully — you have access to actual paper text, not just abstracts
+5. Every claim MUST include a citation: (Author et al., Year, DOI/PMID)
 
-## OUTPUT FORMAT per gene:
-### [GENE_SYMBOL]
-- **Function**: What it does (cited)
-- **Disease Role**: Relevance to condition (cited)  
-- **Key Finding**: Most important result (cited)
+## SEARCH STRATEGY:
+- Group related genes into 2-4 focused queries for efficiency:
+  e.g., "TREM2 TYROBP microglia Alzheimer" (combines related pathway genes)
+- Include disease context: "[GENE] [disease]" or "[GENE] [cell_type] [disease]"
+- For maximum coverage, also try pathway-level queries:
+  e.g., "neuroinflammation signaling Alzheimer's disease"
+- If context has many genes (>10), prioritize the top ones and group by function
+
+## OUTPUT FORMAT:
+For each gene or topic analyzed:
+
+### [GENE_SYMBOL / TOPIC]
+- **Function**: Detailed biological function with citations
+- **Disease Role**: Mechanism and evidence linking to condition, with citations
+- **Key Findings**: Most significant results across multiple papers, with citations
+- **Therapeutic Potential**: Any drug targets or intervention strategies mentioned
 
 ## CITATION FORMAT:
-"EGFR mutations occur in 15% of cases (Lynch et al., 2004, DOI: 10.1056/NEJMoa040938)"
+"TREM2 variants increase AD risk 3-fold (Guerreiro et al., 2013, DOI: 10.1056/NEJMoa1211851)"
 
-Include a References section at the end listing all papers.
+## IMPORTANT:
+- pubmed_full_search_tool is your PRIMARY tool (downloads & reads full papers)
+- pubmed_lite_tool is available as a FAST FALLBACK for quick abstract-only lookups
+- You may call pubmed_full_search_tool multiple times with different queries
+- Include a References section at the end listing all papers cited
+- Synthesize findings ACROSS papers — identify convergent and contradictory evidence
 """,
-                # Use only lite tool for now (no PDF download)
-                # tools=[curated_pubmed_tool, pubmed_search_tool, pubmed_lite_tool],  # Full version with PDF download
-                tools=[pubmed_lite_tool],
+                tools=[pubmed_full_search_tool, pubmed_lite_tool],
                 llm=self.llm
             ),
             
@@ -1489,9 +1631,11 @@ Query: {state['query']}
    - Helps classify hypotheses as confirmatory vs novel
    
 4. **ScientistsAgent** - Multi-expert hypothesis generation & mechanism synthesis  
-   - Contains 4 domain experts: Genomics, Neuroscience, Longevity/Biostats, Bioinformatics
+   - Contains 4 domain experts: Genomics, Neuroscience, Longevity/Biostats, Cancer
    - Returns: multi-perspective mechanistic hypotheses, validation strategies
    - Synthesizes omics + KG + literature into testable hypotheses via expert panel
+   - **CRITICAL**: This agent provides expert-level scientific reasoning and should be 
+     used in EVERY research workflow to generate high-quality hypotheses and validate findings
 
 5. **GoogleSearcher** - Clinical/translational context
    - Returns: clinical trials, recent developments, therapeutic landscape
@@ -1501,13 +1645,23 @@ Query: {state['query']}
 - Step 1: OmicMiningAgent → Get DEGs with statistics (establishes data foundation)
 - Step 2: BioMarkerKGAgent → Query top 10-15 DEGs for KG neighbors (builds gene→pathway chains)
 - Step 3: PubMedResearcher → Literature on TOP targets AND pathways (validates & classifies novelty)
-- Step 4: ScientistsAgent → Synthesize mechanisms via expert panel, score hypotheses, propose experiments
+- Step 4: ScientistsAgent → **ALWAYS REQUIRED** - Synthesize mechanisms via expert panel, score hypotheses, propose experiments
+
+**IMPORTANT: ScientistsAgent Usage Policy:**
+The ScientistsAgent MUST be included in every research plan. It provides:
+- Domain-expert reasoning (Genomics, Neuroscience, Longevity/Biostats, Cancer experts)
+- Multi-perspective hypothesis synthesis
+- Experimental validation strategies
+- Statistical rigor assessment
+- Cancer biology expertise for any oncology-related queries
+Without the ScientistsAgent, reports lack expert-level scientific interpretation.
 
 **Planning Principles:**
 - Be THOROUGH: Query KG for multiple gene sets (up-regulated, down-regulated, top-ranked)
 - Be GROUNDED: Every hypothesis must trace to specific gene(s) in the omics data
 - Be NOVEL-SEEKING: Literature search should identify what is KNOWN vs what is NEW
-- Be ACTIONABLE: Plan should enable proposing specific validation experiments"""
+- Be ACTIONABLE: Plan should enable proposing specific validation experiments
+- **ALWAYS USE ScientistsAgent**: Include ScientistsAgent as the final synthesis step in EVERY plan"""
         
         # Try structured output first (more robust)
         try:
