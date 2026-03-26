@@ -41,6 +41,8 @@ webapp/sessions/*
 cache/*
 models/*
 
+benchmark/peer_review_results/*
+benchmark/ai_review_results/*
 tools/omic_tools/outputs/*
 
 db_cache/*
@@ -135,3 +137,4 @@ node_modules/
 
 # Large CSV files
 tools/omic_tools/outputs/*.csv
+*.zip

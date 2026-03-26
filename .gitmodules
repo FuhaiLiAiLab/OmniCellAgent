@@ -1,0 +1,12 @@
+[submodule "benchmark/repos/ReviewAdvisor"]
+	path = benchmark/repos/ReviewAdvisor
+	url = https://github.com/neulab/ReviewAdvisor.git
+[submodule "benchmark/repos/LitLLM"]
+	path = benchmark/repos/LitLLM
+	url = https://github.com/shubhamagarwal92/LitLLM.git
+[submodule "benchmark/repos/openreviewer"]
+	path = benchmark/repos/openreviewer
+	url = https://github.com/maxidl/openreviewer.git
+[submodule "benchmark/repos/SEA"]
+	path = benchmark/repos/SEA
+	url = https://github.com/ecnu-sea/SEA.git
