@@ -1,0 +1,208 @@
+% ============================================================
+% Close-up: Author Knowledge-Base Build Pipeline
+% Fragment — \input{figs/closeup_author_kb}
+% Shows how expert KBs are pre-built offline from a
+% protected config file, decoupling build-time from query-time
+% for modularity and efficiency.
+% ============================================================
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.35cm, font=\sffamily,
+    stepbar/.style={rectangle, rounded corners=6pt, thick,
+        minimum width=20cm, align=center, font=\sffamily,
+        drop shadow={opacity=0.10}, inner sep=6pt, text width=19cm},
+    rwpanel/.style={rectangle, rounded corners=5pt, thick,
+        minimum width=20cm, align=left, inner sep=6pt,
+        font=\sffamily\small, text width=18.5cm},
+    infopanel/.style={rectangle, rounded corners=5pt, draw=gray!50, thick,
+        minimum width=20cm, align=left, fill=white,
+        inner sep=6pt, font=\sffamily\small, text width=18.5cm},
+    toolpanel/.style={rectangle, rounded corners=5pt, draw=gray!60, thick,
+        minimum width=20cm, align=left, fill=gray!4,
+        inner sep=6pt, font=\sffamily\small, text width=18.5cm},
+    storagebox/.style={rectangle, rounded corners=5pt, draw=teal!60!black, thick,
+        minimum width=20cm, align=left, fill=agentTeal,
+        inner sep=6pt, font=\sffamily\small, text width=18.5cm},
+    flowline/.style={->, >=Stealth, very thick, draw=gray!40},
+    sepline/.style={very thick, dashed, draw=red!50!black},
+    consumerlabel/.style={font=\sffamily\small\itshape, text=gray!60!black,
+        align=center, text width=20cm}
+]
+
+% =====================================================
+% TITLE BAR
+% =====================================================
+\node[stepbar, draw=teal!50!black, fill=agentTeal] (step)
+    {\iconDoc{teal!60!black}\;\;
+     \textbf{\large Author Knowledge-Base Build Pipeline}\\[3pt]
+     {\small Offline pre-build separates KB construction
+      from agent query-time for modularity and efficiency.}\\[2pt]
+     {\scriptsize\sffamily\color{gray!60!black}
+      KBs are built once per expert and cached to disk; the agent
+      loads them lazily at query-time without rebuilding.}};
+
+% =====================================================
+% CONFIG FILE
+% =====================================================
+\node[rwpanel, draw=orange!50!black, fill=agentOrange,
+      below=0.5cm of step] (config)
+    {\textbf{\iconGears{orange!60!black}\; Protected Configuration}
+     {\scriptsize (\texttt{configs/experts.yaml} --- gitignored)}\\[4pt]
+     Each entry maps a \textbf{private} \texttt{real\_name}
+     (PubMed query string, never logged) to a public
+     \texttt{alias} (e.g.\ \texttt{"GenomicsExpert"}),
+     plus \texttt{domain}, \texttt{cache\_key},
+     and \texttt{top\_k} (max papers).\\[3pt]
+     {\scriptsize\color{gray!50!black}
+      Ships as \texttt{.yaml.example} with
+      \texttt{real\_name: "CHANGE\_ME"}.
+      A bidirectional alias$\,\leftrightarrow\,$real\_name mapping
+      is maintained at runtime --- the LLM never sees real names.}};
+
+\draw[flowline] (step.south) -- (config.north);
+
+% =====================================================
+% BUILD ENTRY POINT
+% =====================================================
+\node[infopanel, below=0.4cm of config] (entry)
+    {\textbf{Build Entry Point}
+     {\scriptsize (\texttt{scripts/build\_expert\_kbs.py})}\\[4pt]
+     Loads all experts from config, calls
+     \texttt{AuthorKnowledgeBase.build\_knowledge\_base()}
+     for each.\;
+     \textbf{Skip guard:} if \texttt{ragstore/} already has
+     \texttt{.json}/\texttt{.hgdb} files $\rightarrow$ skip
+     entirely.\;
+     {\scriptsize (Run under \texttt{nohup}; full build takes hours.)}};
+
+\draw[flowline] (config.south) -- (entry.north);
+
+% =====================================================
+% PIPELINE STEPS
+% =====================================================
+\node[toolpanel, below=0.4cm of entry] (pipeline)
+    {\textbf{Per-Expert Build Pipeline}
+     {\scriptsize (\texttt{AuthorKnowledgeBase}
+      \textrightarrow\; \texttt{HyperRAG.ainsert})}\\[5pt]
+     %
+     \textbf{\color{orange!60!black}Stages 1--2: Fetch \& Download}\;
+     Query PubMed via \texttt{paperscraper}
+     (\texttt{\{real\_name\}[Author]}, up to \texttt{top\_k}
+     papers).
+     Download full-text PDFs/XMLs from PMC\,/\,Elsevier
+     $\rightarrow$ \texttt{doi\_cache/}.
+     Cached: skips re-fetch and re-download.\\[4pt]
+     %
+     \textbf{\color{cyan!60!black}Stage 3: Text Extraction}\;
+     \texttt{pymupdf} for PDFs, regex tag-strip for XMLs.
+     Skips files with $<$100 chars.\\[4pt]
+     %
+     \textbf{\color{violet}Stage 4: Chunking \& Embedding}\;
+     \texttt{tiktoken} (1200-token chunks, 100 overlap)
+     $\rightarrow$ MD5-hash dedup
+     $\rightarrow$ OpenAI \texttt{text-embedding-3-small}
+     (1536-dim).\\[4pt]
+     %
+     \textbf{\color{violet}Stage 5: Entity \& Relation Extraction}\;
+     \texttt{gpt-4.1} extracts entities and
+     hyperedges (binary to $n$-ary);
+     iterative gleaning; duplicate merging with
+     LLM summarisation.\\[4pt]
+     %                                                                       
+     Flush all 7 storage backends to
+     \texttt{ragstore/}.};
+
+\draw[flowline] (entry.south) -- (pipeline.north);
+
+% =====================================================
+% ON-DISK STORAGE
+% =====================================================
+\node[storagebox, below=0.4cm of pipeline] (storage)
+    {\textbf{On-Disk Artefacts}
+     {\scriptsize (per expert, under
+      \texttt{cache/author\_kb/\{cache\_key\}/ragstore/})}\\[4pt]
+     $\bullet$\; \textbf{JsonKV:}\;
+      \texttt{kv\_store\_full\_docs.json},
+      \texttt{kv\_store\_text\_chunks.json},
+      \texttt{kv\_store\_llm\_response\_cache.json}
+      --- full texts, chunks, cached LLM responses\\[2pt]
+     $\bullet$\; \textbf{NanoVectorDB:}\;
+      \texttt{vdb\_chunks.json},
+      \texttt{vdb\_entities.json},
+      \texttt{vdb\_relationships.json}
+      --- 1536-dim embeddings for chunks, entities,
+      relationships\\[2pt]
+     $\bullet$\; \textbf{HypergraphDB:}\;
+      \texttt{hypergraph\_*.hgdb}
+      --- vertices\,=\,entities,
+      hyperedges\,=\,relations};
+
+\draw[flowline] (pipeline.south) -- (storage.north);
+
+% =====================================================
+% SEPARATION LINE
+% =====================================================
+\node[below=0.5cm of storage, text width=20cm, align=center] (seplabel)
+    {\makebox[18cm]{%
+       \color{red!50!black}\rule[0.4ex]{5cm}{1.2pt}%
+       \;\;\textbf{Build-time\;/\;Query-time Boundary}\;\;%
+       \rule[0.4ex]{5cm}{1.2pt}}\\[4pt]
+     {\scriptsize\color{gray!50!black}
+      The KB is built \emph{once} (offline, hours) and reused
+      across all subsequent agent sessions (online, seconds).
+      The agent never triggers a full rebuild---it only
+      loads cached artefacts from disk.}};
+
+\draw[flowline] (storage.south) -- (seplabel.north);
+
+% =====================================================
+% QUERY-TIME LOADING
+% =====================================================
+\node[rwpanel, draw=blue!40!black, fill=stateBlue,
+      below=0.4cm of seplabel] (querytime)
+    {\textbf{$\blacktriangle$ Query-Time: Lazy Load}
+     {\scriptsize
+      (\texttt{scientist\_rag\_tool} $\rightarrow$
+       \texttt{\_ensure\_initialized})}\\[4pt]
+     On first call, loads each expert's \texttt{ragstore/}
+     from disk into memory (\textbf{no rebuild}).
+     Subsequent calls hit the in-memory
+     \texttt{\_kb\_dict} instantly.\\[3pt]
+     {\scriptsize Query mode: \texttt{hyper}
+      (entity search $\rightarrow$ graph traversal
+       $\rightarrow$ chunk retrieval $\rightarrow$
+       LLM-grounded answer)}};
+
+\draw[flowline] (seplabel.south) -- (querytime.north);
+
+% =====================================================
+% CONSUMERS
+% =====================================================
+\node[consumerlabel, below=0.3cm of querytime] (consumers)
+    {\textbf{Consumed by:}\;
+     ScientistsAgent expert panel ---
+     each expert routes queries to its own pre-built KB
+     (see ScientistsAgent close-up)\\[2pt]
+     {\scriptsize Three of four experts (Genomics, Neuroscience,
+      Longevity-Biostats) use RAG KBs;\;
+      Bioinformatics operates LLM-only with no KB.}};
+
+\draw[flowline, draw=gray!30] (querytime.south) -- (consumers.north);
+
+\end{tikzpicture}%
+}% end resizebox
+\caption{\textbf{Author Knowledge-Base Build Pipeline.}
+A gitignored \texttt{experts.yaml} maps each expert alias to a
+private scientist name used \emph{only} for PubMed queries.
+The offline build (Stages~1--6) fetches papers, extracts text,
+chunks, embeds, and runs LLM entity/relation extraction.
+At query-time the pre-built KB loads from cache in seconds.
+This separation provides
+(i)~\emph{modularity} (experts updated independently),
+(ii)~\emph{efficiency} (build once, query many), and
+(iii)~\emph{privacy} (real names never reach the agent).
+See companion illustration for the HyperRAG retrieval
+architecture at query-time.}
+\label{fig:closeup-author-kb}
+\end{figure}

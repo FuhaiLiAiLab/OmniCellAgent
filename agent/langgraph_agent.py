@@ -2403,173 +2403,235 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
         return "".join(appendix_parts)
     
     def _compile_pdf(self, markdown_path: str) -> Optional[str]:
-        """Compile the markdown report to PDF using available tools"""
+        """Compile the markdown report to PDF using available tools.
+
+        Strategy 1 (preferred): pandoc + xelatex with Unicode fonts,
+                                proper table/code formatting, page-breaks.
+        Strategy 2 (fallback):  pandoc → HTML → wkhtmltopdf with CSS.
+        Strategy 3 (last):      standalone HTML with water.css CDN.
+        """
         try:
             import subprocess
             import shutil
-            
+            import tempfile
+
             pdf_path = markdown_path.replace('.md', '.pdf')
             html_path = markdown_path.replace('.md', '.html')
             session_dir = os.path.dirname(markdown_path)
-            
+
             # Check available tools
             has_pandoc = shutil.which('pandoc')
             has_wkhtmltopdf = shutil.which('wkhtmltopdf')
             has_xelatex = shutil.which('xelatex')
             has_pdflatex = shutil.which('pdflatex')
-            
+
             if not has_pandoc:
                 print("⚠️ pandoc not found - skipping PDF generation")
                 print("   Install with: sudo apt-get install pandoc")
                 return None
-            
-            # Strategy 1: Try pandoc with LaTeX if available
-            if has_xelatex or has_pdflatex:
-                pdf_engine = 'xelatex' if has_xelatex else 'pdflatex'
+
+            # ── Preprocess markdown: insert blank lines around tables ────
+            # Pandoc 2.x requires a blank line before/after pipe tables;
+            # LLM-generated reports often omit them.
+            with open(markdown_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            fixed_lines: list[str] = []
+            for line in lines:
+                stripped = line.rstrip()
+                is_tbl = stripped.startswith('|') and stripped.endswith('|')
+                if is_tbl:
+                    if fixed_lines and fixed_lines[-1].strip() != '' and not (
+                        fixed_lines[-1].rstrip().startswith('|') and fixed_lines[-1].rstrip().endswith('|')
+                    ):
+                        fixed_lines.append('\n')
+                else:
+                    if (fixed_lines
+                        and fixed_lines[-1].rstrip().startswith('|')
+                        and fixed_lines[-1].rstrip().endswith('|')
+                        and stripped != ''):
+                        fixed_lines.append('\n')
+                fixed_lines.append(line)
+
+            tmp_md_fd, tmp_md_path = tempfile.mkstemp(suffix='.md', prefix='oca_pp_', dir=session_dir)
+            with os.fdopen(tmp_md_fd, 'w', encoding='utf-8') as f:
+                f.writelines(fixed_lines)
+
+            # ── Strategy 1: pandoc + xelatex with custom LaTeX header ──
+            if has_xelatex:
+                latex_header = r"""
+\usepackage{fontspec}
+\setmainfont{DejaVu Serif}
+\setsansfont{DejaVu Sans}
+\setmonofont[Scale=0.85]{DejaVu Sans Mono}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{OmniCellAgent Analysis Report}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyfoot{}
+\usepackage{makecell}
+\usepackage{etoolbox}
+\renewcommand{\arraystretch}{1.35}
+\AtBeginEnvironment{longtable}{\small}
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>0.92\linewidth 0.92\linewidth\else\Gin@nat@width\fi}
+\makeatother
+\setkeys{Gin}{width=\maxwidth,keepaspectratio}
+\usepackage{fvextra}
+\fvset{breaklines,breakanywhere,fontsize=\scriptsize}
+\usepackage{titlesec}
+\titleformat{\section}{\Large\bfseries}{}{0em}{}[\vspace{4pt}\hrule\vspace{6pt}]
+\titleformat{\subsection}{\large\bfseries}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{}{0em}{}
+\let\oldsection\section
+\renewcommand{\section}{\clearpage\oldsection}
+\PassOptionsToPackage{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!70!black}{hyperref}
+\usepackage{microtype}
+"""
+                header_fd, header_path = tempfile.mkstemp(suffix='.tex', prefix='oca_hdr_')
+                with os.fdopen(header_fd, 'w') as f:
+                    f.write(latex_header)
+
                 cmd = [
-                    'pandoc', markdown_path, '-o', pdf_path,
-                    f'--pdf-engine={pdf_engine}',
-                    '-V', 'geometry:margin=1in',
+                    'pandoc', tmp_md_path, '-o', pdf_path,
+                    '--pdf-engine=xelatex',
+                    '-H', header_path,
+                    '-V', 'geometry:margin=0.9in',
                     '-V', 'fontsize=11pt',
+                    '-V', 'documentclass=article',
+                    '-V', 'papersize=a4',
                     '--toc', '--toc-depth=2',
                     '--highlight-style=tango',
                     '--resource-path', session_dir,
+                    '--columns=72',
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, cwd=session_dir, timeout=180)
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                                        cwd=session_dir, timeout=300)
+                try:
+                    os.remove(header_path)
+                except OSError:
+                    pass
+
                 if result.returncode == 0:
-                    print(f"📄 PDF generated (LaTeX): {pdf_path}")
+                    print(f"📄 PDF generated (xelatex): {pdf_path}")
+                    try: os.remove(tmp_md_path)
+                    except OSError: pass
                     return pdf_path
-                print(f"⚠️ LaTeX PDF failed, trying HTML method...")
-            
-            # Strategy 2: Pandoc → HTML → wkhtmltopdf (if available)
+                print(f"⚠️ xelatex PDF failed, trying HTML method...")
+
+            # ── Strategy 2: Pandoc → HTML → wkhtmltopdf ─────────────────
             if has_wkhtmltopdf:
-                # Create a CSS file to ensure images fit within page bounds
                 css_content = """
-/* Ensure images fit within page bounds */
-img {
-    max-width: 100% !important;
-    max-height: 650px !important;
-    height: auto !important;
-    width: auto !important;
-    display: block;
-    margin: 10px auto;
-    page-break-inside: avoid;
+body {
+    font-family: "DejaVu Sans", "Noto Sans", "Segoe UI", Roboto, Arial, sans-serif;
+    font-size: 11pt; line-height: 1.55; color: #1a1a1a; max-width: 100%;
 }
-/* Better table styling */
+h1 { font-size: 1.6em; border-bottom: 2px solid #2c3e50; padding-bottom: 6px; margin-top: 30px; }
+h2 { font-size: 1.3em; border-bottom: 1px solid #bdc3c7; padding-bottom: 4px; margin-top: 24px; }
+h3 { font-size: 1.1em; margin-top: 18px; }
+h1, h2, h3 { page-break-after: avoid; }
+img {
+    max-width: 100% !important; max-height: 600px !important;
+    height: auto !important; width: auto !important;
+    display: block; margin: 12px auto; page-break-inside: avoid;
+}
 table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 15px 0;
-    font-size: 10pt;
-    page-break-inside: avoid;
+    width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 9pt;
+    page-break-inside: avoid; table-layout: fixed;
+    word-wrap: break-word; overflow-wrap: break-word;
 }
 th, td {
-    border: 1px solid #ddd;
-    padding: 6px 8px;
-    text-align: left;
+    border: 1px solid #ccc; padding: 5px 7px; text-align: left;
+    vertical-align: top; word-wrap: break-word; overflow-wrap: break-word;
 }
-th {
-    background-color: #f5f5f5;
-    font-weight: bold;
-}
-/* Better heading spacing */
-h1, h2, h3 {
-    page-break-after: avoid;
-    margin-top: 20px;
-}
-/* Code blocks */
+th { background-color: #ecf0f1; font-weight: 600; }
+tr:nth-child(even) { background-color: #f9f9f9; }
 pre, code {
-    font-size: 9pt;
-    background-color: #f8f8f8;
-    border-radius: 3px;
-    overflow-x: auto;
+    font-family: "DejaVu Sans Mono", "Consolas", monospace;
+    font-size: 8pt; background-color: #f5f5f5; border-radius: 3px;
 }
-/* Page breaks */
-.page-break {
-    page-break-before: always;
+pre {
+    padding: 8px 10px; overflow-x: auto; white-space: pre-wrap;
+    word-wrap: break-word; border: 1px solid #e0e0e0; page-break-inside: auto;
 }
-body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    font-size: 11pt;
-    line-height: 1.5;
-}
+blockquote { border-left: 3px solid #3498db; padding-left: 12px; color: #555; }
+hr { border: none; border-top: 1px solid #bbb; margin: 20px 0; }
 """
                 css_path = os.path.join(session_dir, '_report_style.css')
                 with open(css_path, 'w') as f:
                     f.write(css_content)
-                
-                # First convert to HTML with embedded images and custom CSS
-                # Use --self-contained for pandoc 2.x, --embed-resources for 3.x
+
                 html_cmd = [
-                    'pandoc', markdown_path, '-o', html_path,
-                    '--standalone',
-                    '--self-contained',  # Works for pandoc 2.x (--embed-resources is 3.x only)
-                    '--toc', '--toc-depth=2',
-                    '--highlight-style=tango',
-                    '-V', 'title=OmniCellAgent Analysis Report',
-                    '--resource-path', session_dir,
-                    '-c', css_path,  # Include custom CSS
+                    'pandoc', tmp_md_path, '-o', html_path,
+                    '--standalone', '--self-contained',
+                    '--toc', '--toc-depth=2', '--highlight-style=tango',
+                    '--resource-path', session_dir, '-c', css_path, '--columns=72',
                 ]
-                result = subprocess.run(html_cmd, capture_output=True, text=True, cwd=session_dir, timeout=120)
+                result = subprocess.run(html_cmd, capture_output=True, text=True,
+                                        cwd=session_dir, timeout=120)
                 if result.returncode == 0:
-                    # Convert HTML to PDF
                     pdf_cmd = [
-                        'wkhtmltopdf',
-                        '--enable-local-file-access',
-                        '--margin-top', '20mm',
-                        '--margin-bottom', '20mm',
-                        '--margin-left', '15mm',
-                        '--margin-right', '15mm',
-                        html_path, pdf_path
+                        'wkhtmltopdf', '--enable-local-file-access',
+                        '--margin-top', '18mm', '--margin-bottom', '18mm',
+                        '--margin-left', '14mm', '--margin-right', '14mm',
+                        '--footer-center', '[page]', '--footer-font-size', '9',
+                        html_path, pdf_path,
                     ]
-                    result2 = subprocess.run(pdf_cmd, capture_output=True, text=True, cwd=session_dir, timeout=180)
+                    result2 = subprocess.run(pdf_cmd, capture_output=True, text=True,
+                                             cwd=session_dir, timeout=180)
                     if result2.returncode == 0:
                         print(f"📄 PDF generated (wkhtmltopdf): {pdf_path}")
-                        # Clean up intermediate files
-                        try:
-                            os.remove(html_path)
-                            os.remove(css_path)
-                        except:
-                            pass
+                        for p in (html_path, css_path, tmp_md_path):
+                            try:
+                                os.remove(p)
+                            except OSError:
+                                pass
                         return pdf_path
                     else:
-                        print(f"⚠️ wkhtmltopdf failed: {result2.stderr[:200] if result2.stderr else 'No error message'}")
+                        print(f"⚠️ wkhtmltopdf failed: {result2.stderr[:200] if result2.stderr else ''}")
                 else:
-                    print(f"⚠️ Pandoc HTML conversion failed: {result.stderr[:200] if result.stderr else 'No error message'}")
-                
-                # Clean up CSS file if we get here
-                try:
-                    os.remove(css_path)
-                except:
-                    pass
-                else:
-                    print(f"⚠️ Pandoc HTML conversion failed: {result.stderr[:200] if result.stderr else 'No error message'}")
-            
-            # Strategy 3: Generate standalone HTML (always works)
+                    print(f"⚠️ Pandoc HTML conversion failed: {result.stderr[:200] if result.stderr else ''}")
+
+                for p in (css_path, html_path):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+
+            # ── Strategy 3: Standalone HTML (always works) ───────────────
             html_cmd = [
-                'pandoc', markdown_path, '-o', html_path,
-                '--standalone',
-                '--toc', '--toc-depth=2',
+                'pandoc', tmp_md_path, '-o', html_path,
+                '--standalone', '--toc', '--toc-depth=2',
                 '--highlight-style=tango',
                 '-V', 'title=OmniCellAgent Analysis Report',
                 '--resource-path', session_dir,
                 '--metadata', f'date={datetime.now().strftime("%Y-%m-%d")}',
-                '-c', 'https://cdn.jsdelivr.net/npm/water.css@2/out/water.css',  # Nice CSS
+                '-c', 'https://cdn.jsdelivr.net/npm/water.css@2/out/water.css',
             ]
-            result = subprocess.run(html_cmd, capture_output=True, text=True, cwd=session_dir, timeout=60)
+            result = subprocess.run(html_cmd, capture_output=True, text=True,
+                                    cwd=session_dir, timeout=60)
             if result.returncode == 0:
                 print(f"📄 HTML report generated: {html_path}")
                 print("   (PDF requires: wkhtmltopdf or texlive-xetex)")
-                return html_path  # Return HTML path instead
-            
+                try: os.remove(tmp_md_path)
+                except OSError: pass
+                return html_path
+
             print(f"⚠️ Could not generate PDF or HTML: {result.stderr[:300]}")
+            try: os.remove(tmp_md_path)
+            except OSError: pass
             return None
-                    
+
         except subprocess.TimeoutExpired:
             print("⚠️ PDF generation timed out")
+            try: os.remove(tmp_md_path)  # type: ignore[possibly-undefined]
+            except (OSError, NameError): pass
             return None
         except Exception as e:
             print(f"⚠️ Error generating PDF: {e}")
+            try: os.remove(tmp_md_path)  # type: ignore[possibly-undefined]
+            except (OSError, NameError): pass
             return None
     
     def _save_report(self, query: str, report: str, state: AgentState = None) -> Optional[str]:

@@ -1,0 +1,336 @@
+% ============================================================
+% Per-Sub-Agent Close-Up Diagrams (a)–(e)
+% Fragment: \input{figs/agent_closeups} in your main doc.
+% Requires: agentbox, database, statearrow styles;
+%   all icon commands; all agent colors; stateBlue, aliceblue.
+% ============================================================
+
+\begin{figure}[p]
+\centering
+
+% ============================================================
+% Shared tikz styles for all sub-figures
+% ============================================================
+\tikzset{
+    agentmain/.style={
+        rectangle, rounded corners=8pt, draw=#1!60!black, thick,
+        minimum width=6.0cm, minimum height=1.2cm, align=center,
+        fill=#1, drop shadow={opacity=0.10}, font=\sffamily
+    },
+    toolbox/.style={
+        rectangle, rounded corners=4pt, draw=gray!50, thick,
+        minimum width=4.8cm, minimum height=0.9cm, align=left,
+        fill=white, font=\sffamily\small, inner sep=5pt
+    },
+    resource/.style={
+        cylinder, shape border rotate=90, draw=gray!40,
+        minimum width=1.0cm, minimum height=1.2cm,
+        font=\sffamily\tiny\bfseries, align=center, fill=gray!8
+    },
+    stateio/.style={
+        rectangle, rounded corners=4pt, draw=blue!30, thick,
+        minimum width=4.0cm, minimum height=0.9cm, align=left,
+        fill=stateBlue, font=\sffamily\small, inner sep=5pt
+    },
+    iolabel/.style={font=\sffamily\scriptsize\bfseries, text=blue!40!gray},
+    rwlabel/.style={font=\sffamily\scriptsize, inner sep=1pt},
+    conn/.style={->, >=latex, thick, draw=gray!50},
+    stateconn/.style={<->, >=latex, thick, draw=blue!30}
+}
+
+% =======================  (a) OmicMiningAgent  =======================
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm, font=\sffamily]
+    % Agent header
+    \node[agentmain=agentOrange] (agent)
+        {\iconDNA{orange!60!black} \enskip \textbf{OmicMiningAgent}};
+
+    % Tool
+    \node[toolbox, below=0.8cm of agent] (tool1)
+        {\texttt{omic\_analysis()}\\
+         {\scriptsize NER $\rightarrow$ dataset search $\rightarrow$ DE $\rightarrow$ enrichment}};
+
+    % Resources
+    \node[resource, left=0.8cm of tool1, yshift=-0.8cm] (db1) {TOSG\\DB};
+    \node[resource, below=0.2cm of db1] (db2) {GLiNER\\NER};
+    \node[resource, right=0.8cm of tool1, yshift=-0.8cm] (db3) {DESeq2\\/ R};
+    \node[resource, below=0.2cm of db3] (db4) {KEGG\\Enrich};
+
+    % State I/O
+    \node[stateio, below=1.8cm of tool1] (reads)
+        {\textcolor{gray!60!black}{\textbf{R:}} \texttt{query}};
+    \node[stateio, below=0.3cm of reads]  (writes)
+        {\textcolor{blue!50!black}{\textbf{W:}} \texttt{top\_genes[]}, \texttt{disease},\\
+         \quad\; \texttt{cell\_type}, \texttt{pathways[]}};
+
+    % Connections
+    \draw[conn] (agent) -- (tool1);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db1.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db2.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db3.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db4.north);
+
+    \node[iolabel, left=0.1cm of reads.north west, anchor=south east] {AgentState};
+    \draw[stateconn] (tool1.south east) -- ++(0.6,0) |- (reads.east);
+    \draw[stateconn] (tool1.south east) -- ++(0.6,0) |- (writes.east);
+\end{tikzpicture}%
+}
+\par\smallskip{\small (a) OmicMiningAgent}
+\end{minipage}%
+\hfill
+% =======================  (b) BioMarkerKGAgent  =======================
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm, font=\sffamily]
+    % Agent header
+    \node[agentmain=agentCyan] (agent)
+        {\iconGraph{cyan!60!black} \enskip \textbf{BioMarkerKGAgent}};
+
+    % Tool
+    \node[toolbox, below=0.8cm of agent] (tool1)
+        {\texttt{query\_knowledge\_graph()}\\
+         {\scriptsize GRetriever: GAT + LLM over PrimeKG}};
+
+    % Resources
+    \node[resource, left=0.8cm of tool1, yshift=-0.8cm] (db1) {Neo4j\\PrimeKG};
+    \node[resource, below=0.2cm of db1] (db2) {GRetriever\\(PyG)};
+    \node[resource, right=0.8cm of tool1, yshift=-0.8cm] (db3) {OpenAI\\Embed};
+    \node[resource, below=0.2cm of db3] (db4) {PCST\\Subgraph};
+
+    % State I/O
+    \node[stateio, below=1.8cm of tool1] (reads)
+        {\textcolor{gray!60!black}{\textbf{R:}} \texttt{top\_genes},
+         \texttt{previous\_results}};
+    \node[stateio, below=0.3cm of reads]  (writes)
+        {\textcolor{blue!50!black}{\textbf{W:}} \texttt{agent\_outputs[]}\\
+         {\scriptsize (pathway chains, GO terms, PPIs)}};
+
+    % Connections
+    \draw[conn] (agent) -- (tool1);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db1.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db2.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db3.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db4.north);
+
+    \node[iolabel, left=0.1cm of reads.north west, anchor=south east] {AgentState};
+    \draw[stateconn] (tool1.south east) -- ++(0.6,0) |- (reads.east);
+    \draw[stateconn] (tool1.south east) -- ++(0.6,0) |- (writes.east);
+\end{tikzpicture}%
+}
+\par\smallskip{\small (b) BioMarkerKGAgent}
+\end{minipage}
+
+\vspace{0.8cm}
+
+% =======================  (c) PubMedResearcher  =======================
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm, font=\sffamily]
+    % Agent header
+    \node[agentmain=agentPurple] (agent)
+        {\iconSearch{violet} \enskip \textbf{PubMedResearcher}};
+
+    % Tools (2)
+    \node[toolbox, below=0.8cm of agent, xshift=-1.5cm] (tool1)
+        {\texttt{search\_pubmed()}\\
+         {\scriptsize Full-text PDF/XML download}};
+    \node[toolbox, below=0.8cm of agent, xshift=1.5cm] (tool2)
+        {\texttt{pubmed\_search\_fast()}\\
+         {\scriptsize NCBI E-utilities (abstracts)}};
+
+    % Resources
+    \node[resource, below=1.0cm of tool1] (db1) {PubMed\\API};
+    \node[resource, right=0.3cm of db1] (db2) {PMC\\PDFs};
+    \node[resource, below=1.0cm of tool2] (db3) {DOI\\Cache};
+
+    % State I/O
+    \node[stateio, below=2.4cm of agent] (reads)
+        {\textcolor{gray!60!black}{\textbf{R:}} \texttt{top\_genes},
+         \texttt{previous\_results}};
+    \node[stateio, below=0.3cm of reads]  (writes)
+        {\textcolor{blue!50!black}{\textbf{W:}} \texttt{paper\_dois[]},
+         \texttt{paper\_pmids[]}\\
+         {\scriptsize (per-gene literature with citations)}};
+
+    % Connections
+    \draw[conn] (agent.south) -- ++(0,-0.3) -| (tool1.north);
+    \draw[conn] (agent.south) -- ++(0,-0.3) -| (tool2.north);
+    \draw[conn, draw=gray!30] (tool1) -- (db1);
+    \draw[conn, draw=gray!30] (tool1) -- (db2);
+    \draw[conn, draw=gray!30] (tool2) -- (db3);
+
+    \node[iolabel, left=0.1cm of reads.north west, anchor=south east] {AgentState};
+    \draw[stateconn] (reads.east) -- ++(0.6,0) |- ($(agent.south east)+(0.6,-0.3)$);
+    \draw[stateconn] (writes.east) -- ++(0.6,0) |- ($(agent.south east)+(0.6,-0.3)$);
+\end{tikzpicture}%
+}
+\par\smallskip{\small (c) PubMedResearcher}
+\end{minipage}%
+\hfill
+% =======================  (d) GoogleSearcher  =======================
+\begin{minipage}[t]{0.48\textwidth}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm, font=\sffamily]
+    % Agent header
+    \node[agentmain=googleGray] (agent)
+        {\iconSearch{gray!60!black} \enskip \textbf{GoogleSearcher}};
+
+    % Tool
+    \node[toolbox, below=0.8cm of agent] (tool1)
+        {\texttt{google\_search()}\\
+         {\scriptsize Custom Search API + w3m extraction}};
+
+    % Resources
+    \node[resource, left=0.8cm of tool1, yshift=-0.8cm] (db1) {Google\\CSE};
+    \node[resource, right=0.8cm of tool1, yshift=-0.8cm] (db2) {w3m\\Browser};
+    \node[resource, below=0.2cm of db2] (db3) {LLM\\Filter};
+
+    % State I/O
+    \node[stateio, below=1.8cm of tool1] (reads)
+        {\textcolor{gray!60!black}{\textbf{R:}} \texttt{previous\_results}
+         (hypotheses)};
+    \node[stateio, below=0.3cm of reads]  (writes)
+        {\textcolor{blue!50!black}{\textbf{W:}} \texttt{agent\_outputs[]}\\
+         {\scriptsize (clinical trials, translational viability)}};
+
+    % Connections
+    \draw[conn] (agent) -- (tool1);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db1.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db2.north);
+    \draw[conn, draw=gray!30] (tool1.south) -- ++(0,-0.3) -| (db3.north);
+
+    \node[iolabel, left=0.1cm of reads.north west, anchor=south east] {AgentState};
+    \draw[stateconn] (tool1.south east) -- ++(0.6,0) |- (reads.east);
+    \draw[stateconn] (tool1.south east) -- ++(0.6,0) |- (writes.east);
+\end{tikzpicture}%
+}
+\par\smallskip{\small (d) GoogleSearcher}
+\end{minipage}
+
+\vspace{0.8cm}
+
+% =======================  (e) ScientistsAgent  =======================
+\begin{minipage}[t]{\textwidth}
+\centering
+\resizebox{0.85\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.6cm, font=\sffamily]
+    % Agent header (wider for compound agent)
+    \node[agentmain=agentTeal, minimum width=8cm] (agent)
+        {\iconBulb{teal!60!black} \enskip \textbf{ScientistsAgent}
+         {\small\itshape (Multi-Expert PI)}};
+
+    % Router
+    \node[rectangle, rounded corners=4pt, draw=teal!50, thick,
+          fill=teal!8, minimum width=5cm, minimum height=0.9cm,
+          align=center, font=\sffamily\small,
+          below=0.7cm of agent] (router)
+        {\iconBrain{teal!60!black} \enskip \textbf{Expert Router (PI)}\\
+         {\scriptsize Structured LLM routing $\rightarrow$ selects 2--3 experts}};
+
+    % 4 Expert boxes in a row
+    \node[toolbox, fill=yellow!8, below=0.9cm of router, xshift=-5.2cm,
+          minimum width=3.6cm, minimum height=1.8cm] (exp1)
+        {\textbf{GenomicsExpert}\\[2pt]
+         \texttt{\scriptsize query\_genomics-}\\
+         \texttt{\scriptsize expert\_kb()}\\
+         {\scriptsize HyperRAG KB}};
+
+    \node[toolbox, fill=pink!8, right=0.3cm of exp1,
+          minimum width=3.6cm, minimum height=1.8cm] (exp2)
+        {\textbf{NeuroscienceExpert}\\[2pt]
+         \texttt{\scriptsize query\_neuroscience-}\\
+         \texttt{\scriptsize expert\_kb()}\\
+         {\scriptsize HyperRAG KB}};
+
+    \node[toolbox, fill=lime!8, right=0.3cm of exp2,
+          minimum width=3.6cm, minimum height=1.8cm] (exp3)
+        {\textbf{LongevityBiostats}\\[2pt]
+         \texttt{\scriptsize query\_longevity-}\\
+         \texttt{\scriptsize biostatsexpert\_kb()}\\
+         {\scriptsize HyperRAG KB}};
+
+    \node[toolbox, fill=cyan!8, right=0.3cm of exp3,
+          minimum width=3.6cm, minimum height=1.8cm] (exp4)
+        {\textbf{BioinformaticsExpert}\\[2pt]
+         \texttt{\scriptsize query\_bioinformatics-}\\
+         \texttt{\scriptsize expert\_kb()}\\
+         {\scriptsize HyperRAG KB}};
+
+    % Synthesis
+    \node[rectangle, rounded corners=4pt, draw=teal!50, thick,
+          fill=teal!8, minimum width=5cm, minimum height=0.9cm,
+          align=center, font=\sffamily\small,
+          below=0.9cm of $(exp2.south)!0.5!(exp3.south)$] (synth)
+        {\iconRobot{teal!60!black} \enskip \textbf{PI Synthesis}\\
+         {\scriptsize Integrates expert perspectives $\rightarrow$ ranked hypotheses}};
+
+    % State I/O (below synthesis)
+    \node[stateio, minimum width=6cm, below=0.8cm of synth, xshift=-2.5cm] (reads)
+        {\textcolor{gray!60!black}{\textbf{R:}} \texttt{ALL previous\_results},
+         \texttt{top\_genes}, \texttt{paper\_dois}};
+    \node[stateio, minimum width=6cm, below=0.3cm of reads]  (writes)
+        {\textcolor{blue!50!black}{\textbf{W:}} \texttt{agent\_outputs[]}
+         + \texttt{expert\_routing\{\}}\\
+         {\scriptsize (ranked hypotheses, validation plans, expert contributions)}};
+
+    % RAG resources
+    \node[resource, below=0.15cm of exp1] (rag1) {Author\\KB};
+    \node[resource, below=0.15cm of exp2] (rag2) {Author\\KB};
+    \node[resource, below=0.15cm of exp3] (rag3) {Author\\KB};
+    \node[resource, below=0.15cm of exp4] (rag4) {Author\\KB};
+
+    % Connections: agent -> router
+    \draw[conn] (agent) -- (router);
+
+    % Router -> experts (fan-out)
+    \draw[conn, draw=teal!40] (router.south) -- ++(0,-0.25) -| (exp1.north);
+    \draw[conn, draw=teal!40] (router.south) -- ++(0,-0.25) -| (exp2.north);
+    \draw[conn, draw=teal!40] (router.south) -- ++(0,-0.25) -| (exp3.north);
+    \draw[conn, draw=teal!40] (router.south) -- ++(0,-0.25) -| (exp4.north);
+
+    % Experts -> synthesis (fan-in)
+    \draw[conn, draw=teal!40] (exp1.south) -- ++(0,-0.95) -| (synth.north west);
+    \draw[conn, draw=teal!40] (exp2.south) -- ++(0,-0.95) -| ($(synth.north)!0.33!(synth.north west)$);
+    \draw[conn, draw=teal!40] (exp3.south) -- ++(0,-0.95) -| ($(synth.north)!0.33!(synth.north east)$);
+    \draw[conn, draw=teal!40] (exp4.south) -- ++(0,-0.95) -| (synth.north east);
+
+    % State connections
+    \node[iolabel, left=0.1cm of reads.north west, anchor=south east] {AgentState};
+    \draw[stateconn] (synth.south east) -- ++(0.6,0) |- (reads.east);
+    \draw[stateconn] (synth.south east) -- ++(0.6,0) |- (writes.east);
+\end{tikzpicture}%
+}
+\par\smallskip{\small (e) ScientistsAgent}
+\end{minipage}
+
+\caption{Close-up views of each sub-agent in the OmniCellAgent system, showing
+tools, external resources, and AgentState read/write interfaces.
+\textbf{(a)~OmicMiningAgent} performs differential expression analysis via a
+single \texttt{omic\_analysis} tool backed by the OmniCellTOSG single-cell
+database, GLiNER NER for entity extraction, and R/DESeq2 for statistical
+testing; it writes the foundational \texttt{top\_genes} list that seeds all
+downstream agents.
+\textbf{(b)~BioMarkerKGAgent} queries the PrimeKG knowledge graph through a
+GRetriever model (GAT + LLM on Neo4j) to map genes to pathways, protein
+interactions, and GO terms, contextualising the omics hits within known
+biology.
+\textbf{(c)~PubMedResearcher} has two tools---a full-text downloader
+(\texttt{search\_pubmed}) and a fast abstract search
+(\texttt{pubmed\_search\_fast})---producing per-gene literature reviews with
+DOI/PMID citations that populate the shared state for traceability.
+\textbf{(d)~GoogleSearcher} uses the Google Custom Search API with w3m-based
+page extraction to assess clinical trial pipelines and translational viability
+of the proposed targets.
+\textbf{(e)~ScientistsAgent} is a compound multi-expert agent: a PI-level
+router selects 2--3 domain experts (Genomics, Neuroscience,
+Longevity/Biostatistics, Bioinformatics), each optionally backed by a
+HyperRAG knowledge base built from curated author publications; a synthesis
+node integrates their perspectives into ranked mechanistic hypotheses with
+proposed validation experiments.}
+\label{fig:agent-closeups}
+\end{figure}

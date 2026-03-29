@@ -1,0 +1,135 @@
+% ============================================================
+% Close-up: OmicMiningAgent — Workflow Interface View
+% Fragment — \input{figs/closeup_omic}
+% Complements internal tool illustrations with orchestrator-
+% level data flow, prompt highlights, and state I/O.
+% ============================================================
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.35cm, font=\sffamily,
+    stepbar/.style={rectangle, rounded corners=6pt, thick,
+        minimum width=19cm, align=center, font=\sffamily,
+        drop shadow={opacity=0.10}, inner sep=6pt, text width=18cm},
+    rwpanel/.style={rectangle, rounded corners=5pt, thick,
+        minimum width=19cm, align=left, inner sep=6pt,
+        font=\sffamily\small, text width=17.5cm},
+    infopanel/.style={rectangle, rounded corners=5pt, draw=gray!50, thick,
+        minimum width=19cm, align=left, fill=white,
+        inner sep=6pt, font=\sffamily\small, text width=17.5cm},
+    toolpanel/.style={rectangle, rounded corners=5pt, draw=gray!60, thick,
+        minimum width=19cm, align=left, fill=gray!4,
+        inner sep=6pt, font=\sffamily\small, text width=17.5cm},
+    flowline/.style={->, >=Stealth, very thick, draw=gray!40},
+    consumerlabel/.style={font=\sffamily\small\itshape, text=gray!60!black,
+        align=center, text width=19cm}
+]
+    % === STEP BAR ===
+    \node[stepbar, draw=orange!50!black, fill=agentOrange] (step)
+        {\iconDNA{orange!60!black}\;\;
+         \textbf{\large OmicMiningAgent --- Data Foundation}
+         {\normalsize\itshape\; (typically first)}\\[3pt]
+         {\small Planner: \textit{``ALWAYS run FIRST to ground analysis
+          in actual expression data --- establishes data foundation.''}}\\[2pt]
+         {\scriptsize\sffamily\color{gray!60!black}
+          Note: ordering shown is a \emph{typical} realisation;
+          the LLM planner may reorder, skip, or loop back to any
+          agent based on intermediate results.}};
+
+    % === READS ===
+    \node[rwpanel, draw=green!40!black, fill=agentGreen,
+          below=0.4cm of step] (reads)
+        {\textbf{$\blacktriangledown$ Reads from AgentState}\\[5pt]
+         $\bullet$\; \texttt{query} {\scriptsize (str)} ---
+          user's natural-language research question\\[2pt]
+         $\bullet$\; \texttt{session\_id} {\scriptsize (str)} ---
+          unique session identifier for file paths and result caching};
+
+    \draw[flowline] (step.south) -- (reads.north);
+
+    % === PROMPT HIGHLIGHTS ===
+    \node[infopanel, below=0.4cm of reads] (prompt)
+        {\textbf{System Prompt Highlights}
+         {\scriptsize (from \texttt{OmicMiningAgent.system\_message})}\\[5pt]
+         \textbf{1.}\; Extract \texttt{disease}, \texttt{organ},
+          \texttt{cell\_type} from the user query\\[2pt]
+         \textbf{2.}\; Map free-text to canonical forms:\;
+          ``Alzheimer's'' $\rightarrow$ \texttt{"Alzheimer disease"},\;
+          ``Lung cancer'' $\rightarrow$ \texttt{"lung adenocarcinoma"}\\[2pt]
+         \textbf{3.}\; Map organs:\;
+          Alzheimer's $\rightarrow$ \texttt{"brain"},\;
+          Breast cancer $\rightarrow$ \texttt{"breast"}\\[2pt]
+         \textbf{4.}\; After tool calls $\rightarrow$
+          ``write a concise summary of the gene list and pathway data''};
+
+    \draw[flowline] (reads.south) -- (prompt.north);
+
+    % === TOOL ===
+    \node[toolpanel, below=0.4cm of prompt] (tool)
+        {\textbf{Tool:}\;
+         \texttt{omic\_analysis\_tool(disease, organ, cell\_type)}\\[5pt]
+         {\scriptsize \textbf{Pipeline:}\;
+          GLiNER NER $\rightarrow$
+          OmniCellTOSG scRNA-seq query $\rightarrow$
+          DESeq2 differential expression $\rightarrow$
+          clusterProfiler KEGG/GO enrichment}\\[3pt]
+         {\scriptsize \textbf{Returns:}\;
+          sample counts (disease vs.\ normal), DEG rankings with
+          log2FC \& FDR, volcano plots, KEGG/GO enrichment dotplots}\\[3pt]
+         {\scriptsize \textbf{Resources:}\;
+          OmniCellTOSG\; $\cdot$\;
+          GLiNER\; $\cdot$\;
+          DESeq2/R\; $\cdot$\;
+          clusterProfiler\; $\cdot$\;
+          BiomedBERT}};
+
+    \draw[flowline] (prompt.south) -- (tool.north);
+
+    % === WRITES ===
+    \node[rwpanel, draw=blue!30!black, fill=stateBlue,
+          below=0.4cm of tool] (writes)
+        {\textbf{$\blacktriangle$ Writes to AgentState}
+         {\scriptsize (via \texttt{\_extract\_structured\_data})}\\[5pt]
+         $\bullet$\; \texttt{top\_genes[]} {\scriptsize (list[str])} ---
+          ranked DEGs with log2FC \& FDR\quad
+          {\scriptsize e.g.\ \texttt{[MAP3K15, CFAP47, IL3RA, \ldots]}}\\[2pt]
+         $\bullet$\; \texttt{disease} {\scriptsize (str)} ---
+          canonical disease name\quad
+          {\scriptsize e.g.\ \texttt{"Alzheimer disease"}}\\[2pt]
+         $\bullet$\; \texttt{cell\_type} {\scriptsize (str)} ---
+          cell-type filter if specified\quad
+          {\scriptsize e.g.\ \texttt{"microglial cell"}}\\[2pt]
+         $\bullet$\; \texttt{pathways[]} {\scriptsize (list)} ---
+          KEGG and GO enrichment results\\[2pt]
+         $\bullet$\; \texttt{deg\_results} {\scriptsize (dict)} ---
+          full differential-expression statistics per gene\\[2pt]
+         $\bullet$\; \texttt{plot\_paths} {\scriptsize (dict)} ---
+          volcano plot, KEGG dotplot, enrichment plot file paths};
+
+    \draw[flowline] (tool.south) -- (writes.north);
+
+    % === DOWNSTREAM CONSUMERS ===
+    \node[consumerlabel, below=0.3cm of writes] (consumers)
+        {$\downarrow$\; Consumed by:\;
+         \textbf{BioMarkerKGAgent} (\texttt{top\_genes})\; $\cdot$\;
+         \textbf{PubMedResearcher} (\texttt{top\_genes})\; $\cdot$\;
+         \textbf{ScientistsAgent} (\texttt{top\_genes}, \texttt{pathways})\; $\cdot$\;
+         \textbf{ReportingNode} (\texttt{plot\_paths})};
+
+\end{tikzpicture}%
+}% end resizebox
+\caption{\textbf{OmicMiningAgent} --- workflow interface view.
+The ordering shown here reflects a \emph{typical} plan generated by
+the LLM orchestrator; in practice the planner dynamically decides
+which agents to invoke, in what order, and whether to loop back after
+failures or surprising results.  That said, the planning prompt
+strongly encourages running this agent first to ``ground ALL
+hypotheses in actual omics data.''  It reads only the user query and session identifier,
+maps them to canonical disease/organ/cell-type forms via its system
+prompt, and invokes a single tool (\texttt{omic\_analysis\_tool}) that
+chains NER, database retrieval, differential expression, and pathway
+enrichment.  The six fields it writes to \texttt{AgentState}---most
+critically \texttt{top\_genes[]}---become the shared anchor that
+every downstream agent reads.}
+\label{fig:closeup-omic}
+\end{figure}

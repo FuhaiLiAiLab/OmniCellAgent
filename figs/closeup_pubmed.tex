@@ -1,0 +1,147 @@
+% ============================================================
+% Close-up: PubMedResearcher — Workflow Interface View
+% Fragment — \input{figs/closeup_pubmed}
+% ============================================================
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.35cm, font=\sffamily,
+    stepbar/.style={rectangle, rounded corners=6pt, thick,
+        minimum width=19cm, align=center, font=\sffamily,
+        drop shadow={opacity=0.10}, inner sep=6pt, text width=18cm},
+    rwpanel/.style={rectangle, rounded corners=5pt, thick,
+        minimum width=19cm, align=left, inner sep=6pt,
+        font=\sffamily\small, text width=17.5cm},
+    infopanel/.style={rectangle, rounded corners=5pt, draw=gray!50, thick,
+        minimum width=19cm, align=left, fill=white,
+        inner sep=6pt, font=\sffamily\small, text width=17.5cm},
+    toolpanel/.style={rectangle, rounded corners=5pt, draw=gray!60, thick,
+        minimum width=19cm, align=left, fill=gray!4,
+        inner sep=6pt, font=\sffamily\small, text width=17.5cm},
+    flowline/.style={->, >=Stealth, very thick, draw=gray!40},
+    consumerlabel/.style={font=\sffamily\small\itshape, text=gray!60!black,
+        align=center, text width=19cm}
+]
+    % === STEP BAR ===
+    \node[stepbar, draw=violet!50!black, fill=agentPurple] (step)
+        {\iconSearch{violet}\;\;
+         \textbf{\large PubMedResearcher --- Literature Validation}\\[3pt]
+         {\small Planner: \textit{``Literature on TOP targets AND
+          pathways --- validates \& classifies novelty.''}}\\[2pt]
+         {\scriptsize\sffamily\color{gray!60!black}
+          Shown as a third step here; the planner may invoke it
+          earlier (e.g.\ for a literature-first query) or re-invoke
+          it after replanning.}};
+
+    % === READS ===
+    \node[rwpanel, draw=green!40!black, fill=agentGreen,
+          below=0.4cm of step] (reads)
+        {\textbf{$\blacktriangledown$ Reads from AgentState}\\[5pt]
+         $\bullet$\; \texttt{top\_genes} {\scriptsize (list[str])} ---
+          ranked DEGs \emph{from OmicMiningAgent};
+          prompt says ``search for ALL of them''\\[2pt]
+         $\bullet$\; \texttt{query} {\scriptsize (str)} ---
+          original research question\\[2pt]
+         $\bullet$\; \texttt{previous\_results} {\scriptsize (str)} ---
+          accumulated output from Steps 1--2 (omics + KG context)};
+
+    \draw[flowline] (step.south) -- (reads.north);
+
+    % === PROMPT HIGHLIGHTS ===
+    \node[infopanel, below=0.4cm of reads] (prompt)
+        {\textbf{System Prompt Highlights}
+         {\scriptsize (from \texttt{PubMedResearcher.system\_message})}\\[5pt]
+         \textbf{1.}\; ``Check \texttt{context["top\_genes"]} for genes
+          from previous analysis --- search for ALL of them''\\[2pt]
+         \textbf{2.}\; ``Group related genes into 2--4 focused queries
+          for efficiency'' {\scriptsize (e.g.\
+          \texttt{"TREM2 TYROBP microglia Alzheimer"})}\\[2pt]
+         \textbf{3.}\; ``\texttt{pubmed\_full\_search\_tool} is your
+          PRIMARY tool --- it downloads and reads full papers''\\[2pt]
+         \textbf{4.}\; ``Every claim MUST include a citation:\;
+          (Author et al., Year, DOI/PMID)''\\[2pt]
+         \textbf{5.}\; Output per gene:\; \textbf{Function},
+          \textbf{Disease Role}, \textbf{Key Findings},
+          \textbf{Therapeutic Potential}\\[2pt]
+         \textbf{6.}\; ``Synthesise findings ACROSS papers ---
+          identify convergent and contradictory evidence''};
+
+    \draw[flowline] (reads.south) -- (prompt.north);
+
+    % === TOOLS (two) ===
+    \node[toolpanel, below=0.4cm of prompt] (tool)
+        {\textbf{Tool 1 (primary):}\;
+         \texttt{pubmed\_full\_search\_tool(query, num\_papers=50)}\\[3pt]
+         {\scriptsize Downloads full-text PDFs/XMLs from PubMed Central,
+          Elsevier, Wiley, arXiv, bioRxiv, medRxiv via paperscraper.\;
+          Max 100 papers per call.\;
+          Papers cached globally for speed.\;
+          Returns metadata + abstract + extracted full text.}\\[6pt]
+         \textbf{Tool 2 (fallback):}\;
+         \texttt{pubmed\_lite\_tool(query)}\\[3pt]
+         {\scriptsize \texttt{[DEPRECATED]} --- lightweight NCBI
+          E-utilities search.\; Abstracts and metadata only, no PDF
+          download.\; $\leq$20 papers.\; ``Use only when speed is
+          critical.''}\\[5pt]
+         {\scriptsize \textit{See companion illustration for source
+          landscape (PubMed, PMC, Elsevier, Wiley, arXiv, bioRxiv,
+          medRxiv).}}};
+
+    \draw[flowline] (prompt.south) -- (tool.north);
+
+    % === WRITES ===
+    \node[rwpanel, draw=blue!30!black, fill=stateBlue,
+          below=0.4cm of tool] (writes)
+        {\textbf{$\blacktriangle$ Writes to AgentState}
+         {\scriptsize (via regex extraction from LLM output)}\\[5pt]
+         $\bullet$\; \texttt{paper\_dois[]} {\scriptsize (list[str])} ---
+          extracted DOI strings for traceability\\[2pt]
+         $\bullet$\; \texttt{paper\_pmids[]} {\scriptsize (list[int])} ---
+          extracted PubMed ID numbers\\[2pt]
+         $\bullet$\; \texttt{agent\_outputs[]} {\scriptsize (str)} ---
+          per-gene literature reviews structured as:\\[2pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- \textbf{Function}: biological role with
+           citations}\\[1pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- \textbf{Disease Role}: mechanism linking
+           gene to condition}\\[1pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- \textbf{Key Findings}: significant results
+           across papers}\\[1pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- \textbf{Therapeutic Potential}: drug targets
+           or interventions}\\[1pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- \textbf{References}: all papers cited with
+           DOI/PMID}};
+
+    \draw[flowline] (tool.south) -- (writes.north);
+
+    % === DOWNSTREAM CONSUMERS ===
+    \node[consumerlabel, below=0.3cm of writes] (consumers)
+        {$\downarrow$\; Consumed by:\;
+         \textbf{ScientistsAgent}
+          (\texttt{paper\_dois}, literature context)\; $\cdot$\;
+         \textbf{ReportingNode}
+          (citations, literature-validated targets section)};
+
+\end{tikzpicture}%
+}% end resizebox
+\caption{\textbf{PubMedResearcher} --- workflow interface view.
+Although shown here in the third position, the planner may invoke
+this agent at any point---even first for purely literature-driven
+queries---and may re-invoke it after replanning if earlier agents
+fail or surface unexpected targets.  It provides the evidence layer.
+Its system prompt instructs it to read \emph{all} genes from
+\texttt{top\_genes} and group them into 2--4 focused queries for
+efficient retrieval.  The primary tool downloads up to 100 full-text
+papers per call with global caching; a deprecated lite fallback is
+available for speed-critical lookups (see companion illustration for
+source landscape).  Every claim is required to carry a citation.  The
+structured per-gene output and extracted DOIs/PMIDs it writes
+to \texttt{AgentState} provide the literature grounding that
+ScientistsAgent uses for hypothesis novelty classification and
+that ReportingNode uses for the citation apparatus.}
+\label{fig:closeup-pubmed}
+\end{figure}

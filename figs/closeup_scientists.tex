@@ -1,0 +1,223 @@
+% ============================================================
+% Close-up: ScientistsAgent — Workflow Interface View
+% Fragment — \input{figs/closeup_scientists}
+% ============================================================
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=0.35cm, font=\sffamily,
+    stepbar/.style={rectangle, rounded corners=6pt, thick,
+        minimum width=20cm, align=center, font=\sffamily,
+        drop shadow={opacity=0.10}, inner sep=6pt, text width=19cm},
+    rwpanel/.style={rectangle, rounded corners=5pt, thick,
+        minimum width=20cm, align=left, inner sep=6pt,
+        font=\sffamily\small, text width=18.5cm},
+    infopanel/.style={rectangle, rounded corners=5pt, draw=gray!50, thick,
+        minimum width=20cm, align=left, fill=white,
+        inner sep=6pt, font=\sffamily\small, text width=18.5cm},
+    toolpanel/.style={rectangle, rounded corners=5pt, draw=gray!60, thick,
+        minimum width=20cm, align=left, fill=gray!4,
+        inner sep=6pt, font=\sffamily\small, text width=18.5cm},
+    expertcard/.style={rectangle, rounded corners=4pt, draw=gray!50,
+        thick, minimum width=4.2cm, minimum height=2.2cm,
+        align=center, font=\sffamily\scriptsize, inner sep=5pt},
+    flowline/.style={->, >=Stealth, very thick, draw=gray!40},
+    fanline/.style={->, >=Stealth, thick, draw=teal!40},
+    consumerlabel/.style={font=\sffamily\small\itshape, text=gray!60!black,
+        align=center, text width=20cm}
+]
+    % === STEP BAR ===
+    \node[stepbar, draw=teal!50!black, fill=agentTeal] (step)
+        {\iconBulb{teal!60!black}\;\;
+         \textbf{\large ScientistsAgent --- Multi-Expert Hypothesis
+          Synthesis}\\[3pt]
+         {\small Planner: \textit{``Synthesise mechanisms via expert
+          panel, score hypotheses, propose experiments.''}}\\[2pt]
+         {\scriptsize\sffamily\color{gray!60!black}
+          Shown as a fourth step here; the planner dynamically
+          decides invocation order and may loop back to earlier
+          agents after synthesis reveals knowledge gaps.}};
+
+    % === READS ===
+    \node[rwpanel, draw=green!40!black, fill=agentGreen,
+          below=0.4cm of step] (reads)
+        {\textbf{$\blacktriangledown$ Reads from AgentState}
+         {\scriptsize (heaviest reader --- consumes all prior output)}\\[5pt]
+         $\bullet$\; \texttt{ALL previous\_results} {\scriptsize (str)} ---
+          full accumulated output from Steps 1--3
+          (omics + KG + literature)\\[2pt]
+         $\bullet$\; \texttt{top\_genes} {\scriptsize (list[str])} ---
+          ranked DEGs \emph{from OmicMiningAgent}\\[2pt]
+         $\bullet$\; \texttt{paper\_dois} {\scriptsize (list[str])} ---
+          literature DOIs \emph{from PubMedResearcher},
+          used for citation cross-referencing};
+
+    \draw[flowline] (step.south) -- (reads.north);
+
+    % === PROMPT HIGHLIGHTS ===
+    \node[infopanel, below=0.4cm of reads] (prompt)
+        {\textbf{System Prompt Highlights}
+         {\scriptsize (from \texttt{ScientistsAgent.system\_message})}\\[5pt]
+         \textbf{1.}\; ``Analyse the incoming research task and
+          determine which expert(s) are best suited''\\[2pt]
+         \textbf{2.}\; ``Delegate with specific, tailored instructions
+          for each expert''\\[2pt]
+         \textbf{3.}\; ``Synthesise their responses into a unified,
+          high-quality scientific analysis''\\[2pt]
+         \textbf{4.}\; ``Prefer experts with \textbf{(RAG KB loaded)}
+          --- they can retrieve evidence from real papers''\\[2pt]
+         \textbf{5.}\; ``ALWAYS include a bioinformatics perspective
+          when data-analysis methodology is involved''\\[2pt]
+         \textbf{6.}\; ``ALWAYS include a biostatistics perspective
+          when statistical claims or ageing are involved''\\[2pt]
+         \textbf{7.}\; ``For hypothesis-generation tasks, use ALL
+          relevant experts for multi-perspective coverage''};
+
+    \draw[flowline] (reads.south) -- (prompt.north);
+
+    % === ROUTING + EXPERT PANEL ===
+    \node[toolpanel, below=0.4cm of prompt] (routing)
+        {\textbf{PI Router:}\;
+         Structured LLM output via \texttt{ExpertRouting}
+         Pydantic model $\rightarrow$ selects 2--3 experts with
+         tailored sub-queries};
+
+    \draw[flowline] (prompt.south) -- (routing.north);
+
+    % --- 4 Expert cards in a row ---
+    \node[expertcard, fill=yellow!8,
+          below=0.5cm of routing, xshift=-7cm] (exp1)
+        {\textbf{Genomics-}\\
+         \textbf{Expert}\\[3pt]
+         \colorbox{green!15}{\scriptsize RAG KB}\\[3pt]
+         {\tiny gene regulation,}\\
+         {\tiny variant interp.,}\\
+         {\tiny CRISPRi/a/ko,}\\
+         {\tiny pharmacogenomics}};
+
+    \node[expertcard, fill=pink!8,
+          right=0.5cm of exp1] (exp2)
+        {\textbf{Neuroscience-}\\
+         \textbf{Expert}\\[3pt]
+         \colorbox{green!15}{\scriptsize RAG KB}\\[3pt]
+         {\tiny A$\beta$, tau, TREM2,}\\
+         {\tiny microglia DAM,}\\
+         {\tiny neuroinflammation,}\\
+         {\tiny CSF biomarkers}};
+
+    \node[expertcard, fill=lime!8,
+          right=0.5cm of exp2] (exp3)
+        {\textbf{Longevity/}\\
+         \textbf{BiostatsExpert}\\[3pt]
+         \colorbox{green!15}{\scriptsize RAG KB}\\[3pt]
+         {\tiny ageing hallmarks,}\\
+         {\tiny epigenetic clocks,}\\
+         {\tiny mTOR/AMPK/sirtuins,}\\
+         {\tiny survival analysis}};
+
+    \node[expertcard, fill=cyan!8,
+          right=0.5cm of exp3] (exp4)
+        {\textbf{Bioinformatics-}\\
+         \textbf{Expert}\\[3pt]
+         \colorbox{red!15}{\scriptsize LLM-only}\\[3pt]
+         {\tiny scRNA-seq pipelines,}\\
+         {\tiny WGCNA, SCENIC,}\\
+         {\tiny multi-omics integ.,}\\
+         {\tiny reproducibility}};
+
+    % Fan-out arrows from routing to experts
+    \draw[fanline] (routing.south) -- ++(0,-0.25) -| (exp1.north);
+    \draw[fanline] (routing.south) -- ++(0,-0.25) -| (exp2.north);
+    \draw[fanline] (routing.south) -- ++(0,-0.25) -| (exp3.north);
+    \draw[fanline] (routing.south) -- ++(0,-0.25) -| (exp4.north);
+
+    % Shared tool below experts
+    \node[toolpanel, minimum width=19cm, text width=18cm,
+          below=0.5cm of $(exp2.south)!0.5!(exp3.south)$] (ragtool)
+        {\textbf{Shared Tool:}\;
+         \texttt{scientist\_rag\_tool(query, expert)}\\[3pt]
+         {\scriptsize Queries the specified expert's HyperRAG knowledge
+          base built from curated author publications.\;
+          Uses hypergraph-based retrieval with OpenAI embeddings and
+          GPT-4.1 for answer generation.\;
+          \textbf{RAG KB} experts retrieve evidence from real papers;\;
+          \textbf{LLM-only} expert reasons without private KB
+          (methodology \& statistical critique).}\\[3pt]
+         {\scriptsize \textit{See companion illustration for Scientist
+          RAG initialisation and retrieval pipeline.}}};
+
+    % Fan-in to shared tool
+    \draw[fanline] (exp1.south) -- ++(0,-0.2) -| (ragtool.north west);
+    \draw[fanline] (exp2.south) -- ++(0,-0.2) -|
+                   ($(ragtool.north)!0.33!(ragtool.north west)$);
+    \draw[fanline] (exp3.south) -- ++(0,-0.2) -|
+                   ($(ragtool.north)!0.33!(ragtool.north east)$);
+    \draw[fanline] (exp4.south) -- ++(0,-0.2) -| (ragtool.north east);
+
+    % === PI SYNTHESIS ===
+    \node[infopanel, draw=teal!50, fill=teal!5,
+          below=0.4cm of ragtool, minimum width=20cm,
+          text width=18.5cm] (synth)
+        {\iconRobot{teal!60!black}\;\;
+         \textbf{PI Synthesis}\\[3pt]
+         {\scriptsize Integrates expert perspectives into unified
+          analysis.\; Ranks mechanistic hypotheses by evidence
+          strength.\; Proposes specific validation experiments
+          per hypothesis.}};
+
+    \draw[flowline] (ragtool.south) -- (synth.north);
+
+    % === WRITES ===
+    \node[rwpanel, draw=blue!30!black, fill=stateBlue,
+          below=0.4cm of synth, minimum width=20cm,
+          text width=18.5cm] (writes)
+        {\textbf{$\blacktriangle$ Writes to AgentState}\\[5pt]
+         $\bullet$\; \texttt{agent\_outputs[]} {\scriptsize (str)} ---
+          multi-expert synthesis including:\\[2pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- ranked mechanistic hypotheses with
+           Gene$\rightarrow$Pathway$\rightarrow$Phenotype chains}\\[1pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- per-expert domain perspectives and
+           evidence summaries}\\[1pt]
+         \hphantom{$\bullet$\;}
+          {\scriptsize --- proposed validation experiments with
+           quantitative readouts}\\[3pt]
+         $\bullet$\; \texttt{expert\_routing\{\}} {\scriptsize (dict)} ---
+          which experts were selected, why, and their tailored
+          sub-queries};
+
+    \draw[flowline] (synth.south) -- (writes.north);
+
+    % === DOWNSTREAM CONSUMERS ===
+    \node[consumerlabel, below=0.3cm of writes, text width=20cm]
+          (consumers)
+        {$\downarrow$\; Consumed by:\;
+         \textbf{GoogleSearcher}
+          (hypotheses to validate translationally)\; $\cdot$\;
+         \textbf{ReportingNode}
+          (hypothesis section, validation plans, expert routing log)};
+
+\end{tikzpicture}%
+}% end resizebox
+\caption{\textbf{ScientistsAgent} --- workflow interface view.
+In the example realisation shown here this compound agent runs fourth,
+but the LLM planner may invoke it earlier, later, or re-invoke it
+after a replan cycle---for instance, if literature search reveals
+novel targets that warrant fresh expert synthesis.  It is the
+heaviest reader of \texttt{AgentState}, consuming all prior omics,
+KG, and literature output.  A PI-level router uses a structured
+\texttt{ExpertRouting} Pydantic model to select 2--3 domain experts
+and dispatch tailored sub-queries.  The system prompt distinguishes
+\emph{RAG~KB loaded} experts (Genomics, Neuroscience,
+Longevity/Biostatistics), which retrieve evidence from curated author
+publications via HyperRAG, from the \emph{LLM-only}
+BioinformaticsExpert, preferred for methodology and statistical
+critique.  Routing rules mandate a bioinformatics perspective for
+data-analysis tasks, a biostatistics perspective for statistical
+claims, and all relevant experts for hypothesis generation (see
+companion illustration for RAG initialisation and retrieval pipeline).
+The PI synthesis node integrates expert perspectives into ranked
+hypotheses with proposed validation experiments.}
+\label{fig:closeup-scientists}
+\end{figure}
