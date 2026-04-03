@@ -619,6 +619,62 @@ query: {query if query else 'N/A'}
         return None
 
 
+def save_session_report_revised(session_id: str, report_content: str,
+                                 query: str = None, feedback: str = None) -> str:
+    """
+    Save a **revised** report as ``report_revised_*.{md,html,pdf}`` in the
+    session directory.  Never overwrites the original report files.
+
+    Args:
+        session_id: Unique session identifier
+        report_content: The revised markdown content
+        query: Original research question (for the header)
+        feedback: The user feedback that triggered the revision
+
+    Returns:
+        str: Path to the saved revised report file, or None on failure
+    """
+    try:
+        session_dir = os.path.join(SESSIONS_DIR, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_filename = f"report_revised_{timestamp}.md"
+        report_path = os.path.join(session_dir, report_filename)
+
+        report_header = f"""---
+title: OmniCellAgent Analysis Report — REVISED
+session_id: {session_id}
+generated_at: {datetime.now().isoformat()}
+query: {query if query else 'N/A'}
+revision_feedback: |
+  {(feedback or '')[:500]}
+---
+
+"""
+        full_report = report_header + report_content
+
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(full_report)
+
+        print(f"[DEBUG] Revised report saved to: {report_path}")
+
+        # Also generate static versions (HTML + PDF)
+        try:
+            html_path = convert_md_to_html(report_path)
+            pdf_path = convert_md_to_pdf(report_path)
+        except Exception as e:
+            print(f"[DEBUG] Revised static report generation skipped: {e}")
+
+        return report_path
+
+    except Exception as e:
+        print(f"[ERROR] Failed to save revised report: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def convert_md_to_html(md_path: str) -> str:
     """
     Convert markdown file to HTML.
@@ -1402,7 +1458,17 @@ app.layout = dbc.Container([
                           style={'width': '100%', 'height': '120px', 'border-radius': '4px', 'font-size': '1rem',
                                  'background-color': '#8fa8b8', 'border-color': '#7f98a8', 'font-family': 'Georgia, serif'},
                           title='Continue conversation with follow-up question')
-            ], id='hitl-controls-col', width=2, style={'display': 'none'})
+            ], id='hitl-controls-col', width=2, style={'display': 'none'}),
+
+            # Revise Report Button (appears after report completes, next to Continue)
+            dbc.Col([
+                dbc.Button('📝 Revise Report', id='revise-report-button', n_clicks=0,
+                          color='warning', size='lg',
+                          style={'width': '100%', 'height': '120px', 'border-radius': '4px', 'font-size': '1rem',
+                                 'background-color': '#c9a87c', 'border-color': '#b89868',
+                                 'font-family': 'Georgia, serif', 'color': '#fff'},
+                          title='Revise the report based on your feedback (no re-analysis)')
+            ], id='revise-controls-col', width=1, style={'display': 'none'})
         ])
     ], className='input-section'),
     
@@ -2461,23 +2527,24 @@ def download_session_zip(n_clicks, n_intervals, session_data):
 
 @app.callback(
     Output('hitl-controls-col', 'style'),
+    Output('revise-controls-col', 'style'),
     Input('message-updater', 'n_intervals'),
     State('session-id', 'data'),
     prevent_initial_call=True
 )
 def update_continue_button_visibility(n_intervals, session_data):
-    """Show Continue button after report is complete."""
+    """Show Continue and Revise buttons after report is complete."""
     if not session_data or 'id' not in session_data:
-        return {'display': 'none'}
+        return {'display': 'none'}, {'display': 'none'}
     
     session_id = session_data['id']
     session_info = SESSION_STATE.get(session_id, {})
     
     # Show when can_continue is True (report completed)
     if session_info.get("can_continue", False):
-        return {'display': 'block'}
+        return {'display': 'block'}, {'display': 'block'}
     else:
-        return {'display': 'none'}
+        return {'display': 'none'}, {'display': 'none'}
 
 
 @app.callback(
@@ -2537,6 +2604,76 @@ def handle_continue_chat(continue_clicks, session_data, user_input):
     thread.start()
     
     return ''
+
+
+# --- Revise Report Callback ---
+
+@app.callback(
+    Output('user-input', 'value', allow_duplicate=True),
+    Input('revise-report-button', 'n_clicks'),
+    State('session-id', 'data'),
+    State('user-input', 'value'),
+    prevent_initial_call=True
+)
+def handle_revise_report(revise_clicks, session_data, user_input):
+    """
+    Handle 'Revise Report' button — takes the text in the input box as
+    feedback and launches a lightweight revision (no re-analysis).
+    The revised report is saved as report_revised_*.pdf alongside the
+    original, never overwriting it.
+    """
+    ctx = callback_context
+    if not ctx.triggered or not session_data:
+        return dash.no_update
+
+    session_id = session_data.get('id')
+
+    if not session_id or session_id not in SESSION_STATE:
+        return dash.no_update
+
+    session_info = SESSION_STATE[session_id]
+    adapter = session_info.get("adapter")
+
+    if not adapter:
+        return dash.no_update
+
+    if not session_info.get("can_continue"):
+        add_process_step(session_id, "System",
+                         "⚠️ Cannot revise — wait for the initial report to complete")
+        return dash.no_update
+
+    if not user_input or not user_input.strip():
+        add_process_step(session_id, "System",
+                         "⚠️ Please enter your revision feedback in the input box first")
+        return dash.no_update
+
+    feedback = user_input.strip()
+
+    # Temporarily mark as busy so buttons hide
+    SESSION_STATE[session_id]["can_continue"] = False
+
+    add_left_chat_message(session_id, "User", f"📝 Revision feedback: {feedback}", "user")
+    add_process_step(session_id, "User", f"📝 **Revision feedback**: {feedback[:200]}…")
+
+    def revise_report_bg():
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(
+                adapter.run_report_revision(feedback)
+            )
+            # Re-enable buttons after revision completes
+            _mark_can_continue(session_id)
+            loop.close()
+        except Exception as e:
+            add_process_step(session_id, "System", f"❌ Revision error: {e}")
+            # Re-enable so the user can retry
+            _mark_can_continue(session_id)
+
+    thread = threading.Thread(target=revise_report_bg, daemon=True)
+    thread.start()
+
+    return ''  # Clear the input box
 
 
 if __name__ == '__main__':

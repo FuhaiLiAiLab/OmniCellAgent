@@ -2680,6 +2680,115 @@ query: {query}
             print(f"Error saving report: {e}")
             return None
     
+    async def revise_report_from_feedback(self, original_report: str, feedback: str, query: str = "") -> dict:
+        """
+        Revise an existing report based on user feedback WITHOUT re-running the
+        full analysis pipeline.  The revised report is saved as
+        ``report_revised_<timestamp>.{md,pdf}`` so it never overwrites the
+        original.
+
+        Args:
+            original_report: The full text of the original report (markdown).
+            feedback: User-provided feedback / revision instructions.
+            query: The original research question (for context in the header).
+
+        Returns:
+            dict with keys ``revised_report`` (str) and ``report_path`` (str|None).
+        """
+        print("\n📝 REPORT REVISION PHASE (feedback-driven)")
+        print("=" * 60)
+
+        revision_prompt = f"""You are given an existing biomedical research report and user feedback.
+Your job is to **edit the report according to the feedback** while preserving the overall structure, data, citations, and scientific accuracy.
+
+## RULES
+1. Only modify sections that the feedback explicitly asks to change.
+2. Do NOT remove data, tables, or citations unless the feedback asks for it.
+3. Do NOT fabricate new data or citations that were not in the original report.
+4. Keep the same section numbering / heading hierarchy.
+5. If the feedback asks for additions that require new analysis, note them as
+   "⚠️ This addition would require re-running the analysis pipeline." and leave
+   a placeholder — do NOT hallucinate results.
+6. Return the COMPLETE revised report in Markdown (not just the diff).
+
+---
+
+## Original Report
+{original_report}
+
+---
+
+## User Feedback / Revision Instructions
+{feedback}
+
+---
+
+Please return the **full revised report** in Markdown.
+"""
+
+        response = await self.llm.ainvoke([
+            SystemMessage(content=(
+                "You are a meticulous scientific editor. You revise biomedical "
+                "research reports based on reviewer feedback. Preserve all existing "
+                "data, citations, and structure unless the feedback explicitly asks "
+                "for changes. Return the complete revised markdown report."
+            )),
+            HumanMessage(content=revision_prompt),
+        ])
+
+        revised_report = extract_text_from_llm_response(response.content)
+
+        # ── Save the revised report (never overwrite original) ──────────
+        report_path = self._save_revised_report(query, revised_report, feedback)
+
+        print(f"📄 Revised report generated ({len(revised_report)} characters)")
+        if report_path:
+            print(f"💾 Saved to: {report_path}")
+
+        return {
+            "revised_report": revised_report,
+            "report_path": report_path,
+        }
+
+    def _save_revised_report(self, query: str, report: str, feedback: str = "") -> Optional[str]:
+        """Save the revised report with a ``_revised`` suffix so the original is untouched."""
+        try:
+            sessions_base = get_path('sessions.base', absolute=True, create=True)
+            session_dir = os.path.join(sessions_base, self.session_id)
+            os.makedirs(session_dir, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_filename = f"report_revised_{timestamp}.md"
+            report_path = os.path.join(session_dir, report_filename)
+
+            header = f"""---
+title: OmniCellAgent Analysis Report — REVISED
+session_id: {self.session_id}
+generated_at: {datetime.now().isoformat()}
+query: {query}
+revision_feedback: |
+  {feedback[:500]}
+---
+
+"""
+            full_report = header + report
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(full_report)
+
+            print(f"📝 Revised markdown report saved: {report_path}")
+
+            # Compile to PDF (reuses existing _compile_pdf which derives the
+            # .pdf path from the .md path, so it will be report_revised_*.pdf)
+            pdf_path = self._compile_pdf(report_path)
+            if pdf_path:
+                print(f"✅ Revised report available as both MD and PDF")
+
+            return report_path
+
+        except Exception as e:
+            print(f"Error saving revised report: {e}")
+            return None
+
     def _save_conversation_log(self, query: str, state: AgentState):
         """Save the full conversation log"""
         try:

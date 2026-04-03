@@ -377,6 +377,80 @@ class UILangGraphAdapter:
             summary_parts.append(f"Hypotheses: {report[start:end][:300]}")
         return "\n".join(summary_parts)
 
+    # ------------------------------------------------------------------
+    # Report Revision (feedback-driven, no re-run of analysis pipeline)
+    # ------------------------------------------------------------------
+
+    async def run_report_revision(self, feedback: str, stop_event=None) -> str:
+        """
+        Revise the last generated report based on user feedback.
+
+        This is a *lightweight* operation — it only calls the LLM to edit the
+        existing report text.  No tools, no sub-agents, no re-planning.
+        The revised report is saved as ``report_revised_*.{md,pdf}`` so the
+        original is never overwritten.
+
+        Args:
+            feedback: Free-text revision instructions from the user.
+            stop_event: Optional threading.Event for cancellation.
+
+        Returns:
+            The revised report markdown string.
+        """
+        if not self.agent:
+            await self.initialize()
+
+        if not self.last_report:
+            msg = "⚠️ No report available to revise. Please run an analysis first."
+            self._emit_process_step("System", msg)
+            return msg
+
+        self._emit_process_step("System",
+            "📝 **Starting Report Revision** — editing based on your feedback…")
+        self._emit_process_step("User", f"✏️ Feedback: {feedback[:200]}…")
+
+        try:
+            result = await self.agent.revise_report_from_feedback(
+                original_report=self.last_report,
+                feedback=feedback,
+                query=self.last_query or "",
+            )
+
+            revised_report = result.get("revised_report", "")
+            report_path = result.get("report_path")
+
+            # Update adapter state (keep original in conversation_summaries)
+            self.last_report = revised_report
+
+            self._emit_process_step("System", "✅ **Report Revision Complete**")
+            if report_path:
+                self._emit_process_step("System",
+                    f"📄 Revised report saved: {os.path.basename(report_path)}")
+
+            # Also save via the dash_UI helper (static MD + HTML + PDF)
+            try:
+                from webapp.UI.dash_UI import save_session_report_revised
+                ui_path = save_session_report_revised(
+                    self.session_id, revised_report,
+                    self.last_query or "", feedback)
+                if ui_path:
+                    self._emit_process_step("System",
+                        f"📄 UI report saved: {os.path.basename(ui_path)}")
+            except Exception as e:
+                print(f"[LangGraph Adapter] Could not save revised report via UI helper: {e}")
+
+            self._emit_final_result(revised_report)
+            return revised_report
+
+        except asyncio.CancelledError:
+            self._emit_process_step("System", "🛑 Revision cancelled")
+            raise
+        except Exception as e:
+            import traceback
+            self._emit_process_step("System", f"❌ Error during revision: {e}")
+            print(f"[LangGraph Adapter] Revision error: {traceback.format_exc()}")
+            raise
+
 
 def create_langgraph_adapter(session_id: str, 
                               model_name: str = "gemini-3-pro-preview") -> UILangGraphAdapter:
