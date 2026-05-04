@@ -24,7 +24,7 @@ import tempfile
 import textwrap
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SESSIONS_DIR = os.path.join(ROOT, "webapp", "sessions")
+SESSIONS_DIR = os.path.join(ROOT, "webapp", "assets", "sessions")
 
 # ---------- LaTeX header injected via pandoc -H ----------
 LATEX_HEADER = r"""
@@ -48,19 +48,56 @@ LATEX_HEADER = r"""
 % longtable, booktabs loaded by pandoc; only add extras
 \usepackage{makecell}
 \usepackage{etoolbox}
-\renewcommand{\arraystretch}{1.35}
-\AtBeginEnvironment{longtable}{\small}
+\usepackage{array}
+\usepackage{tabularx}
+\renewcommand{\arraystretch}{1.5}
+% Use smaller font and more padding for tables
+\AtBeginEnvironment{longtable}{\footnotesize\setlength{\tabcolsep}{10pt}}
+% Allow line breaks in table cells and add padding
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+% Add visible column rules
+\setlength{\arrayrulewidth}{0.4pt}
+% Force vertical lines between all columns in longtable
+\AtBeginEnvironment{longtable}{%
+  \setlength{\tabcolsep}{8pt}%
+  \renewcommand{\arraystretch}{1.4}%
+}
+% Add a thin border between header cells
+\newcommand{\thmark}{\rule[-0.5ex]{0.4pt}{2.5ex}}
 
 % ── Images ───────────────────────────────────────────────────────────
 % graphicx loaded by pandoc; just tweak max-width
 \makeatletter
-\def\maxwidth{\ifdim\Gin@nat@width>0.92\linewidth 0.92\linewidth\else\Gin@nat@width\fi}
+\def\maxwidth{\ifdim\Gin@nat@width>0.85\linewidth 0.85\linewidth\else\Gin@nat@width\fi}
 \makeatother
 \setkeys{Gin}{width=\maxwidth,keepaspectratio}
 
+% Force figures to be centered with vertical space
+\usepackage{float}
+\let\origfigure\figure
+\let\endorigfigure\endfigure
+\renewenvironment{figure}[1][htbp]{%
+  \origfigure[H]%
+  \centering
+}{%
+  \endorigfigure
+}
+
+% Add space around standalone images (not in figures)
+\let\oldincludegraphics\includegraphics
+\renewcommand{\includegraphics}[2][]{%
+  \par\vspace{12pt}%
+  \begin{center}%
+    \oldincludegraphics[#1]{#2}%
+  \end{center}%
+  \vspace{12pt}\par%
+}
+
 % ── Code blocks ──────────────────────────────────────────────────────
 \usepackage{fvextra}
-\fvset{breaklines,breakanywhere,fontsize=\scriptsize}
+\fvset{breaklines,breakanywhere,fontsize=\scriptsize,breaksymbol=,breakanywheresymbolpre=,breakbeforesymbolpre=,breakaftersymbolpre=}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\},fontsize=\scriptsize}
 
 % ── Section spacing & page-breaks ────────────────────────────────────
 \usepackage{titlesec}
@@ -77,12 +114,13 @@ LATEX_HEADER = r"""
 
 % ── Misc ─────────────────────────────────────────────────────────────
 \usepackage{microtype}
+\usepackage{seqsplit}
 """
 
 # ---------- helpers -----------------------------------------------------------
 
-def find_reports(session_filter: str | None = None) -> list[dict]:
-    """Return list of {session, md_path, pdf_path} for all reports."""
+def find_reports(session_filter: str | None = None, include_revised: bool = True) -> list[dict]:
+    """Return list of {session, md_path, pdf_path, is_revised} for all reports."""
     reports = []
     if session_filter:
         dirs = [os.path.join(SESSIONS_DIR, session_filter)]
@@ -93,32 +131,115 @@ def find_reports(session_filter: str | None = None) -> list[dict]:
         if not os.path.isdir(d):
             print(f"⚠️  Session dir not found: {d}")
             continue
+        # Find original reports
         mds = sorted(glob.glob(os.path.join(d, "report_*.md")))
         for md in mds:
             reports.append({
                 "session": os.path.basename(d),
                 "md_path": md,
                 "pdf_path": md.replace(".md", ".pdf"),
+                "is_revised": False,
             })
+        # Find revised reports
+        if include_revised:
+            revised_mds = sorted(glob.glob(os.path.join(d, "report-revised_*.md")))
+            for md in revised_mds:
+                reports.append({
+                    "session": os.path.basename(d),
+                    "md_path": md,
+                    "pdf_path": md.replace(".md", ".pdf"),
+                    "is_revised": True,
+                })
     return reports
 
 
 def preprocess_markdown(md_path: str) -> str:
     """Read the markdown and fix formatting issues that break pandoc 2.x.
 
-    Key fix: pandoc 2.x requires a **blank line** before and after a pipe
-    table, otherwise the whole table is emitted as literal \textbar{} text.
-    The LLM-generated reports often omit that blank line.
+    Fixes:
+    1. pandoc 2.x requires a **blank line** before and after a pipe table
+    2. Images need blank lines before/after for proper figure handling
+    3. Long lines in code blocks need to be broken for proper wrapping
     """
+    import re
+    
     with open(md_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
     out: list[str] = []
+    in_code_block = False
+    
     for i, line in enumerate(lines):
         stripped = line.rstrip()
+        
+        # Track code block state
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            out.append(line)
+            continue
+        
+        # Inside code blocks: break very long lines
+        if in_code_block:
+            if len(stripped) > 100:
+                # Break at JSON-like boundaries
+                broken = stripped
+                # Insert newlines after common JSON separators
+                broken = re.sub(r"('\s*,\s*')", r"',\n'", broken)
+                broken = re.sub(r'("\s*,\s*")', r'",\n"', broken)
+                broken = re.sub(r"(},\s*{)", r"},\n{", broken)
+                broken = re.sub(r"(\],\s*\[)", r"],\n[", broken)
+                broken = re.sub(r"(:\s*True,)", r": True,\n", broken)
+                broken = re.sub(r"(:\s*False,)", r": False,\n", broken)
+                # Break at sentence boundaries in result_summary
+                broken = re.sub(r"(\.\s+)([A-Z])", r".\n\2", broken)
+                # Break very long unbroken sequences
+                if any(len(segment) > 90 for segment in broken.split('\n')):
+                    # Force break every 80 chars at word boundaries
+                    new_broken = []
+                    for segment in broken.split('\n'):
+                        if len(segment) > 90:
+                            words = segment.split(' ')
+                            current_line = []
+                            current_len = 0
+                            for word in words:
+                                if current_len + len(word) + 1 > 80 and current_line:
+                                    new_broken.append(' '.join(current_line))
+                                    current_line = [word]
+                                    current_len = len(word)
+                                else:
+                                    current_line.append(word)
+                                    current_len += len(word) + 1
+                            if current_line:
+                                new_broken.append(' '.join(current_line))
+                        else:
+                            new_broken.append(segment)
+                    broken = '\n'.join(new_broken)
+                out.append(broken + '\n')
+            else:
+                out.append(line)
+            continue
+        
         is_table_row = stripped.startswith("|") and stripped.endswith("|")
+        is_image = stripped.startswith("![") and "](" in stripped
+
+        # Handle images - ensure blank lines before and after
+        if is_image:
+            if out and out[-1].strip() != "":
+                out.append("\n")
+            out.append(line)
+            # Check if next line exists and is not blank
+            if i + 1 < len(lines) and lines[i + 1].strip() != "":
+                out.append("\n")
+            continue
 
         if is_table_row:
+            # Add explicit padding to table cells for better column separation
+            # Replace | with |  (double space) to ensure visible column gaps
+            padded_line = re.sub(r'\|([^|])', r'|  \1', stripped)
+            padded_line = re.sub(r'([^|])\|', r'\1  |', padded_line)
+            line = padded_line + '\n'
+            stripped = padded_line
+            
             # Ensure a blank line exists before the first row of a table
             if out and out[-1].strip() != "" and not (
                 out[-1].rstrip().startswith("|") and out[-1].rstrip().endswith("|")
@@ -226,50 +347,61 @@ def _fallback_wkhtmltopdf(md_path: str, pdf_path: str, session_dir: str,
     h3 { font-size: 1.1em; margin-top: 18px; }
     h1, h2, h3 { page-break-after: avoid; }
 
-    img {
-        max-width: 100% !important;
-        max-height: 600px !important;
+    /* Center images */
+    p > img, figure, .figure {
+        display: block !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        text-align: center !important;
+        max-width: 85% !important;
+        max-height: 550px !important;
         height: auto !important;
         width: auto !important;
-        display: block;
-        margin: 12px auto;
         page-break-inside: avoid;
     }
+    figure { text-align: center; }
+    figcaption { text-align: center; font-style: italic; margin-top: 8px; }
 
+    /* Tables with proper spacing */
     table {
         width: 100%;
         border-collapse: collapse;
         margin: 14px 0;
         font-size: 9pt;
         page-break-inside: avoid;
-        table-layout: fixed;
-        word-wrap: break-word;
-        overflow-wrap: break-word;
+        table-layout: auto;
     }
     th, td {
         border: 1px solid #ccc;
-        padding: 5px 7px;
+        padding: 6px 10px;
         text-align: left;
         vertical-align: top;
         word-wrap: break-word;
         overflow-wrap: break-word;
+        max-width: 200px;
     }
-    th { background-color: #ecf0f1; font-weight: 600; }
+    th { background-color: #ecf0f1; font-weight: 600; white-space: nowrap; }
     tr:nth-child(even) { background-color: #f9f9f9; }
 
+    /* Code blocks with proper wrapping */
     pre, code {
         font-family: "DejaVu Sans Mono", "Consolas", monospace;
-        font-size: 8pt;
+        font-size: 7.5pt;
         background-color: #f5f5f5;
         border-radius: 3px;
     }
     pre {
-        padding: 8px 10px;
-        overflow-x: auto;
+        padding: 10px 12px;
+        overflow-x: hidden;
         white-space: pre-wrap;
         word-wrap: break-word;
+        word-break: break-all;
         border: 1px solid #e0e0e0;
-        page-break-inside: auto;
+        max-width: 100%;
+        line-height: 1.4;
+    }
+    code {
+        word-break: break-all;
     }
 
     blockquote { border-left: 3px solid #3498db; padding-left: 12px; color: #555; }
@@ -337,11 +469,22 @@ def main():
     parser = argparse.ArgumentParser(description="Regenerate PDF reports from markdown")
     parser.add_argument("--session", type=str, default=None,
                         help="Regenerate only this session (e.g. AD-test)")
+    parser.add_argument("--revised-only", action="store_true",
+                        help="Only regenerate revised reports")
+    parser.add_argument("--original-only", action="store_true",
+                        help="Only regenerate original (non-revised) reports")
     args = parser.parse_args()
 
-    reports = find_reports(args.session)
+    reports = find_reports(args.session, include_revised=not args.original_only)
+    
+    # Filter if needed
+    if args.revised_only:
+        reports = [r for r in reports if r.get("is_revised", False)]
+    elif args.original_only:
+        reports = [r for r in reports if not r.get("is_revised", False)]
+    
     if not reports:
-        print("No reports found. Check webapp/sessions/*-test/report_*.md")
+        print("No reports found. Check webapp/assets/sessions/*-test/report*.md")
         sys.exit(1)
 
     print(f"📄 Found {len(reports)} report(s) to regenerate\n")
@@ -353,7 +496,8 @@ def main():
 
     success = 0
     for rpt in reports:
-        print(f"── {rpt['session']} ──")
+        version_tag = " (REVISED)" if rpt.get("is_revised") else " (ORIGINAL)"
+        print(f"── {rpt['session']}{version_tag} ──")
         print(f"  📝  Source: {rpt['md_path']}")
         if compile_pdf(rpt["md_path"], rpt["pdf_path"], header_path):
             success += 1
