@@ -41,8 +41,6 @@ webapp/sessions/*
 cache/*
 models/*
 
-!logs/appendix
-
 benchmark/peer_review_results/*
 benchmark/ai_review_results/*
 tools/omic_tools/outputs/*
@@ -109,8 +107,10 @@ docs/_build/
 
 
 # logs and results
-logs/
-output/
+logs/*
+!logs/appendix
+!logs/appendix/**
+ 
 
 # G-Retriever
 G-Retriever/logs/
