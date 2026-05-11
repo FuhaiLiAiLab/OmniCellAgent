@@ -4,7 +4,7 @@
 % ============================================================
 \begin{figure}[htbp]
 \centering
-\resizebox{\textwidth}{!}{%
+\resizebox{.78\textwidth}{!}{%
 \begin{tikzpicture}[node distance=0.35cm, font=\sffamily,
     stepbar/.style={rectangle, rounded corners=6pt, thick,
         minimum width=20cm, align=center, font=\sffamily,
@@ -117,13 +117,13 @@
 
     \node[expertcard, fill=cyan!8,
           right=0.5cm of exp3] (exp4)
-        {\textbf{Bioinformatics-}\\
+        {\textbf{Cancer-}\\
          \textbf{Expert}\\[3pt]
          \colorbox{red!15}{\scriptsize LLM-only}\\[3pt]
-         {\tiny scRNA-seq pipelines,}\\
-         {\tiny WGCNA, SCENIC,}\\
-         {\tiny multi-omics integ.,}\\
-         {\tiny reproducibility}};
+         {\tiny tumor microenv.,}\\
+         {\tiny oncogenesis,}\\
+         {\tiny cancer therapeutics,}\\
+         {\tiny resistance mech.}};
 
     % Fan-out arrows from routing to experts
     \draw[fanline] (routing.south) -- ++(0,-0.25) -| (exp1.north);
@@ -140,9 +140,9 @@
           base built from curated author publications.\;
           Uses hypergraph-based retrieval with OpenAI embeddings and
           GPT-4.1 for answer generation.\;
-          \textbf{RAG KB} experts retrieve evidence from real papers;\;
-          \textbf{LLM-only} expert reasons without private KB
-          (methodology \& statistical critique).}\\[3pt]
+          \textbf{RAG~KB} experts retrieve evidence from real papers;\;
+          \textbf{LLM-only} experts reason without a private KB when
+          their author KB has not yet been built.}\\[3pt]
          {\scriptsize \textit{See companion illustration for Scientist
           RAG initialisation and retrieval pipeline.}}};
 
@@ -201,23 +201,16 @@
 \end{tikzpicture}%
 }% end resizebox
 \caption{\textbf{ScientistsAgent} --- workflow interface view.
-In the example realisation shown here this compound agent runs fourth,
-but the LLM planner may invoke it earlier, later, or re-invoke it
-after a replan cycle---for instance, if literature search reveals
-novel targets that warrant fresh expert synthesis.  It is the
-heaviest reader of \texttt{AgentState}, consuming all prior omics,
-KG, and literature output.  A PI-level router uses a structured
-\texttt{ExpertRouting} Pydantic model to select 2--3 domain experts
-and dispatch tailored sub-queries.  The system prompt distinguishes
-\emph{RAG~KB loaded} experts (Genomics, Neuroscience,
-Longevity/Biostatistics), which retrieve evidence from curated author
-publications via HyperRAG, from the \emph{LLM-only}
-BioinformaticsExpert, preferred for methodology and statistical
-critique.  Routing rules mandate a bioinformatics perspective for
-data-analysis tasks, a biostatistics perspective for statistical
-claims, and all relevant experts for hypothesis generation (see
-companion illustration for RAG initialisation and retrieval pipeline).
-The PI synthesis node integrates expert perspectives into ranked
-hypotheses with proposed validation experiments.}
+The heaviest reader of \texttt{AgentState}, this compound agent
+consumes all prior omics, KG, and literature output.  A PI-level
+router uses a structured \texttt{ExpertRouting} Pydantic model to
+select 2--3 of the four domain experts configured in
+\texttt{configs/experts.yaml} and dispatch tailored sub-queries.
+Genomics, Neuroscience, and Longevity/Biostatistics experts are
+backed by curated-author HyperRAG KBs (\emph{RAG~KB}); CancerExpert
+is configured but its KB is not yet built and is therefore routed
+\emph{LLM-only}.  The PI synthesis node integrates expert
+perspectives into ranked hypotheses with proposed validation
+experiments.}
 \label{fig:closeup-scientists}
 \end{figure}

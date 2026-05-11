@@ -1,0 +1,19 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.4in,letterpaper]{geometry}
+\usepackage[T1]{fontenc}\usepackage{lmodern}\usepackage{xcolor}\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, calc, fit, backgrounds, shadows}
+\definecolor{agentOrange}{RGB}{255,240,220}\definecolor{agentCyan}{RGB}{225,250,250}
+\definecolor{agentPurple}{RGB}{240,230,255}\definecolor{agentTeal}{RGB}{220,245,245}
+\definecolor{googleGray}{RGB}{240,240,240}\definecolor{orchBlue}{RGB}{230,240,255}
+\definecolor{planGreen}{RGB}{235,255,235}\definecolor{failRed}{RGB}{255,220,220}
+\newcommand{\iconDNA}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick](0,0)sin(0.5,0.5)cos(1,0)sin(1.5,-0.5)cos(2,0);}}
+\newcommand{\iconGraph}[1]{\tikz[baseline=-3pt,scale=0.25]{\fill[#1](0,0)circle(5pt);}}
+\newcommand{\iconSearch}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick](0,0)circle(0.5cm);}}
+\newcommand{\iconBulb}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick,fill=white](0,0)circle(0.5cm);}}
+\newcommand{\iconUser}[1]{\tikz[baseline=-3pt,scale=0.25]{\fill[#1](0,0.5)circle(0.35cm);}}
+\newcommand{\iconBrain}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick,fill=white](0,0)ellipse(0.7cm and 0.5cm);}}
+\newcommand{\iconGears}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick,fill=white](0,0)circle(0.5cm);}}
+\newcommand{\iconCycle}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick,->](0,0.4)arc(90:0:0.4);}}
+\newcommand{\iconRobot}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick,fill=white](-0.5,-0.4)rectangle(0.5,0.4);}}
+\newcommand{\iconDoc}[1]{\tikz[baseline=-3pt,scale=0.25]{\draw[#1,thick,fill=white](-0.3,-0.5)rectangle(0.3,0.5);}}
+\pagestyle{empty}\begin{document}\input{architecture_diagram}\end{document}

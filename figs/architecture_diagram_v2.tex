@@ -1,6 +1,6 @@
 % ============================================================
-% LangGraph OmniCellAgent Architecture - Figure 1 standalone source
-% Kept in sync with the manuscript figure for isolated validation.
+% LangGraph OmniCellAgent Architecture - Figure 1 v2 standalone source
+% This is the v2 version, copied from the latest architecture_diagram.tex
 % ============================================================
 
 \definecolor{stateBlue}{RGB}{235, 245, 255}
@@ -251,5 +251,5 @@
 }% end resizebox
 
 \caption{OmniCellAgent three-level hierarchy organised around a shared memory. \textbf{Top - Level 1 (orchestration loop)}: User Query $\to$ Planner $\to$ Executor $\to$ Reporter, with the query anchored at the top-left of the full orchestration lane and the Executor containing an internal judgment node that routes success to the next task and failures to the Replanner. In the LangGraph implementation, the Planner produces the \texttt{ResearchPlan} and writes it into persistent \texttt{AgentState}; the Executor then reads the current task from state and delegates it to the appropriate Level 2 agent. \textbf{Middle - Persistent shared memory (blue band)}: \texttt{plan}, \texttt{current\_task\_index}, \texttt{shared\_data} (top\_genes, pathways, paper\_dois/pmids, disease, cell\_type), \texttt{agent\_outputs}, and \texttt{process\_log}; every component reads and writes here, so this band is the single coordination point between the loop, the sub-agents, and the revision module. \textbf{Bottom-left - Level 2 (representative scheduled sub-agents)}: a representative six-task AD run --- task\_1 OmicMining (DEGs), task\_2-3 BioMarkerKG (pathways), task\_4 PubMedResearcher (paper DOIs), task\_5 ScientistsAgent (ranked hypotheses), task\_6 GoogleSearcher (translational leads). Following the LangGraph implementation, Level 2 is shown as an executor-scheduled block with one bidirectional control link from the Executor into the task block and one bidirectional read/write link to \texttt{AgentState}; peer-to-peer agent wiring is omitted because coordination happens through the shared state rather than direct agent chaining. \textbf{Level 3 (expert panel)} is its own teal box and feeds task\_5 via a dashed "expert votes" arrow, showing that the Scientists agent is itself a panel of Genomics / Neuroscience / Longevity experts. \textbf{Bottom-right - Revision \& enhancement (violet)}: the Reporter draft is passed to the AI Reviewers for clarity, accuracy, and completeness, then the refined draft becomes the Enhanced Report - the final output of the system.}
-\label{fig:architecture}
+\label{fig:architecture-v2}
 \end{figure}

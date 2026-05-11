@@ -1,5 +1,6 @@
 % Minimal wrapper to test-compile architecture_diagram.tex as a standalone PDF.
-\documentclass[border=10pt]{standalone}
+\documentclass[11pt]{article}
+\usepackage[margin=0.4in,letterpaper]{geometry}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
 \usepackage{xcolor}
@@ -15,6 +16,7 @@
 \definecolor{orchBlue}{RGB}{230, 240, 255}
 \definecolor{planGreen}{RGB}{235, 255, 235}
 \definecolor{failRed}{RGB}{255, 220, 220}
+\definecolor{stateBlue}{RGB}{235, 245, 255}
 
 % --- Icons ---
 \newcommand{\iconDNA}[1]{\tikz[baseline=-3pt, scale=0.25]{\draw[#1, thick] (0,0) sin (0.5,0.5) cos (1,0) sin (1.5,-0.5) cos (2,0);\draw[#1, thick] (0,0) sin (0.5,-0.5) cos (1,0) sin (1.5,0.5) cos (2,0);}}
@@ -26,7 +28,9 @@
 \newcommand{\iconGears}[1]{\tikz[baseline=-3pt, scale=0.25]{\draw[#1, thick, fill=white] (0,0) circle (0.5cm);\draw[#1, dashed] (0,0) circle (0.35cm);}}
 \newcommand{\iconCycle}[1]{\tikz[baseline=-3pt, scale=0.25]{\draw[#1, thick, ->] (0,0.4) arc (90:0:0.4);\draw[#1, thick, ->] (0,-0.4) arc (270:180:0.4);}}
 \newcommand{\iconRobot}[1]{\tikz[baseline=-3pt, scale=0.25]{\draw[#1, thick, fill=white] (-0.5,-0.4) rectangle (0.5,0.4);\fill[#1] (-0.2,0) circle (2pt) (0.2,0) circle (2pt);\draw[#1] (0,0.4)--(0,0.7) circle (2pt);}}
+\newcommand{\iconDoc}[1]{\tikz[baseline=-3pt, scale=0.25]{\draw[#1, thick, fill=white] (-0.5,-0.6) rectangle (0.5,0.7);\foreach \y in {0.3, 0, -0.3} \draw[#1] (-0.3,\y)--(0.3,\y);}}
 
+\pagestyle{empty}
 \begin{document}
 \input{architecture_diagram}
 \end{document}

@@ -86,7 +86,7 @@ coverage.xml
 
 # Translations
 *.mo
-
+# manuscript
 # Mr Developer
 .mr.developer.cfg
 .project
@@ -140,3 +140,7 @@ node_modules/
 # Large CSV files
 tools/omic_tools/outputs/*.csv
 *.zip
+
+# Manuscript folder (LaTeX sources and figures live elsewhere; do not commit here)
+manuscript/
+
