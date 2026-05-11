@@ -205,15 +205,21 @@ async def query_scientist_knowledge(
 @mcp.tool()
 async def analyze_omics_data(
     query: str,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    label: str = "disease",
 ) -> str:
     """
     Perform comprehensive single-cell omics data analysis workflow.
-    
+
+    DATA TYPE: Operates on a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data
+    from OmniCellTOSG. Samples are INDIVIDUAL CELLS, not bulk RNA-seq.
+
     This tool provides end-to-end analysis:
     1. **Named Entity Recognition (NER)**: Extracts disease, cell type, tissue from query
     2. **Data Retrieval**: Fetches relevant single-cell RNA-seq data from OmniCellTOSG database
     3. **Differential Expression Analysis**: Identifies significantly changed genes
+       between two groups defined by `label` (default: disease vs non-disease;
+       alternatives: "gender" for female-vs-male, "cell_type" for cell-type-stratified)
     4. **Pathway Enrichment**: Performs KEGG pathway analysis
     5. **Visualization**: Generates volcano plots and enrichment plots
     6. **Results Summary**: Returns top genes, pathways, and analysis metrics
@@ -227,6 +233,9 @@ async def analyze_omics_data(
     Args:
         query: Natural language query (e.g., "Analyze lung adenocarcinoma single-cell data")
         session_id: Optional session identifier (default: auto-generated)
+        label: Column used for the DE comparison. "disease" (default) compares
+               disease vs non-disease cells. "gender" compares female vs male
+               within the queried subset. "cell_type" stratifies by cell type.
     
     Returns:
         Comprehensive analysis report including:
@@ -254,7 +263,8 @@ async def analyze_omics_data(
     result = await asyncio.to_thread(
         omic_fetch_analysis_workflow,
         query=query,
-        session_id=session_id
+        session_id=session_id,
+        label=label,
     )
     
     return result

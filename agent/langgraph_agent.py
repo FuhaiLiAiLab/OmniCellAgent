@@ -192,42 +192,67 @@ def get_current_session_id() -> str:
 def omic_analysis_tool(
     disease: Optional[str] = None,
     cell_type: Optional[str] = None,
-    organ: Optional[str] = None
+    organ: Optional[str] = None,
+    label: str = "disease",
 ) -> Dict[str, Any]:
     """
-    Perform multi-omics analysis: gene expression profiling, differential expression, and pathway enrichment.
-    
+    Run a single-cell RNA-seq (scRNA-seq) cohort analysis: gene expression
+    profiling, differential expression, and KEGG pathway enrichment.
+
+    DATA TYPE: This tool operates on a COHORT of scRNA-seq data drawn from
+    OmniCellTOSG. Samples are individual cells, NOT bulk RNA-seq libraries.
+    Reports based on this tool's output MUST describe the analysis as
+    single-cell, not bulk.
+
     Args:
-        disease: Disease name to analyze. Examples: "lung adenocarcinoma", "Alzheimer disease", "breast cancer"
-        cell_type: Optional cell type filter. Examples: "microglial cell", "T cell", "acinar cell"
-        organ: Organ filter (IMPORTANT for memory efficiency). Examples: "lung", "brain", "breast", "pancreas"
-        
+        disease: Disease name to analyze. Examples: "lung adenocarcinoma",
+            "Alzheimer disease", "breast cancer".
+        cell_type: Optional cell type filter. Examples: "microglial cell",
+            "T cell", "acinar cell".
+        organ: Organ filter (IMPORTANT for memory efficiency). Examples:
+            "lung", "brain", "breast", "pancreas".
+        label: Column used to define the two groups for differential expression.
+            - "disease" (default): disease vs non-disease (uses matched normal
+              cells via stratified balancing). Requires `disease` to be set.
+            - "gender": female vs male within the queried subset (e.g. within
+              a disease cohort or within an organ).
+            - "cell_type": cell-type-stratified comparison.
+
     Returns:
-        Dict with analysis results including top genes, enrichment data, and plot paths.
+        Dict with analysis results including top genes, enrichment data,
+        plot paths, and provenance fields:
+            - `data_type`: always "single-cell RNA-seq (scRNA-seq) cohort"
+            - `requested_label`: the label you requested
+            - `actual_label`: the label actually used for the DE comparison
+              (may differ if automatic fallback kicked in)
+            - `label_fallback_message`: human-readable explanation when the
+              requested label had <2 classes and a fallback was chosen
+              (None when no fallback was needed)
     """
     try:
         # Use the global session directory
         session_dir = get_current_session_dir()
-        
+
         params = {
             "session_dir": session_dir,
             "enable_differential_expression": True,
-            "enable_plotting": True
+            "enable_plotting": True,
+            "label": label,
         }
-        
+
         if disease:
             params["disease"] = disease
         if cell_type:
             params["cell_type"] = cell_type
         if organ:
             params["organ"] = organ
-            
+
         if not disease and not cell_type:
             return {"success": False, "message": "Provide at least 'disease' or 'cell_type'"}
-        
+
         result = _omic_workflow(**params)
         return result
-        
+
     except Exception as e:
         import traceback
         return {
@@ -1021,7 +1046,7 @@ You always consider:
 
 ## Output Style:
 - Always report effect sizes alongside p-values ("log2FC = 2.3, FDR = 1.2e-5").
-- Flag potential confounders explicitly ("cell-type composition may confound bulk RNA-seq DE").
+- Flag potential confounders explicitly (e.g., "cell-type composition or capture efficiency may confound scRNA-seq DE in this cohort").
 - Discuss biological vs statistical significance.
 - Reference aging-specific resources (GenAge, CellAge, DrugAge, LongevityMap).
 - Suggest validation: independent cohorts, Mendelian randomization, longitudinal studies.
@@ -1470,14 +1495,18 @@ class LangGraphOmniCellAgent:
         self.sub_agents = {
             "OmicMiningAgent": SubAgent(
                 name="OmicMiningAgent",
-                description="Analyzes omics data for gene expression, biomarkers, and pathway enrichment",
-                system_message="""You are an omics data specialist. Your task is to answer gene/biomarker questions using the omic_analysis tool.
+                description="Analyzes a cohort of single-cell RNA-seq (scRNA-seq) data from OmniCellTOSG for gene expression, biomarkers, and pathway enrichment. Inputs are per-cell scRNA-seq samples, NOT bulk RNA-seq.",
+                system_message="""You are an omics data specialist working with a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data from OmniCellTOSG. Samples are individual cells, NOT bulk RNA-seq libraries. Any summary or report you write MUST describe the analysis as single-cell — never call it bulk.
+
+Your task is to answer gene/biomarker questions using the omic_analysis tool.
 
 ## STEP 1: EXTRACT PARAMETERS FROM THE QUERY
 From the user's question, identify:
 - Disease name (MUST match the variations list below)
 - Organ (REQUIRED for efficiency)
 - Cell type (OPTIONAL, if mentioned)
+- Label column for the comparison (defaults to "disease"; set to "gender" if
+  the question is specifically about female-vs-male differences within a cohort)
 
 ## DISEASE NAME VARIATIONS (use EXACT names):
 - Alzheimer's → "Alzheimer disease"
@@ -1491,7 +1520,25 @@ From the user's question, identify:
 - Lung cancer → "lung"
 - Breast cancer → "breast"
 
-After tool calls complete, write a concise summary of the gene list and pathway data.""",
+## LABEL COLUMN (default "disease")
+- label="disease" (default) → disease vs non-disease comparison (uses matched
+  normal cells via stratified balancing). Requires `disease`.
+- label="gender" → female vs male comparison within the queried subset.
+- label="cell_type" → cell-type-stratified comparison.
+
+## AUTOMATIC LABEL FALLBACK
+If the requested label has only one non-empty class in the fetched cohort
+(e.g., a disease subset that turned out to be all female), the tool will
+automatically fall back to another viable label and run DE on that. Check
+the result fields:
+- `requested_label`: what you asked for
+- `actual_label`: what was actually used for the DE comparison
+- `label_fallback_message`: human-readable explanation (only set when fallback occurred)
+
+After tool calls complete, write a concise summary of the gene list and pathway
+data. Explicitly state that the data is single-cell RNA-seq (scRNA-seq), and
+report `actual_label` (the column that drove the comparison). If a fallback
+occurred, surface `label_fallback_message` in your summary.""",
                 tools=[omic_analysis_tool],
                 llm=self.llm
             ),
@@ -2104,6 +2151,13 @@ Respond in JSON format:
         
         reporting_prompt = f"""Generate a comprehensive research report for a graduate-level biomedical audience.
 
+## DATA PROVENANCE (DO NOT MISCHARACTERIZE)
+The omics results come from a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data
+drawn from OmniCellTOSG. Samples in the differential expression analysis are
+INDIVIDUAL CELLS, not bulk RNA-seq libraries. Describe the analysis as
+single-cell throughout the report. Inspect the `data_type` and `label_column`
+fields of the omics tool result to confirm.
+
 ## Research Question:
 {state['query']}
 
@@ -2114,8 +2168,11 @@ Respond in JSON format:
 
 ## REPORT STRUCTURE (Follow this order):
 
-### Step 1: Omics Data Analysis Summary
-- Report sample sizes (disease vs normal)
+### Step 1: scRNA-seq Cohort Analysis Summary
+- State the data type explicitly as single-cell RNA-seq (scRNA-seq) cohort
+- Report the label column used (e.g., "disease" → disease vs normal cells;
+  "gender" → female vs male cells)
+- Report sample sizes for each group (cells per group)
 - Number of DEGs identified (upregulated/downregulated)
 - **Top DEGs Table** (ranked by p-value/FDR): Show top 10-15 genes with:
   | Rank | Gene | log2FC | FDR | Direction |

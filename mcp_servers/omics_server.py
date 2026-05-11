@@ -21,11 +21,15 @@ mcp = FastMCP("Omics Analysis Tools 📊")
 @mcp.tool()
 async def analyze_omics_data(
     query: str,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    label: str = "disease",
 ) -> str:
     """
     Perform comprehensive single-cell omics data analysis workflow.
-    
+
+    DATA TYPE: Operates on a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data
+    from OmniCellTOSG. Samples are INDIVIDUAL CELLS, not bulk RNA-seq libraries.
+
     This tool provides end-to-end single-cell RNA-seq analysis:
     
     **Pipeline Steps:**
@@ -59,6 +63,9 @@ async def analyze_omics_data(
                - "Find key genes in pancreatic cancer"
                - "Compare T cells in breast cancer vs normal"
         session_id: Session identifier for file organization (default: auto-generated)
+        label: Column used for the DE comparison. "disease" (default) compares
+               disease vs non-disease cells. "gender" compares female vs male
+               cells within the queried subset. "cell_type" stratifies by cell type.
     
     Returns:
         Comprehensive analysis report containing:
@@ -89,7 +96,8 @@ async def analyze_omics_data(
     result = await asyncio.to_thread(
         omic_fetch_analysis_workflow,
         query=query,
-        session_id=session_id
+        session_id=session_id,
+        label=label,
     )
     
     return result

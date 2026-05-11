@@ -1,10 +1,16 @@
 """
 Omic Fetch and Analysis Workflow
 
+DATA TYPE: This workflow operates on a COHORT of SINGLE-CELL RNA-seq (scRNA-seq)
+data drawn from the OmniCellTOSG database. The expression matrix is per-cell
+(samples = cells), NOT bulk RNA-seq. Downstream differential expression compares
+two cell populations selected by the chosen label column.
+
 This workflow performs:
 1. Named Entity Recognition (NER) to extract disease and cell type
-2. Data retrieval using CellTOSGDataLoader with soft matching
-3. Differential expression analysis (for disease queries with normal/disease labels)
+2. scRNA-seq data retrieval using CellTOSGDataLoader with soft matching
+3. Differential expression analysis between two groups defined by `label`
+   (default: disease vs non-disease; alternative: gender, etc.)
 4. KEGG pathway enrichment analysis
 5. Enrichment plotting (via R script)
 6. Returns top genes and results for agent reflection
@@ -231,36 +237,84 @@ def compress_and_cleanup_npy_files(session_dir: str, remove_after_zip: bool = Tr
     return results
 
 
-def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str):
+def _build_labels_from_metadata(metadata, label_col: str, field_alias: dict,
+                                priority_labels: set):
     """
-    Fetch omics data using the new CellTOSGDataLoader with soft matching support.
-    
-    Following the working example pattern exactly.
-    
+    Rebuild a Y vector from an arbitrary metadata column. Used to fall back to
+    a different label when the originally requested one has only one class in
+    the fetched cohort.
+
+    Returns (Y, mapping, counts, valid_mask) or None if the column has fewer
+    than two non-empty classes.
+    """
+    resolved = field_alias.get(label_col, label_col)
+    if metadata is None or resolved not in metadata.columns:
+        return None
+
+    series = metadata[resolved]
+    unique_vals = series.dropna().unique().tolist()
+    if len(unique_vals) < 2:
+        return None
+
+    priority_lower = {p.lower() for p in (priority_labels or set())}
+    if any(str(v).lower() in priority_lower for v in unique_vals):
+        sorted_labels = sorted(
+            set(unique_vals),
+            key=lambda x: (str(x).lower() not in priority_lower, str(x).lower()),
+        )
+    else:
+        sorted_labels = sorted(set(unique_vals), key=lambda x: str(x).lower())
+
+    mapping = {label_name: idx for idx, label_name in enumerate(sorted_labels)}
+    # Sentinel -1 for NaN/unknown so we can filter them out
+    Y_mapped = series.map(lambda x: mapping.get(x, -1)).values.astype(int)
+    valid_mask = Y_mapped != -1
+    counts = {
+        int(idx): int(np.sum((Y_mapped == idx) & valid_mask))
+        for idx in mapping.values()
+    }
+    nonempty = sum(1 for c in counts.values() if c > 0)
+    if nonempty < 2:
+        return None
+    return Y_mapped, mapping, counts, valid_mask
+
+
+def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease"):
+    """
+    Fetch single-cell RNA-seq data using the new CellTOSGDataLoader with soft matching.
+
+    The expression matrix returned is per-cell (scRNA-seq cohort). Y is a binary/
+    categorical group assignment derived from `label`.
+
     Args:
-        fetch_dict (dict): Dictionary containing extracted entities
-        output_dir (str): Directory to save output files
-        
+        fetch_dict (dict): Dictionary containing extracted entities (cell type,
+            disease, organ, tissue, gender).
+        output_dir (str): Directory to save output files.
+        label (str): Column used to split samples for downstream differential
+            expression. Defaults to "disease" (disease vs non-disease). Other
+            valid choices include "gender" (female vs male) and "cell_type".
+
     Returns:
         tuple: (X, Y, metadata, similar_terms, retrieval_success)
     """
     data_root = get_path('external.omnicell_data_root', absolute=True)
-    
+
     cell_type = fetch_dict.get("cell type", None)
     disease_name = fetch_dict.get("disease", None)
     organ = fetch_dict.get("organ", None)
     tissue = fetch_dict.get("tissue", None)
     gender = fetch_dict.get("gender", None)
-    
+
     print(f"\n{'='*60}")
-    print(f"[Omic Fetch] Starting data retrieval")
+    print(f"[Omic Fetch] Starting scRNA-seq data retrieval")
     print(f"  Cell type: {cell_type}")
     print(f"  Disease: {disease_name}")
     print(f"  Organ: {organ}")
     print(f"  Tissue: {tissue}")
     print(f"  Gender: {gender}")
+    print(f"  Label column: {label}")
     print(f"{'='*60}\n")
-    
+
     conditions = {}
     if cell_type:
         conditions["cell_type"] = cell_type
@@ -270,25 +324,31 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str):
         conditions["tissue_general"] = organ
     if tissue:
         conditions["tissue"] = tissue
-    if gender:
+    # Only filter by gender if it's the NER-extracted condition AND we're not
+    # using gender as the label column (otherwise filtering by one gender would
+    # leave only one group).
+    if gender and label != "gender":
         conditions["gender"] = gender
-    
+
     if not conditions:
         print("[Omic Fetch] No valid conditions extracted from NER")
         return None, None, None, {}, False
-    
-    # Determine task and label_column based on query
-    if disease_name:
-        task = "disease"
-        label_column = "disease"
-    elif cell_type:
-        task = "cell_type"
-        label_column = "cell_type"
-    else:
-        task = "disease"
-        label_column = "disease"
-    
-    # Enable stratified_balancing for disease task to get matched normal samples
+
+    # Resolve task and label_column from the user-supplied label argument.
+    # Default behavior (label="disease") matches the prior implementation:
+    # the loader's stratified balancing pulls matched normal samples so DE
+    # can compare disease vs non-disease.
+    label = (label or "disease").lower()
+    valid_labels = {"disease", "gender", "cell_type"}
+    if label not in valid_labels:
+        print(f"[Omic Fetch] Unknown label '{label}', falling back to 'disease'")
+        label = "disease"
+
+    task = label
+    label_column = label
+
+    # Stratified balancing only meaningful when the label naturally has a
+    # priority "normal" / control class (disease task).
     use_stratified_balancing = (task == "disease")
     
     try:
@@ -320,16 +380,20 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str):
         X = dataset.data
         Y = dataset.labels
         metadata = dataset.metadata
-        
+
         print(f"[Omic Fetch] Data retrieved successfully")
         print(f"  Samples: {X.shape[0] if X is not None else 0}")
         print(f"  Features: {X.shape[1] if X is not None and len(X.shape) > 1 else 0}")
         sys.stdout.flush()
-        
+
         if X is None or X.shape[0] == 0:
             print(f"\n[Omic Fetch] No samples matched the conditions")
-            return None, None, None, {}, False
-        
+            return None, None, None, {}, False, label, None
+
+        # Capture loader constants before we delete `dataset` — needed for label fallback.
+        field_alias = dict(dataset.query.FIELD_ALIAS)
+        priority_by_task = dict(type(dataset).PRIORITY_LABELS_BY_TASK)
+
         # Extract similar terms from soft matching
         similar_terms = {}
         if hasattr(dataset, 'query') and hasattr(dataset.query, 'last_query_conditions_resolved'):
@@ -348,31 +412,85 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str):
                         "original": original_value,
                         "matched": resolved_value
                     }
-        
+
         if similar_terms:
             print(f"\n[Soft Matching] Terms adjusted:")
             for key, mapping in similar_terms.items():
                 print(f"  {key}: '{mapping['original']}' -> '{mapping['matched']}'")
-        
+
         del dataset
         gc.collect()
-        
+
+        # -----------------------------------------------------------------
+        # Label fallback: if the requested label only has one non-empty
+        # class in this cohort, try the alternative label(s) before giving
+        # up on DE. This commonly happens when a disease query returns
+        # only one sex, or when stratified balancing failed to find
+        # matched normals.
+        # -----------------------------------------------------------------
+        actual_label = label
+        fallback_message = None
+
+        def _count_groups(Y_arr):
+            if Y_arr is None:
+                return {}
+            arr = np.asarray(Y_arr)
+            try:
+                int_arr = arr.astype(int)
+            except (TypeError, ValueError):
+                return {}
+            return {int(c): int(np.sum(int_arr == c)) for c in np.unique(int_arr)}
+
+        current_counts = _count_groups(Y)
+        has_two_groups = sum(1 for c in current_counts.values() if c > 0) >= 2
+        print(f"[Label Check] label='{label}' class counts: {current_counts}")
+
+        if not has_two_groups and metadata is not None:
+            fallback_candidates = [c for c in ("disease", "gender", "cell_type") if c != label]
+            print(f"[Label Fallback] label='{label}' has <2 classes; trying {fallback_candidates}")
+            for alt in fallback_candidates:
+                result = _build_labels_from_metadata(
+                    metadata, alt, field_alias, priority_by_task.get(alt, set())
+                )
+                if result is None:
+                    print(f"[Label Fallback]   '{alt}': not viable (<2 classes)")
+                    continue
+                Y_new, _mapping, alt_counts, valid_mask = result
+                # Subset X/Y/metadata to rows with a usable alt label
+                X = X[valid_mask]
+                Y = Y_new[valid_mask]
+                metadata = metadata[valid_mask].reset_index(drop=True)
+                actual_label = alt
+                fallback_message = (
+                    f"Requested label='{label}' had only one non-empty class in this cohort "
+                    f"(counts={current_counts}); fell back to label='{alt}' with class counts {alt_counts}."
+                )
+                print(f"[Label Fallback]   '{alt}': SELECTED ({alt_counts})")
+                break
+            else:
+                fallback_message = (
+                    f"Requested label='{label}' has only one non-empty class in this cohort "
+                    f"(counts={current_counts}); no alternative label among "
+                    f"{fallback_candidates} yielded 2+ groups either. Differential expression will be skipped."
+                )
+                print(f"[Label Fallback] {fallback_message}")
+
         # Immediately compress and remove expression_matrix.npy (large file ~4GB)
         expression_matrix_path = os.path.join(output_dir, "expression_matrix.npy")
         if os.path.exists(expression_matrix_path):
             compress_expression_matrix(expression_matrix_path)
-        
-        return X, Y, metadata, similar_terms, True
-        
+
+        return X, Y, metadata, similar_terms, True, actual_label, fallback_message
+
     except ValueError as e:
         print(f"\n[Omic Fetch] No match: {str(e)}")
-        return None, None, None, {}, False
-    
+        return None, None, None, {}, False, label, None
+
     except Exception as e:
         print(f"\n[Omic Fetch] Unexpected issue: {str(e)}")
         import traceback
         traceback.print_exc()
-        return None, None, None, {}, False
+        return None, None, None, {}, False, label, None
 
 
 def compute_top_genes(X, top_k=100):
@@ -392,20 +510,28 @@ TOP_K_GENES = 20
 
 def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                                  organ=None, tissue=None, gender=None, session_dir=None,
-                                 enable_differential_expression=True, enable_plotting=True):
+                                 enable_differential_expression=True, enable_plotting=True,
+                                 label="disease"):
     """
-    Perform the complete omic analysis workflow.
-    
+    Perform the complete single-cell omic analysis workflow.
+
+    NOTE: This pipeline analyzes a COHORT of single-cell RNA-seq (scRNA-seq)
+    data from OmniCellTOSG. Samples are individual cells, not bulk libraries.
+
     Supports two input modes:
     1. Natural language: Provide text parameter for NER extraction
     2. Direct parameters: Provide specific parameters (disease, cell_type, etc.)
-    
+
     Args:
         text: Natural language query for NER extraction
-        disease, cell_type, organ, tissue, gender: Direct parameters
+        disease, cell_type, organ, tissue, gender: Direct query parameters
         session_dir: Directory to save all outputs (REQUIRED)
-        enable_differential_expression: Run DE analysis if disease query (default True)
+        enable_differential_expression: Run DE analysis (default True)
         enable_plotting: Run R plotting script (default True)
+        label: Column used to define the two groups for differential expression.
+            Defaults to "disease" (disease vs non-disease via stratified
+            balancing). Set to "gender" to compare female vs male within the
+            queried subset, or "cell_type" for cell-type-stratified analyses.
     """
     times = {}
     times['start'] = time.time()
@@ -462,8 +588,16 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     print(f"STEP 2: Data Retrieval with Soft Matching")
     print(f"{'='*70}")
     
-    X, Y, metadata, similar_terms, retrieval_success = omic_fetch_with_new_loader(fetch_dict, session_dir)
+    (X, Y, metadata, similar_terms, retrieval_success,
+     actual_label, label_fallback_message) = omic_fetch_with_new_loader(
+        fetch_dict, session_dir, label=label
+    )
     times['fetch_end'] = time.time()
+
+    if actual_label != label:
+        print(f"\n[Label] Requested '{label}' but using '{actual_label}' for DE.")
+    if label_fallback_message:
+        print(f"[Label] {label_fallback_message}")
     
     if not retrieval_success or X is None:
         print(f"\n{'='*70}")
@@ -490,6 +624,11 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         return {
             "success": False,
             "message": "No samples matched the specified conditions.",
+            "data_type": "single-cell RNA-seq (scRNA-seq) cohort",
+            "label_column": label,
+            "requested_label": label,
+            "actual_label": actual_label,
+            "label_fallback_message": label_fallback_message,
             "similar_terms": similar_terms,
             "extracted_entities": fetch_dict,
             "retrieval_success": False,
@@ -527,50 +666,66 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         print(f"[Genes] Saved to: {top_genes_path}")
     
     # ===========================================================================
-    # STEP 4: Differential Expression Analysis (if disease query)
+    # STEP 4: Differential Expression Analysis (label-driven)
     # ===========================================================================
     disease_name = fetch_dict.get("disease", None)
     analysis_success = False
     analysis_paths = None
     top_genes_by_fdr = []
-    
-    if enable_differential_expression and disease_name and Y is not None:
+
+    # Build a comparison name used for output directory / plot titles.
+    # For label="disease" this stays as the disease string (back-compat);
+    # for other labels we use a "<scope>_by_<label>" tag.
+    if actual_label == "disease":
+        comparison_name = disease_name or "comparison"
+    elif actual_label == "gender":
+        scope = disease_name or fetch_dict.get("organ") or fetch_dict.get("cell type") or "cohort"
+        comparison_name = f"{scope}_by_gender"
+    else:
+        comparison_name = f"{disease_name or 'cohort'}_by_{actual_label}"
+
+    # DE only runs when we actually have group labels. Disease-mode also
+    # requires a disease query (otherwise the loader returns a single class).
+    de_gated = enable_differential_expression and Y is not None and (
+        actual_label != "disease" or disease_name is not None
+    )
+
+    if de_gated:
         print(f"\n{'='*70}")
-        print(f"STEP 4: Differential Expression Analysis")
+        print(f"STEP 4: Differential Expression Analysis (label='{actual_label}')")
         print(f"{'='*70}")
-        
-        # Check if we have both normal (0) and disease (1) labels
+
         unique_labels = np.unique(Y)
-        has_normal = 0 in unique_labels
-        has_disease = 1 in unique_labels
-        
-        # Count samples per label
-        label_counts = {int(label): int(np.sum(Y == label)) for label in unique_labels}
+
+        # Count samples per label index (avoid shadowing the outer `label` arg).
+        label_counts = {int(lbl): int(np.sum(Y == lbl)) for lbl in unique_labels}
         print(f"[DE] Label distribution: {label_counts}")
-        
+
         # For DE analysis, we need at least 2 groups with samples
         if len(unique_labels) >= 2 and all(label_counts.get(l, 0) > 0 for l in unique_labels[:2]):
             # Get the two groups based on labels
             group0_count = np.sum(Y == 0)
             group1_count = np.sum(Y == 1) if 1 in unique_labels else 0
-            
+
             print(f"[DE] Found {group0_count} samples in group 0 and {group1_count} samples in group 1")
-            
+
             if group0_count > 0 and group1_count > 0:
-                # Split data into two groups
+                # Split data into two groups. Group 0 is the reference class
+                # (e.g. "normal" for disease, "female" for gender — see
+                # CellTOSGDataLoader.PRIORITY_LABELS_BY_TASK).
                 normal_omic_feature = X[Y == 0]
                 disease_omic_feature = X[Y == 1]
-                
+
                 data_dict = {
                     "normal_omic_feature": normal_omic_feature,
                     "disease_omic_feature": disease_omic_feature,
                     "omic_label": Y
                 }
-                
+
                 try:
                     data_and_analysis_dict = omic_analysis(
-                        disease_name, 
-                        data_dict, 
+                        comparison_name,
+                        data_dict,
                         enable_plotting=enable_plotting,
                         session_dir=session_dir
                     )
@@ -610,23 +765,24 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                 del normal_omic_feature, disease_omic_feature, data_dict
             else:
                 print(f"[DE] Skipped: need samples in both groups for comparison")
-                print(f"     NOTE: When querying a specific disease, all returned samples")
-                print(f"           have that disease. DE analysis requires both disease")
-                print(f"           AND normal samples from the same tissue context.")
+                print(f"     NOTE: label='{actual_label}' — DE requires two non-empty classes")
+                print(f"           in this column within the queried subset.")
         else:
             print(f"[DE] Skipped: need at least 2 groups with samples")
             print(f"     Labels found: {unique_labels}")
-            print(f"     NOTE: For single-disease queries, all samples share the same label.")
+            print(f"     NOTE: With label='{actual_label}', all returned cells share the same value.")
     else:
         print(f"\n{'='*70}")
         print(f"STEP 4: Differential Expression Analysis - SKIPPED")
         print(f"{'='*70}")
         if not enable_differential_expression:
             print("  Reason: disabled by parameter")
-        elif not disease_name:
-            print("  Reason: no disease specified (cell type query)")
+        elif actual_label == "disease" and not disease_name:
+            print("  Reason: label='disease' but no disease specified in the query")
         elif Y is None:
             print("  Reason: no labels available")
+        if label_fallback_message:
+            print(f"  Label fallback note: {label_fallback_message}")
     
     times['de_end'] = time.time()
     
@@ -642,9 +798,9 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         
         try:
             enrichment_dir = analysis_paths.get('enrichment_results_dir', '')
-            # Sanitize disease name (spaces to underscores) to match enrichment directory naming
-            sanitized_disease = disease_name.replace(' ', '_')
-            enrichment_all_regulated = os.path.join(enrichment_dir, f"{sanitized_disease}_all_regulated")
+            # Sanitize comparison name (spaces to underscores) to match enrichment directory naming
+            sanitized_comparison = comparison_name.replace(' ', '_')
+            enrichment_all_regulated = os.path.join(enrichment_dir, f"{sanitized_comparison}_all_regulated")
             plot_dir = os.path.join(session_dir, "plots")
             os.makedirs(plot_dir, exist_ok=True)
             
@@ -788,9 +944,18 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     print(f"[Cleanup] Started background compression thread (not blocking workflow)")
     
     gc.collect()
+    success_message = f"Successfully retrieved {metadata.shape[0] if metadata is not None else 0} cells (scRNA-seq)"
+    if label_fallback_message:
+        success_message = f"{success_message}. NOTE: {label_fallback_message}"
     return {
         "success": True,
         "session_dir": session_dir,
+        "data_type": "single-cell RNA-seq (scRNA-seq) cohort",
+        "label_column": actual_label,
+        "requested_label": label,
+        "actual_label": actual_label,
+        "label_fallback_message": label_fallback_message,
+        "comparison_name": comparison_name if de_gated else None,
         "num_samples": metadata.shape[0] if metadata is not None else 0,
         "num_features": len(top_gene_indices) if top_gene_indices else 0,
         "top_gene_indices": top_gene_indices,
@@ -804,7 +969,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         "analysis_paths": analysis_paths,
         "plot_paths": plot_paths,  # HTML paths for backward compatibility
         "plots_for_report": plots_for_report,  # Categorized plots with relative paths for embedding
-        "message": f"Successfully retrieved {metadata.shape[0] if metadata is not None else 0} samples",
+        "message": success_message,
         "timing": {
             "ner": times['ner_end'] - times['start'],
             "fetch": times['fetch_end'] - times['ner_end'],
@@ -850,6 +1015,9 @@ Examples:
     parser.add_argument("--organ", type=str, help="Organ filter for memory efficiency (e.g., 'lung', 'brain')")
     parser.add_argument("--tissue", type=str, help="Specific tissue filter")
     parser.add_argument("--text", type=str, help="Free-form text query (uses NER extraction)")
+    parser.add_argument("--label", type=str, default="disease",
+                        choices=["disease", "gender", "cell_type"],
+                        help="Label column used for the DE comparison (default: 'disease' for disease-vs-normal)")
     parser.add_argument("--session-id", type=str, default="test_session", help="Session ID for output directory")
     parser.add_argument("--no-de", action="store_true", help="Skip differential expression analysis")
     parser.add_argument("--no-plot", action="store_true", help="Skip plotting")
@@ -976,7 +1144,8 @@ Examples:
         params = {
             "session_dir": session_dir,
             "enable_differential_expression": not args.no_de,
-            "enable_plotting": not args.no_plot
+            "enable_plotting": not args.no_plot,
+            "label": args.label,
         }
         
         if args.disease:
@@ -998,6 +1167,12 @@ Examples:
         print("RESULTS")
         print("="*80)
         print(f"Success: {result.get('success', False)}")
+        print(f"Data Type: {result.get('data_type', 'unknown')}")
+        print(f"Requested Label: {result.get('requested_label')}")
+        print(f"Actual Label: {result.get('actual_label')}")
+        if result.get('label_fallback_message'):
+            print(f"Label Fallback: {result.get('label_fallback_message')}")
+        print(f"Comparison Name: {result.get('comparison_name')}")
         print(f"Samples Retrieved: {result.get('num_samples', 0)}")
         print(f"DE Analysis Success: {result.get('analysis_success', False)}")
         print(f"KEGG Plotting Success: {result.get('kegg_success', False)}")

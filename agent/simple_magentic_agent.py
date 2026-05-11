@@ -72,46 +72,70 @@ def create_omic_analysis_tool(session_id: str) -> FunctionTool:
     def omic_analysis_tool(
         disease: Optional[str] = None,
         cell_type: Optional[str] = None,
-        organ: Optional[str] = None
+        organ: Optional[str] = None,
+        label: str = "disease",
     ) -> Dict[str, Any]:
         """
-        Perform multi-omics analysis: gene expression profiling, differential expression, and pathway enrichment.
-        
+        Run a single-cell RNA-seq (scRNA-seq) cohort analysis: gene expression
+        profiling, differential expression, and KEGG pathway enrichment.
+
+        DATA TYPE: COHORT of scRNA-seq data from OmniCellTOSG. Samples are
+        INDIVIDUAL CELLS, not bulk RNA-seq libraries. Reports based on this
+        tool's output MUST describe the analysis as single-cell, not bulk.
+
         Args:
-            disease: Disease name to analyze. Examples: "lung adenocarcinoma", "Alzheimer disease", "breast cancer"
-            cell_type: Optional cell type filter. Examples: "microglial cell", "T cell", "acinar cell"
-            organ: Organ filter (IMPORTANT for memory efficiency). Examples: "lung", "brain", "breast", "pancreas"
-            
+            disease: Disease name. Examples: "lung adenocarcinoma",
+                "Alzheimer disease", "breast cancer".
+            cell_type: Optional cell type filter. Examples: "microglial cell",
+                "T cell", "acinar cell".
+            organ: Organ filter (IMPORTANT for memory efficiency). Examples:
+                "lung", "brain", "breast", "pancreas".
+            label: Column used to define the two groups for differential
+                expression. "disease" (default) → disease vs non-disease;
+                "gender" → female vs male within the queried subset;
+                "cell_type" → cell-type-stratified comparison.
+
         Returns:
-            Dict with analysis results including top genes, enrichment data, and plot paths.
-            
+            Dict with analysis results including top genes, enrichment data,
+            plot paths, and provenance fields:
+              - `data_type`: always "single-cell RNA-seq (scRNA-seq) cohort"
+              - `requested_label`: the label you requested
+              - `actual_label`: the label actually used for the DE comparison
+                (may differ if automatic fallback kicked in)
+              - `label_fallback_message`: human-readable explanation when the
+                requested label had <2 classes and a fallback was chosen
+                (None when no fallback was needed)
+
         Usage:
             - For lung cancer: disease="lung adenocarcinoma", organ="lung"
-            - For Alzheimer's: disease="Alzheimer disease", organ="brain"  
+            - For Alzheimer's: disease="Alzheimer disease", organ="brain"
             - For specific cells in disease: disease="...", cell_type="...", organ="..."
+            - For sex differences in AD brain: disease="Alzheimer disease",
+              organ="brain", label="gender"
         """
         try:
             params = {
                 "session_dir": session_dir,
                 "enable_differential_expression": True,
-                "enable_plotting": True
+                "enable_plotting": True,
+                "label": label,
             }
-            
+
             if disease:
                 params["disease"] = disease
             if cell_type:
                 params["cell_type"] = cell_type
             if organ:
                 params["organ"] = organ
-                
+
             if not disease and not cell_type:
                 return {"success": False, "message": "Provide at least 'disease' or 'cell_type'"}
-            
+
             # Call the actual workflow
             result = _omic_workflow(**params)
-            
+
             return result
-            
+
         except Exception as e:
             import traceback
             return {
@@ -119,14 +143,20 @@ def create_omic_analysis_tool(session_id: str) -> FunctionTool:
                 "message": f"Error in omic analysis: {str(e)}",
                 "traceback": traceback.format_exc()
             }
-    
+
     # Create and return the FunctionTool with explicit name
     return FunctionTool(
         omic_analysis_tool,
         name="omic_analysis",
         description="""ALWAYS USE THIS TOOL when asked about genes, biomarkers, or molecular mechanisms of diseases.
 
-This tool retrieves real omics data and performs differential expression analysis with pathway enrichment.
+DATA TYPE: This tool operates on a COHORT of SINGLE-CELL RNA-seq (scRNA-seq)
+data from OmniCellTOSG. Samples are INDIVIDUAL CELLS, NOT bulk RNA-seq
+libraries. Any downstream summary or report MUST describe the analysis as
+single-cell, not bulk.
+
+This tool retrieves real scRNA-seq data and performs differential expression
+analysis with pathway enrichment.
 
 REQUIRED PARAMETERS:
 - disease: Disease name (e.g., "lung adenocarcinoma", "Alzheimer disease", "breast cancer")
@@ -134,11 +164,15 @@ REQUIRED PARAMETERS:
 
 OPTIONAL:
 - cell_type: Specific cell type (e.g., "microglial cell", "T cell")
+- label: Comparison column. Default "disease" (disease vs non-disease).
+  Use "gender" for female-vs-male comparison within the queried subset.
+  Use "cell_type" for cell-type-stratified comparison.
 
 EXAMPLES:
 1. omic_analysis(disease="Alzheimer disease", organ="brain")
 2. omic_analysis(disease="lung adenocarcinoma", organ="lung")
 3. omic_analysis(disease="breast cancer", organ="breast", cell_type="epithelial cell")
+4. omic_analysis(disease="Alzheimer disease", organ="brain", label="gender")  # sex DE within AD brain
 
 RETURNS: Top differentially expressed genes, pathway enrichment results, and visualization plots.
 """
@@ -274,7 +308,10 @@ class SimpleMagneticAgentSystem:
             tools=[omic_tool],
             description="""USE THIS AGENT for any query about genes, biomarkers, molecular mechanisms, or disease pathways.
 
-TRIGGER KEYWORDS: genes, biomarkers, differentially expressed, gene expression, pathway, KEGG, molecular mechanism, 
+DATA TYPE: This agent operates on a COHORT of SINGLE-CELL RNA-seq (scRNA-seq)
+data from OmniCellTOSG. Samples are INDIVIDUAL CELLS, NOT bulk RNA-seq.
+
+TRIGGER KEYWORDS: genes, biomarkers, differentially expressed, gene expression, pathway, KEGG, molecular mechanism,
 drug targets, therapeutic targets, transcriptomics, genomics, proteomics, signaling, microglia, neurons, cell types in disease.
 
 EXAMPLES OF QUERIES FOR THIS AGENT:
@@ -283,15 +320,22 @@ EXAMPLES OF QUERIES FOR THIS AGENT:
 - "What are the key signaling pathways in breast cancer?"
 - "Identify drug targets for pancreatic cancer"
 - "What genes are expressed in microglia in AD?"
+- "What are the sex-specific gene expression differences in AD brain?" (use label="gender")
 
-This agent retrieves REAL omics data and performs differential expression + pathway enrichment analysis.""",
-            system_message="""You are an omics data specialist. Your task is to answer gene/biomarker questions using the omic_analysis tool.
+This agent retrieves REAL scRNA-seq cohort data and performs differential
+expression + pathway enrichment analysis. Reports MUST describe the data
+as single-cell, never as bulk.""",
+            system_message="""You are an omics data specialist working with a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data from OmniCellTOSG. Samples are INDIVIDUAL CELLS, NOT bulk RNA-seq libraries. Any summary or report you write MUST describe the analysis as single-cell — never call it bulk.
+
+Your task is to answer gene/biomarker questions using the omic_analysis tool.
 
 ## STEP 1: EXTRACT PARAMETERS FROM THE QUERY
 From the user's question, identify:
 - Disease name (MUST match the variations list below)
 - Organ (REQUIRED for efficiency)
 - Cell type (OPTIONAL, if mentioned)
+- Label column (defaults to "disease"; switch to "gender" if the question is
+  specifically about female-vs-male differences within a cohort)
 
 ## STEP 2: CALL THE TOOL WITH YOUR BEST EXTRACTION
 Call omic_analysis with the extracted parameters using your best judgment.
@@ -312,10 +356,23 @@ ORGAN MAPPING (use EXACT names):
 - Pancreatic cancer → "pancreas"
 - Blood cancer → "blood"
 
+LABEL COLUMN (default "disease")
+- "disease" (default): disease vs non-disease using matched normal cells
+- "gender": female vs male within the queried subset
+- "cell_type": cell-type-stratified comparison
+
+AUTOMATIC LABEL FALLBACK
+If the requested label has only one non-empty class in the cohort, the tool
+automatically tries the other label(s) and runs DE on whichever is viable.
+Read `actual_label` (what was used) and `label_fallback_message` (set only
+when a fallback occurred) from the tool result. Mention the fallback in your
+summary so the user knows the comparison changed.
+
 EXAMPLE CALLS:
 ✓ omic_analysis(disease="Alzheimer disease", organ="brain")
 ✓ omic_analysis(disease="lung adenocarcinoma", organ="lung")
 ✓ omic_analysis(disease="breast cancer", organ="breast", cell_type="epithelial cell")
+✓ omic_analysis(disease="Alzheimer disease", organ="brain", label="gender")  # sex DE
 
 ## STEP 3: CHECK THE RESPONSE FOR "similar_terms"
 The tool will return:
@@ -338,9 +395,12 @@ The tool will return:
 
 ## OUTPUT FORMAT
 After tool calls complete, write a concise summary:
-1. If successful: Present the gene list and pathway data
+1. If successful: Present the gene list and pathway data. Explicitly state
+   that the data is single-cell RNA-seq (scRNA-seq) cohort data, and report
+   the `label_column` used for the comparison.
 2. If no data after retry: "No data found. Similar terms available: [list]. Try searching with: [suggestion]"
-3. STOP - analysis complete""",
+3. NEVER describe the analysis as bulk RNA-seq — it is single-cell.
+4. STOP - analysis complete""",
             model_client_stream=False,
             reflect_on_tool_use=True,
             max_tool_iterations=2,
