@@ -1,0 +1,10 @@
+case,reviewer,score,success,elapsed_s
+AD,apr,5,True,110.2
+AD,openrev,6,True,29.3
+AD,litllm,5,True,9.9
+LungCancer,apr,5,True,105.7
+LungCancer,openrev,5,True,9.1
+LungCancer,litllm,5,True,9.5
+PDAC,apr,5,True,95.0
+PDAC,openrev,6,True,11.1
+PDAC,litllm,6,True,25.7

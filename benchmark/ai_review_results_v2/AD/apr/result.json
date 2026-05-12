@@ -1,0 +1,16 @@
+{
+  "reviews": {
+    "gemini-2.5-pro": 10701,
+    "gpt4-o1": 2730,
+    "gpt4-o3-mini": 3785
+  },
+  "meta_review_chars": 6969,
+  "reviewer_map": {
+    "alfa": "gemini-2.5-pro",
+    "bravo": "gpt4-o1",
+    "charlie": "gpt4-o3-mini"
+  },
+  "score": 5,
+  "success": true,
+  "elapsed_seconds": 110.2
+}

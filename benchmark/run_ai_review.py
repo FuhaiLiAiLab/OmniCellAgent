@@ -148,13 +148,43 @@ _REVIEWER_NAMES: dict[str, str] = {k: n for k, n, _ in REVIEWERS}
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _resolve_report(case: dict) -> tuple["Path", "Path"]:
+    """Resolve (md, pdf) for a case. Prefers the hardcoded filename when
+    present; otherwise auto-discovers the latest `report_*.md` in the
+    session dir. Returns (md_path, pdf_path)."""
+    d = SESSIONS_DIR / case["session"]
+    md = d / case["md"] if case.get("md") else None
+    pdf = d / case["pdf"] if case.get("pdf") else None
+    if md is None or not md.exists():
+        candidates = sorted(
+            (p for p in d.glob("report_*.md") if "_static" not in p.name and "-revised" not in p.name),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if candidates:
+            md = candidates[0]
+            # Update case dict in place so downstream callers stay consistent
+            case["md"] = md.name
+    if pdf is None or not pdf.exists():
+        if md is not None:
+            cand_pdf = md.with_suffix(".pdf")
+            if cand_pdf.exists():
+                pdf = cand_pdf
+                case["pdf"] = pdf.name
+        if pdf is None or not pdf.exists():
+            pdfs = sorted(d.glob("report_*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if pdfs:
+                pdf = pdfs[0]
+                case["pdf"] = pdf.name
+    return md, pdf
+
+
 def _report_text(case: dict) -> str:
     d = SESSIONS_DIR / case["session"]
-    md = d / case["md"]
-    if md.exists():
+    md, pdf = _resolve_report(case)
+    if md and md.exists():
         return md.read_text()
-    pdf = d / case["pdf"]
-    if not pdf.exists():
+    if not pdf or not pdf.exists():
         raise FileNotFoundError(f"No report in {d}")
     import subprocess
     r = subprocess.run(["pdftotext", str(pdf), "-"], capture_output=True, text=True)
@@ -670,7 +700,20 @@ def main():
     )
     ap.add_argument("--output-dir", default=str(RESULTS_BASE))
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--session-suffix", default="-test",
+        help="Suffix appended to case keys to form session-id (default '-test'; "
+             "use '-test-2' to point at re-runs without overwriting v1 results).",
+    )
     args = ap.parse_args()
+
+    # Apply session-suffix override to CASES (and forget hardcoded report filenames
+    # so auto-discovery picks up the latest report in the new session).
+    if args.session_suffix != "-test":
+        for ck, cfg in CASES.items():
+            cfg["session"] = f"{ck}{args.session_suffix}"
+            cfg["pdf"] = None
+            cfg["md"] = None
 
     if args.list:
         print("\nRegistered reviewers:\n")

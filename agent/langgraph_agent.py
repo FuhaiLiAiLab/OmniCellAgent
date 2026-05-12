@@ -1508,17 +1508,26 @@ From the user's question, identify:
 - Label column for the comparison (defaults to "disease"; set to "gender" if
   the question is specifically about female-vs-male differences within a cohort)
 
-## DISEASE NAME VARIATIONS (use EXACT names):
-- Alzheimer's → "Alzheimer disease"
-- Lung cancer → "lung adenocarcinoma"
+## DISEASE NAME VARIATIONS (use EXACT names — verified against OmniCellTOSG DB):
+- Alzheimer's → "Alzheimer's disease"   (note the apostrophe; "Alzheimer disease" without apostrophe returns NO match)
+- Lung cancer / NSCLC → "lung adenocarcinoma"
 - Breast cancer → "breast cancer"
 - Colon cancer → "colorectal cancer"
-- Pancreatic cancer → "pancreatic ductal adenocarcinoma"
+- Pancreatic cancer / PDAC → "pancreatic ductal adenocarcinoma"
 
 ## ORGAN MAPPING (use EXACT names):
 - Alzheimer's → "brain"
 - Lung cancer → "lung"
 - Breast cancer → "breast"
+
+## RETRY ON FAILURE (use the tool's own suggestions)
+If the tool returns `success: false`, inspect the result for BOTH:
+- `similar_terms`: dict of soft-matching adjustments (rarely present on hard miss)
+- `suggestions`: a text block listing nearby valid terms from the DB,
+  e.g. "disease: 'Alzheimer disease' -> try ['Alzheimer's disease', ...]"
+On the next attempt, pick ONE alternative from `suggestions` (verbatim — keep
+the apostrophe / capitalization exactly as listed) and retry. Do this at most
+once per failed call to avoid loops.
 
 ## LABEL COLUMN (default "disease")
 - label="disease" (default) → disease vs non-disease comparison (uses matched

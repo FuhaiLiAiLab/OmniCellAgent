@@ -71,12 +71,31 @@ CASES: dict[str, dict[str, str]] = {
 REVIEWERS = ["apr", "litllm", "openrev"]
 
 
+def _resolve_latest_report(case: dict) -> Path:
+    """Resolve the latest report_*.md in the session dir.
+    Updates case['md']/case['pdf'] in place when auto-discovery succeeds."""
+    d = SESSIONS_DIR / case["session"]
+    md = d / case["md"] if case.get("md") else None
+    if md is None or not md.exists():
+        candidates = sorted(
+            (p for p in d.glob("report_*.md") if "_static" not in p.name and "-revised" not in p.name),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            raise FileNotFoundError(f"No report_*.md found in {d}")
+        md = candidates[0]
+        case["md"] = md.name
+        pdf = md.with_suffix(".pdf")
+        if pdf.exists():
+            case["pdf"] = pdf.name
+    return md
+
+
 def _read_original_report(case: dict) -> str:
     """Read the original markdown report."""
-    md_path = SESSIONS_DIR / case["session"] / case["md"]
-    if md_path.exists():
-        return md_path.read_text()
-    raise FileNotFoundError(f"Report not found: {md_path}")
+    md_path = _resolve_latest_report(case)
+    return md_path.read_text()
 
 
 def _aggregate_feedback(case_key: str) -> str:
@@ -644,7 +663,31 @@ async def main():
     parser.add_argument("--skip-review", action="store_true", help="Skip re-review step")
     parser.add_argument("--visualize", action="store_true", help="Only visualize existing results")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing results")
+    parser.add_argument(
+        "--session-suffix", default="-test",
+        help="Suffix to append to case keys to form session id (default '-test'). "
+             "Use '-test-2' to point at re-runs.",
+    )
+    parser.add_argument(
+        "--results-dir", default=None,
+        help="Override RESULTS_BASE (default benchmark/ai_review_results). "
+             "Set to ai_review_results_v2 to keep v1 outputs intact.",
+    )
     args = parser.parse_args()
+
+    # Apply session-suffix and results-dir overrides BEFORE any case reads happen.
+    global RESULTS_BASE
+    if args.session_suffix != "-test":
+        for ck, cfg in CASES.items():
+            cfg["session"] = f"{ck}{args.session_suffix}"
+            cfg["pdf"] = None
+            cfg["md"] = None
+    if args.results_dir:
+        RESULTS_BASE = Path(args.results_dir)
+        if not RESULTS_BASE.is_absolute():
+            RESULTS_BASE = PROJECT_ROOT / "benchmark" / args.results_dir
+        RESULTS_BASE.mkdir(parents=True, exist_ok=True)
+        print(f"📁 Using results dir: {RESULTS_BASE}")
 
     print("\n" + "=" * 70)
     print("🔬 Paper Improvement & Review Pipeline")

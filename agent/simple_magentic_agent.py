@@ -340,12 +340,12 @@ From the user's question, identify:
 ## STEP 2: CALL THE TOOL WITH YOUR BEST EXTRACTION
 Call omic_analysis with the extracted parameters using your best judgment.
 
-DISEASE NAME VARIATIONS (use EXACT names):
-- Alzheimer's → "Alzheimer disease"
-- Lung cancer → "lung adenocarcinoma"
+DISEASE NAME VARIATIONS (use EXACT names — verified against OmniCellTOSG DB):
+- Alzheimer's → "Alzheimer's disease"   (note the apostrophe; "Alzheimer disease" returns NO match)
+- Lung cancer / NSCLC → "lung adenocarcinoma"
 - Breast cancer → "breast cancer"
 - Colon cancer → "colorectal cancer"
-- Pancreatic cancer → "pancreatic ductal adenocarcinoma"
+- Pancreatic cancer / PDAC → "pancreatic ductal adenocarcinoma"
 - Leukemia → "leukemia"
 
 ORGAN MAPPING (use EXACT names):
@@ -374,16 +374,18 @@ EXAMPLE CALLS:
 ✓ omic_analysis(disease="breast cancer", organ="breast", cell_type="epithelial cell")
 ✓ omic_analysis(disease="Alzheimer disease", organ="brain", label="gender")  # sex DE
 
-## STEP 3: CHECK THE RESPONSE FOR "similar_terms"
-The tool will return:
+## STEP 3: CHECK THE RESPONSE FOR ALIAS HINTS
+The tool will return one of:
 - "success": true → DATA FOUND, report results
-- "success": false with "similar_terms" → NO EXACT MATCH, RETRY with one of the suggested terms
-- "success": false with no suggestions → NO DATA AVAILABLE, report failure
+- "success": false WITH "similar_terms" (dict of soft-matching adjustments) → soft-match note
+- "success": false WITH "suggestions" (text block listing nearby valid terms) → RETRY using one alternative
+- "success": false with neither → NO DATA AVAILABLE, report failure
 
 ## RETRY LOGIC - WHEN TO RETRY
-✓ DO RETRY if response contains "similar_terms" → Try ONE alternative from the list
-✓ DO RETRY if response suggests the disease/organ combination doesn't exist in the database
-✗ DO NOT RETRY if you've already tried similar_terms and got another "no match" result
+✓ DO RETRY if response contains "similar_terms" OR "suggestions" → pick ONE alternative,
+   copy it VERBATIM (apostrophe, capitalization), then call the tool again.
+✓ DO RETRY if the response says NO_SUBSET / no match
+✗ DO NOT RETRY if you've already retried with a suggestion and got another miss
 ✗ DO NOT RETRY more than 2 times total
 
 ## CRITICAL INSTRUCTIONS

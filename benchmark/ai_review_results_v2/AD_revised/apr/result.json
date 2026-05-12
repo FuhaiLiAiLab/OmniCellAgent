@@ -1,0 +1,10 @@
+{
+  "reviews": {
+    "gpt4o": 3225,
+    "gpt4o_mini": 4653
+  },
+  "meta_review_chars": 3016,
+  "score": 5,
+  "success": true,
+  "elapsed_seconds": 33.2
+}

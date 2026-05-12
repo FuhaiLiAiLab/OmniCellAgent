@@ -556,13 +556,17 @@ def create_cover_page_pdf(output_path: Path, toc_entries: list) -> bool:
     return True
 
 
-def find_report_mds(sessions_dir: Path) -> dict:
-    """Find all report markdown files organized by case study."""
+def find_report_mds(sessions_dir: Path, session_suffix: str = "-test") -> dict:
+    """Find all report markdown files organized by case study.
+
+    session_suffix is appended to the case key to form the session dir name
+    (e.g. 'AD' + '-test' → 'AD-test'; '-test-2' → 'AD-test-2').
+    """
     case_studies = ['AD', 'PDAC', 'LungCancer']
     results = {}
-    
+
     for case in case_studies:
-        session_dir = sessions_dir / f"{case}-test"
+        session_dir = sessions_dir / f"{case}{session_suffix}"
         if not session_dir.exists():
             print(f"⚠️  Session directory not found: {session_dir}")
             continue
@@ -588,17 +592,47 @@ def main():
     parser = argparse.ArgumentParser(description="Combine report PDFs into supplementary document")
     parser.add_argument("--skip-regenerate", action="store_true",
                         help="Skip PDF regeneration, use existing PDFs")
+    parser.add_argument(
+        "--session-suffix", default="-test",
+        help="Suffix appended to case keys to form session dir name (default '-test'). "
+             "Use '-test-2' to compile from re-runs.",
+    )
+    parser.add_argument(
+        "--output", default=None,
+        help="Output PDF filename (under logs/appendix/). Default: "
+             "'supplementary_reports.pdf' for -test, 'supplementary_reports<suffix>.pdf' otherwise.",
+    )
+    parser.add_argument(
+        "--sessions-dir", default=None,
+        help="Override sessions directory (default webapp/sessions). "
+             "The original script used webapp/assets/sessions; pass the right one for your layout.",
+    )
     args = parser.parse_args()
-    
+
     project_root = Path(__file__).parent.parent.absolute()
-    sessions_dir = project_root / "webapp" / "assets" / "sessions"
+    # Default sessions dir: try webapp/sessions first (current layout), fall back to assets/sessions
+    if args.sessions_dir:
+        sessions_dir = Path(args.sessions_dir)
+        if not sessions_dir.is_absolute():
+            sessions_dir = project_root / args.sessions_dir
+    else:
+        sessions_dir = project_root / "webapp" / "sessions"
+        if not sessions_dir.exists():
+            sessions_dir = project_root / "webapp" / "assets" / "sessions"
     export_dir = project_root / "logs" / "appendix"
     export_dir.mkdir(parents=True, exist_ok=True)
-    
-    output_path = export_dir / "supplementary_reports.pdf"
-    
-    print("🔍 Searching for report markdown files...")
-    reports = find_report_mds(sessions_dir)
+
+    if args.output:
+        output_path = export_dir / args.output
+    elif args.session_suffix == "-test":
+        output_path = export_dir / "supplementary_reports.pdf"
+    else:
+        # Sanitize suffix for filename use (-test-2 → _test_2)
+        sanitized = args.session_suffix.replace("/", "_").lstrip("-")
+        output_path = export_dir / f"supplementary_reports_{sanitized}.pdf"
+
+    print(f"🔍 Searching for report markdown files (session_suffix='{args.session_suffix}', sessions_dir={sessions_dir})...")
+    reports = find_report_mds(sessions_dir, session_suffix=args.session_suffix)
     
     if not reports:
         print("❌ No reports found!")
