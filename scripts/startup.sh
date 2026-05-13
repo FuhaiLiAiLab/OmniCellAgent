@@ -55,9 +55,11 @@ echo "Started GRetriever Service"
 # nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/omic_fetch_analysis_workflow_microservice.py" > "$LOG_DIR/omic_load_fetch_service.log" 2>&1 &
 # echo "Started Omic Fetch Analysis Service"
 
-# Start GLiNER Service
-nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/microservice/gliner_service.py" > "$LOG_DIR/gliner_service.log" 2>&1 &
-echo "Started GLiNER Service"
+# GLiNER Service intentionally disabled — the LangGraph agent path does its
+# own NER via the LLM, and the package isn't installed in langgraph-dev.
+# Re-enable below if you want text-mode NER for the omic_fetch_analysis CLI.
+# nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/microservice/gliner_service.py" > "$LOG_DIR/gliner_service.log" 2>&1 &
+# echo "Started GLiNER Service"
 
 # Start BioBERT Service
 nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/microservice/biobert_service.py" > "$LOG_DIR/biobert_service.log" 2>&1 &

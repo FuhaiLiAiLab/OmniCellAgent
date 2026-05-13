@@ -2274,6 +2274,75 @@ Include:
 - Generate testable hypotheses with mechanism descriptions
 - All citations must include DOI or PMID
 - **IMPORTANT**: If no evidence exists for a claim, explicitly state "No direct evidence found" - do NOT fabricate or extrapolate unsupported claims
+
+## DRUG-TARGET NETWORK FIGURE (REQUIRED)
+Near the end of the report — after the hypotheses section, before the validation
+experiments — insert ONE fenced code block describing a small drug-target
+network that visualises the top DEGs and any candidate therapeutics you have
+literature evidence for. The block must use the exact fence
+``` ```graph-spec``` ``` and contain a JSON object with the schema below.
+A renderer will replace the block with an actual PNG figure when the report
+is saved.
+
+Schema:
+
+```graph-spec
+{{
+  "title": "<short title; will be used as alt-text and caption>",
+  "subtitle": "<optional one-line context>",
+  "filename_hint": "<lowercase_snake_case_id>",
+  "nodes": [
+    {{"id": "GENE_SYMBOL", "type": "gene", "weight": 0.0-1.0, "role": "hub|regular"}},
+    {{"id": "DRUG_NAME",   "type": "drug", "status": "approved|investigational|preclinical|unknown"}}
+  ],
+  "edges": [
+    {{"source": "GENE_A", "target": "GENE_B", "type": "gene-gene", "weight": 0.0-1.0}},
+    {{"source": "GENE_A", "target": "DRUG_X", "type": "target-drug", "evidence": "PMID:12345"}}
+  ]
+}}
+```
+
+Guidelines — favour DENSITY over conservatism:
+
+- **Include EVERY gene** that appears in any of the task results above
+  (DEGs from omic mining, knowledge-graph hits, pathway-enrichment hits,
+  literature-validated targets, scientist-synthesis recommendations).
+  Do NOT truncate to a "top-N" — include every gene you can identify
+  from the prior task context. Mark the few highest-FDR / highest-impact
+  ones as `"role": "hub"`.
+- **Include EVERY drug** that was retrieved at any point — KG neighbour
+  drugs, drugs mentioned in PubMed papers, drugs from the Google search,
+  drugs suggested by the scientist agents. Use the real evidence PMID/DOI
+  for `evidence`; if multiple sources support the same target-drug pair,
+  pick the most specific PMID/DOI rather than dropping the edge.
+- **Include EVERY interaction** you can recall from the prior task
+  context, not just a sample. Sources you must mine for edges:
+    * Knowledge-graph neighbours from `BioMarkerKGAgent` — every drug,
+      pathway, GO term, or disease the KG returned as a first-neighbour
+      of a DEG.
+    * Pathway co-membership from your KEGG / Reactome / GO enrichment
+      results — every gene pair that appears together in an enriched
+      term should produce a gene-gene edge (re-use the `Genes` column
+      of the enrichment CSVs you can see in the task results).
+    * Co-mention in a single retrieved paper as interacting / co-regulated.
+    * Well-established protein complexes or signalling cascades that
+      were named in the report (OXPHOS, ribosomal subunit, IL-1 family,
+      RAS/MAPK cascade, …).
+- An EDGE you can justify from prior context is ALWAYS better than no
+  edge — when in doubt, include it and set `evidence` to the source
+  ("KEGG:hsa00190", "PrimeKG", "PMID:nnn"). The renderer can handle
+  dense graphs; sparseness is the bigger readability problem.
+- Do NOT invent novel interactions out of thin air. The rule is
+  "include if I retrieved evidence", not "include any gene-pair that
+  sounds biologically reasonable".
+- Use the exact gene symbols from the DE results so the figure agrees
+  with the tables above it. **Drop any orphan node** (no edges at all)
+  before emitting the spec — orphan nodes only clutter the figure.
+- It is fine — and encouraged — to emit 30, 50, or 100 nodes if that
+  reflects what you actually pulled from prior task results. Do NOT
+  cap the size of the network. The figure renderer is sized adaptively.
+- Do NOT include this block if you have fewer than 3 drug-evidence pairs;
+  omit silently rather than fabricate.
 """
         
         response = await self.llm.ainvoke([
@@ -2730,16 +2799,32 @@ query: {query}
             
             # Write full report with appendix
             full_report = header + report + appendix
+
+            # Render any ```graph-spec``` blocks the reporter emitted into PNGs
+            # under <session>/network_plots/ and rewrite the markdown to embed
+            # those PNGs via standard ![](…) syntax so pandoc picks them up.
+            try:
+                from agent.network_renderer import render_specs_in_markdown
+                full_report, generated = render_specs_in_markdown(
+                    full_report, session_dir, relative_image_dir="network_plots"
+                )
+                if generated:
+                    print(f"🖼  Rendered {len(generated)} drug-target network figure(s):")
+                    for p in generated:
+                        print(f"   - {p}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"⚠️  network_renderer post-process failed: {exc}")
+
             with open(report_path, 'w', encoding='utf-8') as f:
                 f.write(full_report)
-            
+
             print(f"📝 Markdown report saved: {report_path}")
-            
+
             # Compile to PDF
             pdf_path = self._compile_pdf(report_path)
             if pdf_path:
                 print(f"✅ Report available as both MD and PDF")
-            
+
             return report_path
             
         except Exception as e:
@@ -2776,6 +2861,15 @@ Your job is to **edit the report according to the feedback** while preserving th
    "⚠️ This addition would require re-running the analysis pipeline." and leave
    a placeholder — do NOT hallucinate results.
 6. Return the COMPLETE revised report in Markdown (not just the diff).
+7. **PRESERVE the drug-target network figure.** If the original report
+   contains either an embedded image ``![…](network_plots/…)`` or a
+   ```graph-spec``` fenced JSON block, keep an equivalent block in the
+   revised report so the renderer can produce a figure for the revised
+   PDF too. If the original embedded an image and you want the figure
+   regenerated (e.g. to add genes the reviewer suggested), emit a fresh
+   ```graph-spec``` block matching the schema described at the end of
+   the original report — keep the same `filename_hint` value so the
+   image filename is stable. Do NOT silently drop the network figure.
 
 ---
 
@@ -2838,6 +2932,22 @@ revision_feedback: |
 
 """
             full_report = header + report
+
+            # Same network-renderer post-process as the first-run save path:
+            # if the revised report still contains a ```graph-spec``` block,
+            # render it into network_plots/ and rewrite the markdown.
+            try:
+                from agent.network_renderer import render_specs_in_markdown
+                full_report, generated = render_specs_in_markdown(
+                    full_report, session_dir, relative_image_dir="network_plots"
+                )
+                if generated:
+                    print(f"🖼  Rendered {len(generated)} drug-target network figure(s) (revised):")
+                    for p in generated:
+                        print(f"   - {p}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"⚠️  network_renderer post-process failed (revised): {exc}")
+
             with open(report_path, 'w', encoding='utf-8') as f:
                 f.write(full_report)
 
