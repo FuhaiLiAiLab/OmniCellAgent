@@ -6,6 +6,11 @@
 !.env.example
 !**/.env.example
 
+experimental/*
+
+benchmark/peer_review_results/*
+benchmark/ai_review_results_test-3/*
+
 # Ignore actual config .env files but allow examples
 configs/*.env
 !configs/*.env.example
@@ -43,6 +48,7 @@ models/*
 
 benchmark/peer_review_results/*
 benchmark/ai_review_results/*
+benchmark/ai_review_results_test-3/*
 tools/omic_tools/outputs/*
 
 db_cache/*

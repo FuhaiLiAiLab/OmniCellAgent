@@ -157,6 +157,12 @@ def render_drug_target_network(
     Rscript is missing, the R script errors out, or the R packages
     aren't installed.
 
+    Side effect: alongside ``<base>.png`` we also write ``<base>.spec.json``
+    (the exact spec dict consumed by the renderer) and drop a
+    self-contained ``network_renderer.R`` + ``rerender.sh`` into the
+    output folder so the figure can be re-rendered after manual edits
+    to either the spec or the R script.
+
     Returns the PNG path on success, ``None`` on failure (so the
     pipeline keeps going).
     """
@@ -169,6 +175,13 @@ def render_drug_target_network(
 
         out_path = _resolve_output_path(spec, out_dir, filename_hint)
 
+        # Always persist the spec next to the PNG so a human can edit
+        # it and re-run the renderer without round-tripping through the
+        # LLM. We write this BEFORE rendering so the JSON is available
+        # even if rendering fails downstream.
+        _write_spec_sidecar(spec, out_path)
+        _ensure_local_render_assets(out_dir)
+
         # ── Try R first ─────────────────────────────────────────────
         r_path = _try_r_renderer(spec, out_path)
         if r_path is not None:
@@ -180,6 +193,115 @@ def render_drug_target_network(
     except Exception as exc:  # noqa: BLE001
         print(f"[network_renderer] render failed: {exc}")
         return None
+
+
+def _write_spec_sidecar(spec: dict[str, Any], png_path: Path) -> Path:
+    """Write the spec as JSON next to the PNG (same basename, ``.spec.json``)."""
+    spec_path = png_path.with_suffix("").with_suffix(".spec.json")
+    spec_path.write_text(json.dumps(spec, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+    return spec_path
+
+
+def _ensure_local_render_assets(out_dir: Path) -> None:
+    """Drop a self-contained renderer + helper script into ``out_dir``.
+
+    The agent invokes the renderer from ``agent/network_renderer.R``; for
+    user-facing re-renders we copy that script and a small ``rerender.sh``
+    into the output folder so the figures can be regenerated after
+    hand-edits to either the spec JSON or the R rendering code.
+
+    Existing copies are left in place when their content matches, so we
+    don't trample over a user's local edits to ``network_renderer.R``.
+    """
+    import shutil
+
+    r_src = Path(__file__).resolve().parent / "network_renderer.R"
+    r_dst = out_dir / "network_renderer.R"
+    if r_src.exists():
+        try:
+            if not r_dst.exists() or r_dst.read_text() != r_src.read_text():
+                shutil.copy2(r_src, r_dst)
+        except OSError as exc:
+            print(f"[network_renderer] could not copy R script to {r_dst}: {exc}")
+
+    rerender_dst = out_dir / "rerender.sh"
+    rerender_body = _RERENDER_SH_BODY
+    try:
+        if not rerender_dst.exists() or rerender_dst.read_text() != rerender_body:
+            rerender_dst.write_text(rerender_body, encoding="utf-8")
+            rerender_dst.chmod(0o755)
+    except OSError as exc:
+        print(f"[network_renderer] could not write {rerender_dst}: {exc}")
+
+    readme_dst = out_dir / "README.md"
+    if not readme_dst.exists():
+        try:
+            readme_dst.write_text(_RENDER_README_BODY, encoding="utf-8")
+        except OSError as exc:
+            print(f"[network_renderer] could not write {readme_dst}: {exc}")
+
+
+_RERENDER_SH_BODY = """#!/usr/bin/env bash
+# Re-render every *.spec.json in this directory back into a PNG using the
+# local network_renderer.R. Edit the JSON (or the R script) and re-run.
+#
+#     ./rerender.sh                 # re-render all specs
+#     ./rerender.sh foo.spec.json   # re-render a single spec
+set -euo pipefail
+cd "$(dirname "$0")"
+
+if ! command -v Rscript >/dev/null 2>&1; then
+  echo "Rscript not found on PATH; install R or use the matplotlib fallback." >&2
+  exit 1
+fi
+
+shopt -s nullglob
+targets=("$@")
+if [ ${#targets[@]} -eq 0 ]; then
+  targets=( *.spec.json )
+fi
+if [ ${#targets[@]} -eq 0 ]; then
+  echo "no *.spec.json files found in $(pwd)" >&2
+  exit 1
+fi
+
+for spec in "${targets[@]}"; do
+  out="${spec%.spec.json}.png"
+  echo "[rerender] $spec -> $out"
+  Rscript --vanilla ./network_renderer.R --spec "$spec" --out "$out"
+done
+"""
+
+
+_RENDER_README_BODY = """# network_plots/
+
+Each figure here has three files with the same basename:
+
+- ``<name>.png`` — the rendered figure embedded in the report
+- ``<name>.spec.json`` — the graph spec (nodes / edges / styling) the
+  reporter agent emitted; this is what the renderer consumed
+- ``network_renderer.R`` — a copy of the R rendering code, so the figure
+  can be regenerated locally without any project-side imports
+
+## Adjusting a figure by hand
+
+1. Open ``<name>.spec.json`` and edit nodes, edges, statuses, weights,
+   ``title``/``subtitle``, etc. The schema is documented at the top of
+   ``network_renderer.R``.
+2. Optionally tweak ``network_renderer.R`` for styling changes (font
+   size, layout choice, colour palette).
+3. Re-render:
+
+   ```bash
+   ./rerender.sh                       # rebuild every PNG in this folder
+   ./rerender.sh <name>.spec.json      # rebuild just one
+   ```
+
+   Requires ``Rscript`` plus the R packages listed at the top of
+   ``network_renderer.R`` (``igraph``, ``ggraph``, ``ggrepel``,
+   ``tidygraph``, ``jsonlite``, ``optparse``, ``graphlayouts``).
+"""
 
 
 def _try_r_renderer(spec: dict[str, Any], out_path: Path) -> Path | None:

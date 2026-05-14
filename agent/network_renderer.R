@@ -95,38 +95,109 @@ density_params <- function(g) {
   v <- max(1L, vcount(g))
   e <- ecount(g)
   list(
-    # Dynamic canvas: bigger-but-bounded.  Empirically tuned: 8" base,
-    # +sqrt(v) inches per ~12 extra nodes, capped at 18" so the PDF
-    # renderer keeps it inside a single page width.
-    width  = min(18, 8 + sqrt(v) * 0.95),
-    height = min(14, 6.5 + sqrt(v) * 0.78),
-    # Gene marker size range scales softly with density.
-    node_size_range = if (v <= 12) c(4, 9)
-                      else if (v <= 40) c(3, 7)
-                      else c(2, 5),
-    label_size = if (v <= 12) 3.4
-                 else max(2.4, 3.4 * (12 / v) ^ 0.30),
+    # Dynamic canvas: prefer a near-square aspect so packed components
+    # don't all line up in a single horizontal row.  Slightly more
+    # generous than the previous tuning to give labels room to breathe.
+    width  = min(16, 8.0 + sqrt(v) * 0.6),
+    height = min(14, 7.0 + sqrt(v) * 0.6),
+    node_size_range = if (v <= 12) c(4.5, 10)
+                      else if (v <= 40) c(3.5, 8)
+                      else c(2.5, 6),
+    # Bigger labels across the board — previous floors (3.0 / 4.0)
+    # rendered too small once the PDF fit the image to column width.
+    label_size = if (v <= 12) 5.0
+                 else max(3.8, 5.0 * (12 / v) ^ 0.28),
     show_edge_labels = e <= 30,
-    edge_label_size = max(2.0, 2.6 * (12 / max(1, e)) ^ 0.25)
+    edge_label_size = max(2.8, 3.2 * (12 / max(1, e)) ^ 0.22)
   )
 }
 
 # --------- Layout chooser (best-practice #3 + Yifei's recommendation) --------
+#
+# When the spec has several disconnected components (the common case when
+# the LLM emits many drug→target dyads without gene-gene bridges), the
+# default stress layout puts every component side-by-side and the figure
+# reads as "several graphlets next to each other".  We use a custom
+# grid packer that places component centroids on a near-square grid so
+# the components fill the canvas evenly in both dimensions, instead of
+# ggraph's default "concatenate side-by-side" or igraph's leftward
+# rectangle packing.
 choose_layout <- function(g) {
   v <- vcount(g)
   if (v <= 8) {
     return(create_layout(g, "fr"))
   }
-  if (v <= 50) {
-    return(create_layout(g, "stress"))
+
+  # Pick the per-component (a.k.a. sub-graph) layout function.
+  sub_layout_fn <- if (v <= 50) {
+    function(sg) graphlayouts::layout_with_stress(sg)
+  } else {
+    density <- edge_density(g)
+    charge  <- 0.001 + density * 0.05
+    function(sg) igraph::layout_with_graphopt(
+      sg, charge = charge, mass = 30, spring.length = 2,
+      max.sa.movement = 0.1
+    )
   }
-  # Very dense — let graphopt do its thing with density-scaled repulsion.
-  density <- edge_density(g)
-  charge  <- 0.001 + density * 0.05
-  create_layout(g, "igraph",
-                algorithm = "graphopt",
-                charge = charge,
-                mass = 30, spring.length = 2, max.sa.movement = 0.1)
+
+  comps  <- igraph::components(g)
+  coords <- matrix(0, nrow = v, ncol = 2)
+
+  if (comps$no <= 1) {
+    coords <- sub_layout_fn(g)
+  } else {
+    # ── Custom grid packer ──────────────────────────────────────────
+    # Lay each component out in isolation, normalise to its own bbox,
+    # then place component centroids on a sqrt(n) × sqrt(n) grid.  This
+    # gives a far more even canvas fill than `layout_components`'s
+    # bin-packing, which collapses many small dyads into a single row.
+    comp_ids <- comps$membership
+    n_comp   <- comps$no
+    # Sort components largest-first so big components claim the top-left
+    # cells and the eye reads them first.
+    sizes <- as.integer(table(comp_ids))
+    order_comp <- order(sizes, decreasing = TRUE)
+    # Grid dimensions — slight bias to wider grids for canvas aspect.
+    n_cols <- ceiling(sqrt(n_comp))
+    n_rows <- ceiling(n_comp / n_cols)
+    # Per-cell footprint — tuned so cells don't overlap and there's a
+    # comfortable gutter between components (~25% of cell size).
+    cell_w <- 2.5
+    cell_h <- 2.5
+    for (k in seq_len(n_comp)) {
+      cid     <- order_comp[k]
+      members <- which(comp_ids == cid)
+      sg      <- igraph::induced_subgraph(g, members)
+      sub_xy  <- if (igraph::vcount(sg) == 1) {
+        matrix(c(0, 0), ncol = 2)
+      } else {
+        sub_layout_fn(sg)
+      }
+      # Normalise this component to fit a unit box centred on (0,0).
+      cx <- (max(sub_xy[, 1]) + min(sub_xy[, 1])) / 2
+      cy <- (max(sub_xy[, 2]) + min(sub_xy[, 2])) / 2
+      rx <- max(1e-6, (max(sub_xy[, 1]) - min(sub_xy[, 1])) / 2)
+      ry <- max(1e-6, (max(sub_xy[, 2]) - min(sub_xy[, 2])) / 2)
+      sub_xy[, 1] <- (sub_xy[, 1] - cx) / rx
+      sub_xy[, 2] <- (sub_xy[, 2] - cy) / ry
+      # Translate onto its assigned grid cell (row-major, top-left first).
+      row_idx <- (k - 1) %/% n_cols
+      col_idx <- (k - 1) %%  n_cols
+      # Centre the grid around (0,0).
+      tx <- (col_idx - (n_cols - 1) / 2) * cell_w
+      ty <- ((n_rows - 1) / 2 - row_idx) * cell_h
+      coords[members, 1] <- sub_xy[, 1] + tx
+      coords[members, 2] <- sub_xy[, 2] + ty
+    }
+  }
+  # Normalise to ~[-1, 1] so downstream cosmetic scales are predictable.
+  rng <- apply(coords, 2, function(c) {
+    r <- range(c); if (diff(r) == 0) 1 else diff(r) / 2
+  })
+  ctr <- apply(coords, 2, function(c) (max(c) + min(c)) / 2)
+  coords[, 1] <- (coords[, 1] - ctr[1]) / rng[1]
+  coords[, 2] <- (coords[, 2] - ctr[2]) / rng[2]
+  create_layout(g, layout = data.frame(x = coords[, 1], y = coords[, 2]))
 }
 
 # --------- Render ------------------------------------------------------------
@@ -188,19 +259,21 @@ render <- function(spec, out_path) {
                    size              = dp$label_size,
                    repel             = TRUE,
                    max.overlaps      = Inf,
-                   point.padding     = 0.45,
-                   box.padding       = 0.55,
-                   force             = 2.5,
-                   force_pull        = 0.1,
+                   point.padding     = 0.3,    # was 0.45 — let labels sit closer to nodes
+                   box.padding       = 0.32,   # was 0.55 — less aggressive box-around-text
+                   force             = 1.4,    # was 2.5 — softer repulsion
+                   force_pull        = 0.5,    # was 0.1 — stronger pull back toward node
                    min.segment.length = 0.15,
                    segment.size      = 0.25,
                    segment.colour    = "#9ca3af",
                    bg.colour         = "white",
                    bg.r              = 0.12,
                    family            = "sans") +
-    # Best-practice #2 — expand axes so ggrepel can push outwards
-    scale_x_continuous(expand = expansion(mult = 0.22)) +
-    scale_y_continuous(expand = expansion(mult = 0.22)) +
+    # Axis expansion — narrower than v1; was 0.22, now 0.12 so the
+    # network actually fills the canvas instead of looking lost in
+    # whitespace.  ggrepel still has clip="off" to bleed into margin.
+    scale_x_continuous(expand = expansion(mult = 0.12)) +
+    scale_y_continuous(expand = expansion(mult = 0.12)) +
     coord_cartesian(clip = "off") +
     ggtitle(spec$title %||% "Drug-target network",
             subtitle = spec$subtitle %||% NULL) +
@@ -234,7 +307,9 @@ render <- function(spec, out_path) {
         size = dp$edge_label_size,
         colour = "#1f2937",
         fill = scales::alpha("white", 0.85),
-        label.size = NA,
+        # `label.size` was renamed to `linewidth` in ggplot2 3.5; use the
+        # new name to silence the deprecation warning.
+        linewidth = 0,
         label.padding = unit(0.10, "lines"),
         inherit.aes = FALSE
       )

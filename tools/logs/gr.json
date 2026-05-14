@@ -3,28 +3,28 @@
   "results": [
     {
       "rank": "#1",
-      "name": "WASH2P",
-      "summary": "Name: WASP family homolog 2, pseudogene"
+      "name": "TAFA3",
+      "summary": "Name: TAFA chemokine like family member 3"
     },
     {
       "rank": "#2",
-      "name": "WASHC2A",
-      "summary": "Name: WASH complex subunit 2A"
+      "name": "TAFA1",
+      "summary": "Name: TAFA chemokine like family member 1"
     },
     {
       "rank": "#3",
-      "name": "WASHC2C",
-      "summary": "Name: WASH complex subunit 2C"
+      "name": "PI-3K cascade:FGFR3",
+      "summary": "The ability of growth factors to protect from apoptosis is primarily due to the activation of the AKT survival pathway. P-I-3-kinase dependent activation of PDK leads to the activation of AKT which in turn affects the activity or expression of pro-apoptotic factors, which contribute to protection from apoptosis. AKT activation also blocks the activity of GSK-3b which could lead to additional antiapoptotic signals."
     },
     {
       "rank": "#4",
-      "name": "WASHC1",
-      "summary": "Name: WASH complex subunit 1"
+      "name": "YAP1- and WWTR1 (TAZ)-stimulated gene expression",
+      "summary": "YAP1 and WWTR1 (TAZ) are transcriptional co-activators, both homologues of the Drosophila Yorkie protein. They both interact with members of the TEAD family of transcription factors, and WWTR1 interacts as well with TBX5 and RUNX2, to promote gene expression. Their transcriptional targets include genes critical to regulation of cell proliferation and apoptosis. Their subcellular location is regulated by the Hippo signaling cascade: phosphorylation mediated by this cascade leads to the cytosolic sequestration of both proteins (Murakami et al. 2005; Oh and Irvine 2010)."
     },
     {
       "rank": "#5",
-      "name": "WASHC4",
-      "summary": "Name: WASH complex subunit 4"
+      "name": "TRAF3IP2-AS1",
+      "summary": "Name: TRAF3IP2 antisense RNA 1"
     }
   ]
 }
