@@ -146,48 +146,76 @@ choose_layout <- function(g) {
   if (comps$no <= 1) {
     coords <- sub_layout_fn(g)
   } else {
-    # ── Custom grid packer ──────────────────────────────────────────
-    # Lay each component out in isolation, normalise to its own bbox,
-    # then place component centroids on a sqrt(n) × sqrt(n) grid.  This
-    # gives a far more even canvas fill than `layout_components`'s
-    # bin-packing, which collapses many small dyads into a single row.
-    comp_ids <- comps$membership
-    n_comp   <- comps$no
-    # Sort components largest-first so big components claim the top-left
-    # cells and the eye reads them first.
-    sizes <- as.integer(table(comp_ids))
-    order_comp <- order(sizes, decreasing = TRUE)
-    # Grid dimensions — slight bias to wider grids for canvas aspect.
-    n_cols <- ceiling(sqrt(n_comp))
-    n_rows <- ceiling(n_comp / n_cols)
-    # Per-cell footprint — tuned so cells don't overlap and there's a
-    # comfortable gutter between components (~25% of cell size).
-    cell_w <- 2.5
-    cell_h <- 2.5
-    for (k in seq_len(n_comp)) {
-      cid     <- order_comp[k]
-      members <- which(comp_ids == cid)
-      sg      <- igraph::induced_subgraph(g, members)
-      sub_xy  <- if (igraph::vcount(sg) == 1) {
-        matrix(c(0, 0), ncol = 2)
-      } else {
-        sub_layout_fn(sg)
+    # ── Custom packer ──────────────────────────────────────────────
+    # Multi-node components are laid out on a near-square grid with
+    # cell sizes that scale with sqrt(component size), so singletons
+    # don't claim the same footprint as a 10-node cluster.  Any pure
+    # singletons are then collapsed into a compact strip below the
+    # grid, instead of getting one full grid cell each.
+    comp_ids   <- comps$membership
+    sizes_full <- as.integer(table(comp_ids))
+    multi_ids  <- which(sizes_full > 1)
+    single_ids <- which(sizes_full == 1)
+
+    # If literally everything is a singleton, fall back to one tidy row.
+    if (length(multi_ids) == 0) {
+      n_s <- length(single_ids)
+      cols <- max(1, ceiling(sqrt(n_s * 1.6)))
+      for (k in seq_len(n_s)) {
+        m <- which(comp_ids == single_ids[k])
+        row_idx <- (k - 1) %/% cols
+        col_idx <- (k - 1) %%  cols
+        coords[m, 1] <- (col_idx - (cols - 1) / 2) * 1.6
+        coords[m, 2] <- -row_idx * 1.6
       }
-      # Normalise this component to fit a unit box centred on (0,0).
-      cx <- (max(sub_xy[, 1]) + min(sub_xy[, 1])) / 2
-      cy <- (max(sub_xy[, 2]) + min(sub_xy[, 2])) / 2
-      rx <- max(1e-6, (max(sub_xy[, 1]) - min(sub_xy[, 1])) / 2)
-      ry <- max(1e-6, (max(sub_xy[, 2]) - min(sub_xy[, 2])) / 2)
-      sub_xy[, 1] <- (sub_xy[, 1] - cx) / rx
-      sub_xy[, 2] <- (sub_xy[, 2] - cy) / ry
-      # Translate onto its assigned grid cell (row-major, top-left first).
-      row_idx <- (k - 1) %/% n_cols
-      col_idx <- (k - 1) %%  n_cols
-      # Centre the grid around (0,0).
-      tx <- (col_idx - (n_cols - 1) / 2) * cell_w
-      ty <- ((n_rows - 1) / 2 - row_idx) * cell_h
-      coords[members, 1] <- sub_xy[, 1] + tx
-      coords[members, 2] <- sub_xy[, 2] + ty
+    } else {
+      multi_sizes <- sizes_full[multi_ids]
+      ord <- order(multi_sizes, decreasing = TRUE)
+      multi_ids <- multi_ids[ord]
+      multi_sizes <- multi_sizes[ord]
+
+      # Grid dims for multi-node components (near-square, slight wide bias).
+      n_m    <- length(multi_ids)
+      n_cols <- max(1, ceiling(sqrt(n_m)))
+      n_rows <- ceiling(n_m / n_cols)
+      # Reference cell size — components get scale ∝ sqrt(size) but
+      # capped so a single huge cluster doesn't push everything off-canvas.
+      base_cell <- 2.6
+      scale_of <- function(sz) min(1.4, max(0.5, sqrt(sz / 4)))
+
+      for (k in seq_len(n_m)) {
+        members <- which(comp_ids == multi_ids[k])
+        sg      <- igraph::induced_subgraph(g, members)
+        sub_xy  <- sub_layout_fn(sg)
+        cx <- (max(sub_xy[, 1]) + min(sub_xy[, 1])) / 2
+        cy <- (max(sub_xy[, 2]) + min(sub_xy[, 2])) / 2
+        rx <- max(1e-6, (max(sub_xy[, 1]) - min(sub_xy[, 1])) / 2)
+        ry <- max(1e-6, (max(sub_xy[, 2]) - min(sub_xy[, 2])) / 2)
+        s  <- scale_of(multi_sizes[k])
+        sub_xy[, 1] <- (sub_xy[, 1] - cx) / rx * s
+        sub_xy[, 2] <- (sub_xy[, 2] - cy) / ry * s
+        row_idx <- (k - 1) %/% n_cols
+        col_idx <- (k - 1) %%  n_cols
+        tx <- (col_idx - (n_cols - 1) / 2) * base_cell
+        ty <- ((n_rows - 1) / 2 - row_idx) * base_cell
+        coords[members, 1] <- sub_xy[, 1] + tx
+        coords[members, 2] <- sub_xy[, 2] + ty
+      }
+
+      # Compact strip of singletons under the grid (snake-wrapped if many).
+      if (length(single_ids) > 0) {
+        n_s <- length(single_ids)
+        strip_cols <- max(n_cols, ceiling(sqrt(n_s * 2.0)))
+        # Place strip just below the grid's bottom row with a small gap.
+        strip_y0 <- -((n_rows - 1) / 2 * base_cell) - base_cell * 0.9
+        for (k in seq_len(n_s)) {
+          m <- which(comp_ids == single_ids[k])
+          row_idx <- (k - 1) %/% strip_cols
+          col_idx <- (k - 1) %%  strip_cols
+          coords[m, 1] <- (col_idx - (strip_cols - 1) / 2) * 1.1
+          coords[m, 2] <- strip_y0 - row_idx * 0.9
+        }
+      }
     }
   }
   # Normalise to ~[-1, 1] so downstream cosmetic scales are predictable.
