@@ -124,8 +124,8 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
 
     # Save analysis results to outputs directory
     outputs_dir = get_path('outputs.omic_analysis', absolute=True, create=True)
-    combined_disease_df.to_csv(os.path.join(outputs_dir, "foranalysis_combined_male_df_pdac.csv"), index=False)
-    combined_normal_df.to_csv(os.path.join(outputs_dir, "foranalysis_combined_female_df_pdac.csv"), index=False)
+    combined_disease_df.to_csv(os.path.join(outputs_dir, f"foranalysis_combined_disease_df_{disease_name}.csv"), index=False)
+    combined_normal_df.to_csv(os.path.join(outputs_dir, f"foranalysis_combined_normal_df_{disease_name}.csv"), index=False)
     print(f"results saved to {outputs_dir}")
     # Create all required directories in parallel
     # Use session directory if provided, otherwise use the default OUTPUT_DIR
