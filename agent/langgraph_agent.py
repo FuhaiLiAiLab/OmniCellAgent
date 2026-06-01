@@ -831,7 +831,7 @@ async def biomarker_kg_tool(query: str) -> str:
 # AGENT DEFINITIONS
 # ==============================================================================
 
-def create_llm(model_name: str = "gemini-3-pro-preview"):
+def create_llm(model_name: str = "gemini-3.5-flash"):
     """
     Create an LLM instance based on the model name.
     Supports Google Gemini models by default.
@@ -848,7 +848,7 @@ def create_llm(model_name: str = "gemini-3-pro-preview"):
 class SubAgent:
     """Base class for specialized sub-agents"""
     
-    def __init__(self, name: str, description: str, system_message: str, tools: List, llm=None, model_name: str = "gemini-3-pro-preview"):
+    def __init__(self, name: str, description: str, system_message: str, tools: List, llm=None, model_name: str = "gemini-3.5-flash"):
         self.name = name
         self.description = description
         self.system_message = system_message
@@ -1173,7 +1173,7 @@ who leads a multidisciplinary research team. Your role is to:
         "CancerExpert":            CANCER_EXPERT_PROMPT,
     }
 
-    def __init__(self, tools: List = None, llm=None, model_name: str = "gemini-3-pro-preview"):
+    def __init__(self, tools: List = None, llm=None, model_name: str = "gemini-3.5-flash"):
         super().__init__(
             name="ScientistsAgent",
             description="Multi-expert scientist agent with RAG-backed domain experts",
@@ -1453,12 +1453,12 @@ class LangGraphOmniCellAgent:
     LangGraph-based OmniCellAgent with planning, sub-agent execution, re-planning, and reporting.
     """
     
-    def __init__(self, model_name: str = "gemini-3-pro-preview", log_dir: str = None, session_id: str = None, llm=None):
+    def __init__(self, model_name: str = "gemini-3.5-flash", log_dir: str = None, session_id: str = None, llm=None):
         """
         Initialize the LangGraph agent system.
         
         Args:
-            model_name: Name of the LLM model to use (default: gemini-2.0-flash)
+            model_name: Name of the LLM model to use (default: gemini-3.5-flash)
             log_dir: Directory to save logs
             session_id: Unique session identifier
             llm: Optional pre-configured LLM instance (any type)
@@ -3044,8 +3044,8 @@ async def main():
     parser.add_argument(
         "--model", 
         type=str, 
-        default="gemini-3-pro-preview",
-        help="Model to use (default: gemini-3-pro-preview_)"
+        default="gemini-3.5-flash",
+        help="Model to use (default: gemini-3.5-flash)"
     )
     parser.add_argument(
         "--session-id",

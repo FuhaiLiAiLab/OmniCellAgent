@@ -48,7 +48,7 @@ class UILangGraphAdapter:
     - Supports incremental conversation across multiple rounds
     """
     
-    def __init__(self, session_id: str, model_name: str = "gemini-3-pro-preview"):
+    def __init__(self, session_id: str, model_name: str = "gemini-3.5-flash"):
         """
         Initialize the UI adapter.
         
@@ -453,6 +453,6 @@ class UILangGraphAdapter:
 
 
 def create_langgraph_adapter(session_id: str, 
-                              model_name: str = "gemini-3-pro-preview") -> UILangGraphAdapter:
+                              model_name: str = "gemini-3.5-flash") -> UILangGraphAdapter:
     """Factory function to create a configured LangGraph adapter for the UI."""
     return UILangGraphAdapter(session_id=session_id, model_name=model_name)

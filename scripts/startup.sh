@@ -66,8 +66,8 @@ nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/microservice/biobert_service.py" 
 echo "Started BioBERT Service"
 
 # Start ngrok tunnel
-# nohup ngrok http --domain=agent.omni-cells.com 8050 > "$LOG_DIR/ngrok.out" 2>&1 &
-# echo "Started ngrok tunnel"
+nohup ngrok http --domain=agent.omni-cells.com 8050 > "$LOG_DIR/ngrok.out" 2>&1 &
+echo "Started ngrok tunnel"
 
 # Start Webapp (port 8050)
 nohup "$LG_PY" "$PROJECT_ROOT/webapp/index.py" > "$LOG_DIR/webapp_index.log" 2>&1 &

@@ -4,9 +4,8 @@ Combine first-run and revised PDF reports into a single supplementary document.
 
 This script:
 1. Finds all report markdown files from benchmark sessions (AD, PDAC, LungCancer)
-2. Regenerates PDFs with proper formatting (line wrapping, tables, etc.)
-3. Creates title pages for each section
-4. Combines everything into a single supplementary PDF
+2. Regenerates PDFs with the same pandoc/xelatex conversion used by benchmark/regenerate_pdfs.py
+3. Combines everything into a single supplementary PDF
 
 Outputs to: logs/appendix/supplementary_reports.pdf
 
@@ -15,7 +14,8 @@ Usage:
     python scripts/combine_supplementary_pdfs.py --skip-regenerate  # Use existing PDFs
 
 Requirements:
-    pip install PyPDF2 reportlab
+    pip install PyPDF2
+    pandoc + xelatex available on PATH for the preferred PDF conversion path
 """
 import argparse
 import os
@@ -25,7 +25,6 @@ import subprocess
 import shutil
 import textwrap
 from pathlib import Path
-from datetime import datetime
 
 try:
     from PyPDF2 import PdfMerger, PdfReader
@@ -33,14 +32,6 @@ except ImportError:
     print("❌ PyPDF2 not installed. Installing...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyPDF2"])
     from PyPDF2 import PdfMerger, PdfReader
-
-try:
-    from reportlab.lib.pagesizes import letter
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import inch
-    HAS_REPORTLAB = True
-except ImportError:
-    HAS_REPORTLAB = False
 
 
 # ---------- LaTeX header for PDF generation (same as regenerate_pdfs.py) ----------
@@ -235,9 +226,10 @@ def preprocess_markdown(md_path: str) -> str:
 
 
 def compile_pdf_from_md(md_path: str, pdf_path: str, header_file: str) -> bool:
-    """Run pandoc + xelatex to produce PDF with proper formatting."""
+    """Run pandoc + xelatex to produce PDF with the custom header."""
     session_dir = os.path.dirname(md_path)
-    
+
+    # Preprocess markdown so pandoc parses tables and long code blocks cleanly.
     fixed_md = preprocess_markdown(md_path)
     tmp_md_fd, tmp_md_path = tempfile.mkstemp(
         suffix=".md", prefix="oca_fixed_", dir=session_dir
@@ -246,7 +238,9 @@ def compile_pdf_from_md(md_path: str, pdf_path: str, header_file: str) -> bool:
         f.write(fixed_md)
 
     cmd = [
-        "pandoc", tmp_md_path, "-o", pdf_path,
+        "pandoc",
+        tmp_md_path,
+        "-o", pdf_path,
         "--pdf-engine=xelatex",
         "-H", header_file,
         "--toc", "--toc-depth=2",
@@ -260,45 +254,59 @@ def compile_pdf_from_md(md_path: str, pdf_path: str, header_file: str) -> bool:
         "--columns=72",
     ]
 
+    print(f"    ⏳ Running pandoc → xelatex …")
     result = subprocess.run(
-        cmd, capture_output=True, text=True, cwd=session_dir, timeout=300
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=session_dir,
+        timeout=300,
     )
-    
-    try:
-        os.remove(tmp_md_path)
-    except OSError:
-        pass
+
+    _cleanup(tmp_md_path)
 
     if result.returncode == 0:
+        size_kb = os.path.getsize(pdf_path) / 1024
+        print(f"    ✅ PDF generated ({size_kb:.0f} KB): {pdf_path}")
         return True
 
-    # Fallback to wkhtmltopdf
-    print(f"    ⚠️  xelatex failed, trying wkhtmltopdf fallback...")
+    print(f"    ⚠️ xelatex failed, trying wkhtmltopdf fallback …")
+    if result.stderr:
+        for line in result.stderr.strip().split("\n")[-8:]:
+            print(f"      {line}")
+
     return _fallback_wkhtmltopdf(md_path, pdf_path, session_dir, fixed_md)
 
 
 def _fallback_wkhtmltopdf(md_path: str, pdf_path: str, session_dir: str,
-                           preprocessed_text: str) -> bool:
-    """Fallback: pandoc → HTML → wkhtmltopdf."""
+                           preprocessed_text: str | None = None) -> bool:
+    """Strategy 2: pandoc → HTML → wkhtmltopdf with enhanced CSS."""
     if not shutil.which("wkhtmltopdf"):
-        print("    ❌  wkhtmltopdf not available")
+        print("    ❌ wkhtmltopdf not available either")
         return False
 
     html_path = md_path.replace(".md", ".html")
+
+    if preprocessed_text is None:
+        preprocessed_text = preprocess_markdown(md_path)
+
     tmp_md_fd, tmp_md_path = tempfile.mkstemp(
         suffix=".md", prefix="oca_html_", dir=session_dir
     )
 
     css_content = textwrap.dedent("""\
     body {
-        font-family: "DejaVu Sans", "Noto Sans", Arial, sans-serif;
-        font-size: 11pt; line-height: 1.55; color: #1a1a1a; max-width: 100%;
+        font-family: "DejaVu Sans", "Noto Sans", "Segoe UI", Roboto, Arial, sans-serif;
+        font-size: 11pt;
+        line-height: 1.55;
+        color: #1a1a1a;
+        max-width: 100%;
     }
     h1 { font-size: 1.6em; border-bottom: 2px solid #2c3e50; padding-bottom: 6px; margin-top: 30px; }
     h2 { font-size: 1.3em; border-bottom: 1px solid #bdc3c7; padding-bottom: 4px; margin-top: 24px; }
     h3 { font-size: 1.1em; margin-top: 18px; }
     h1, h2, h3 { page-break-after: avoid; }
-    
+
     /* Center images */
     p > img, figure, .figure {
         display: block !important;
@@ -313,7 +321,7 @@ def _fallback_wkhtmltopdf(md_path: str, pdf_path: str, session_dir: str,
     }
     figure { text-align: center; }
     figcaption { text-align: center; font-style: italic; margin-top: 8px; }
-    
+
     /* Tables with proper spacing */
     table {
         width: 100%;
@@ -334,10 +342,10 @@ def _fallback_wkhtmltopdf(md_path: str, pdf_path: str, session_dir: str,
     }
     th { background-color: #ecf0f1; font-weight: 600; white-space: nowrap; }
     tr:nth-child(even) { background-color: #f9f9f9; }
-    
-    /* Code blocks with wrapping */
+
+    /* Code blocks with proper wrapping */
     pre, code {
-        font-family: "DejaVu Sans Mono", monospace;
+        font-family: "DejaVu Sans Mono", "Consolas", monospace;
         font-size: 7.5pt;
         background-color: #f5f5f5;
         border-radius: 3px;
@@ -355,6 +363,9 @@ def _fallback_wkhtmltopdf(md_path: str, pdf_path: str, session_dir: str,
     code {
         word-break: break-all;
     }
+
+    blockquote { border-left: 3px solid #3498db; padding-left: 12px; color: #555; }
+    hr { border: none; border-top: 1px solid #bbb; margin: 20px 0; }
     """)
 
     css_path = os.path.join(session_dir, "_report_style.css")
@@ -366,194 +377,53 @@ def _fallback_wkhtmltopdf(md_path: str, pdf_path: str, session_dir: str,
 
     html_cmd = [
         "pandoc", tmp_md_path, "-o", html_path,
-        "--standalone", "--self-contained",
-        "--toc", "--toc-depth=2", "--highlight-style=tango",
-        "--resource-path", session_dir, "-c", css_path, "--columns=72",
+        "--standalone",
+        "--self-contained",
+        "--toc", "--toc-depth=2",
+        "--highlight-style=tango",
+        "--resource-path", session_dir,
+        "-c", css_path,
+        "--columns=72",
     ]
     r1 = subprocess.run(html_cmd, capture_output=True, text=True, cwd=session_dir, timeout=120)
-    
-    try:
-        os.remove(tmp_md_path)
-    except OSError:
-        pass
-    
+
+    _cleanup(tmp_md_path)
+
     if r1.returncode != 0:
-        try:
-            os.remove(css_path)
-        except OSError:
-            pass
+        print(f"    ❌ Pandoc HTML conversion failed: {(r1.stderr or '')[:200]}")
+        _cleanup(css_path)
         return False
 
     pdf_cmd = [
-        "wkhtmltopdf", "--enable-local-file-access",
-        "--margin-top", "18mm", "--margin-bottom", "18mm",
-        "--margin-left", "14mm", "--margin-right", "14mm",
-        "--footer-center", "[page]", "--footer-font-size", "9",
+        "wkhtmltopdf",
+        "--enable-local-file-access",
+        "--margin-top", "18mm",
+        "--margin-bottom", "18mm",
+        "--margin-left", "14mm",
+        "--margin-right", "14mm",
+        "--footer-center", "[page]",
+        "--footer-font-size", "9",
         html_path, pdf_path,
     ]
     r2 = subprocess.run(pdf_cmd, capture_output=True, text=True, cwd=session_dir, timeout=180)
-    
-    for p in [css_path, html_path]:
+
+    _cleanup(css_path, html_path)
+
+    if r2.returncode == 0:
+        size_kb = os.path.getsize(pdf_path) / 1024
+        print(f"    ✅ PDF generated via wkhtmltopdf ({size_kb:.0f} KB): {pdf_path}")
+        return True
+
+    print(f"    ❌ wkhtmltopdf failed: {(r2.stderr or '')[:200]}")
+    return False
+
+
+def _cleanup(*paths):
+    for path in paths:
         try:
-            os.remove(p)
+            os.remove(path)
         except OSError:
             pass
-
-    return r2.returncode == 0
-
-
-def create_title_page_pdf(title: str, subtitle: str, output_path: Path, 
-                           case_code: str = None, version: str = None) -> bool:
-    """Create a section divider page PDF using reportlab."""
-    if not HAS_REPORTLAB:
-        return False
-    
-    from reportlab.lib.colors import HexColor
-    
-    c = canvas.Canvas(str(output_path), pagesize=letter)
-    width, height = letter
-    
-    # Background accent stripe
-    c.setFillColor(HexColor('#2c3e50'))
-    c.rect(0, height - 2.2 * inch, width, 1.8 * inch, fill=True, stroke=False)
-    
-    # Title in white on dark background
-    c.setFillColor(HexColor('#ffffff'))
-    c.setFont("Helvetica-Bold", 32)
-    c.drawCentredString(width / 2, height - 1.3 * inch, title)
-    
-    # Subtitle
-    c.setFont("Helvetica", 18)
-    c.drawCentredString(width / 2, height - 1.8 * inch, subtitle)
-    
-    # OmniCellAgent label
-    c.setFillColor(HexColor('#34495e'))
-    c.setFont("Helvetica-Bold", 14)
-    c.drawCentredString(width / 2, height - 3 * inch, "OmniCellAgent")
-    c.setFont("Helvetica", 12)
-    c.drawCentredString(width / 2, height - 3.3 * inch, "Automated Single-Cell Analysis Report")
-    
-    # Decorative line
-    c.setStrokeColor(HexColor('#3498db'))
-    c.setLineWidth(2)
-    c.line(2 * inch, height - 3.6 * inch, width - 2 * inch, height - 3.6 * inch)
-    
-    # Case study description
-    case_descriptions = {
-        'AD': "This analysis explores differentially expressed genes and pathways\n"
-              "associated with Alzheimer's Disease using single-cell RNA sequencing data.",
-        'PDAC': "This analysis investigates molecular signatures and cellular heterogeneity\n"
-                "in Pancreatic Ductal Adenocarcinoma samples.",
-        'LungCancer': "This analysis examines gene expression patterns and therapeutic targets\n"
-                      "in Lung Cancer tumor microenvironment."
-    }
-    
-    if case_code and case_code in case_descriptions:
-        c.setFillColor(HexColor('#555555'))
-        c.setFont("Helvetica", 11)
-        desc_lines = case_descriptions[case_code].split('\n')
-        y_pos = height - 4.2 * inch
-        for line in desc_lines:
-            c.drawCentredString(width / 2, y_pos, line)
-            y_pos -= 16
-    
-    # Version indicator
-    if version:
-        version_colors = {'First Run': '#27ae60', 'Revised': '#e67e22'}
-        c.setFillColor(HexColor(version_colors.get(version, '#7f8c8d')))
-        c.setFont("Helvetica-Bold", 12)
-        c.drawCentredString(width / 2, height - 5.5 * inch, f"[ {version.upper()} ]")
-    
-    # Date at bottom
-    c.setFillColor(HexColor('#95a5a6'))
-    c.setFont("Helvetica", 10)
-    c.drawCentredString(width / 2, 1 * inch, f"Generated: {datetime.now().strftime('%B %d, %Y')}")
-    
-    c.save()
-    return True
-
-
-def create_cover_page_pdf(output_path: Path, toc_entries: list) -> bool:
-    """Create a cover page with table of contents."""
-    if not HAS_REPORTLAB:
-        return False
-    
-    from reportlab.lib.colors import HexColor
-    
-    c = canvas.Canvas(str(output_path), pagesize=letter)
-    width, height = letter
-    
-    # Header background
-    c.setFillColor(HexColor('#1a252f'))
-    c.rect(0, height - 3 * inch, width, 3 * inch, fill=True, stroke=False)
-    
-    # Main title
-    c.setFillColor(HexColor('#ffffff'))
-    c.setFont("Helvetica-Bold", 36)
-    c.drawCentredString(width / 2, height - 1.2 * inch, "Supplementary Materials")
-    
-    c.setFont("Helvetica", 18)
-    c.drawCentredString(width / 2, height - 1.7 * inch, "OmniCellAgent Analysis Reports")
-    
-    # Subtitle
-    c.setFillColor(HexColor('#3498db'))
-    c.setFont("Helvetica-Oblique", 12)
-    c.drawCentredString(width / 2, height - 2.2 * inch, 
-                        "Automated Single-Cell RNA-seq Analysis Pipeline")
-    
-    # Table of Contents header
-    c.setFillColor(HexColor('#2c3e50'))
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(1.2 * inch, height - 3.8 * inch, "Table of Contents")
-    
-    # Decorative line
-    c.setStrokeColor(HexColor('#3498db'))
-    c.setLineWidth(2)
-    c.line(1.2 * inch, height - 4 * inch, 3.5 * inch, height - 4 * inch)
-    
-    # TOC entries
-    y_pos = height - 4.5 * inch
-    c.setFont("Helvetica", 11)
-    
-    current_page = 2  # Cover page is page 1, first section page is 2
-    
-    for entry in toc_entries:
-        case_name = entry['case_name']
-        version = entry['version']
-        num_pages = entry.get('num_pages', 0)
-        
-        # Section entry with dot leader
-        c.setFillColor(HexColor('#2c3e50'))
-        label = f"{case_name} — {version}"
-        c.drawString(1.5 * inch, y_pos, label)
-        
-        # Page number
-        page_str = str(current_page)
-        c.drawRightString(width - 1.5 * inch, y_pos, page_str)
-        
-        # Dot leader
-        label_width = c.stringWidth(label, "Helvetica", 11)
-        page_width = c.stringWidth(page_str, "Helvetica", 11)
-        dots_start = 1.5 * inch + label_width + 10
-        dots_end = width - 1.5 * inch - page_width - 10
-        
-        c.setFillColor(HexColor('#bdc3c7'))
-        dot_x = dots_start
-        while dot_x < dots_end:
-            c.drawString(dot_x, y_pos, ".")
-            dot_x += 6
-        
-        y_pos -= 20
-        current_page += 1 + num_pages  # title page + report pages
-    
-    # Footer
-    c.setFillColor(HexColor('#7f8c8d'))
-    c.setFont("Helvetica", 10)
-    c.drawCentredString(width / 2, 0.8 * inch, 
-                        f"Document generated on {datetime.now().strftime('%B %d, %Y')}")
-    
-    c.save()
-    return True
 
 
 def find_report_mds(sessions_dir: Path, session_suffix: str = "-test") -> dict:
@@ -652,25 +522,19 @@ def main():
     
     # Process and combine PDFs
     print(f"\n📚 Processing PDFs...")
+    print("  Using original style: regenerate from Markdown, then merge report PDFs directly.")
     merger = PdfMerger()
     
     case_order = ['AD', 'PDAC', 'LungCancer']
-    case_names = {
-        'AD': "Alzheimer's Disease",
-        'PDAC': "Pancreatic Ductal Adenocarcinoma", 
-        'LungCancer': "Lung Cancer"
-    }
     
     total_pages = 0
-    temp_files = []
     
-    # First pass: collect page counts for TOC
-    toc_entries = []
+    # First pass: regenerate PDFs and collect page counts.
+    pdf_entries = []
     for case in case_order:
         if case not in reports:
             continue
         paths = reports[case]
-        case_name = case_names.get(case, case)
         
         for version, md_path in [('First Run', paths['first_run']), ('Revised', paths['revised'])]:
             if md_path is None:
@@ -691,44 +555,20 @@ def main():
                 try:
                     reader = PdfReader(str(pdf_path))
                     num_pages = len(reader.pages)
-                    toc_entries.append({
+                    pdf_entries.append({
                         'case': case,
-                        'case_name': case_name,
                         'version': version,
                         'pdf_path': pdf_path,
                         'num_pages': num_pages
                     })
                 except Exception as e:
                     print(f"  ⚠️  Could not read {pdf_path.name}: {e}")
-    
-    # Create and add cover page with TOC
-    if HAS_REPORTLAB and toc_entries:
-        print(f"  📖 Creating cover page with table of contents...")
-        cover_pdf = export_dir / "_temp_cover.pdf"
-        if create_cover_page_pdf(cover_pdf, toc_entries):
-            merger.append(str(cover_pdf))
-            temp_files.append(cover_pdf)
-            total_pages += 1
-            print(f"  ✅ Added cover page")
-    
-    # Second pass: add title pages and reports
-    for entry in toc_entries:
-        case = entry['case']
-        case_name = entry['case_name']
-        version = entry['version']
+
+    # Second pass: merge report PDFs directly, matching supplementary_reports.pdf.
+    for entry in pdf_entries:
         pdf_path = entry['pdf_path']
         num_pages = entry['num_pages']
-        
-        # Add section title page
-        if HAS_REPORTLAB:
-            title_pdf = export_dir / f"_temp_title_{case}_{version.replace(' ', '_')}.pdf"
-            if create_title_page_pdf(case_name, f"{version} Report", title_pdf, case, version):
-                merger.append(str(title_pdf))
-                temp_files.append(title_pdf)
-                total_pages += 1
-                print(f"  ✅ Added title page: {case_name} ({version})")
-        
-        # Add the report PDF
+
         merger.append(str(pdf_path))
         print(f"  ✅ Added {pdf_path.name} ({num_pages} pages)")
         total_pages += num_pages
@@ -738,11 +578,6 @@ def main():
     merger.close()
     
     # Clean up
-    for temp_file in temp_files:
-        try:
-            temp_file.unlink()
-        except OSError:
-            pass
     try:
         os.remove(header_path)
     except OSError:

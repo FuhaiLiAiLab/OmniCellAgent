@@ -175,8 +175,7 @@ if [[ "$SKIP_COMPILE" == "1" ]]; then
 else
   "$LG_PY" "$SCRIPT_DIR/combine_supplementary_pdfs.py" \
     "--session-suffix=$SUFFIX" \
-    "--output=$COMPILED_PDF_NAME" \
-    --skip-regenerate 2>&1 | tee -a "$RUN_LOG"
+    "--output=$COMPILED_PDF_NAME" 2>&1 | tee -a "$RUN_LOG"
   log "Compile complete."
 fi
 

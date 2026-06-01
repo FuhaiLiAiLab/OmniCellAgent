@@ -122,12 +122,7 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     print(f"Disease DataFrame shape after aggregation: {combined_disease_df.shape}")
     print(f"Normal DataFrame shape after aggregation: {combined_normal_df.shape}")
 
-    # Save analysis results to outputs directory
-    outputs_dir = get_path('outputs.omic_analysis', absolute=True, create=True)
-    combined_disease_df.to_csv(os.path.join(outputs_dir, f"foranalysis_combined_disease_df_{disease_name}.csv"), index=False)
-    combined_normal_df.to_csv(os.path.join(outputs_dir, f"foranalysis_combined_normal_df_{disease_name}.csv"), index=False)
-    print(f"results saved to {outputs_dir}")
-    # Create all required directories in parallel
+    # Resolve the base directory for all analysis outputs
     # Use session directory if provided, otherwise use the default OUTPUT_DIR
     if session_dir:
         base_dir = session_dir
@@ -135,7 +130,13 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     else:
         base_dir = OUTPUT_DIR
         print(f"Using default output directory for analysis results: {OUTPUT_DIR}")
-    
+    os.makedirs(base_dir, exist_ok=True)
+
+    # Save the foranalysis matrices into the same session/output directory
+    combined_disease_df.to_csv(os.path.join(base_dir, f"foranalysis_combined_disease_df_{disease_name}.csv"), index=False)
+    combined_normal_df.to_csv(os.path.join(base_dir, f"foranalysis_combined_normal_df_{disease_name}.csv"), index=False)
+    print(f"foranalysis matrices saved to {base_dir}")
+
     de_output_dir = os.path.join(base_dir, "differential_expression")
     volcano_dir = os.path.join(base_dir, "volcano_plots")
     enrich_output_dir = os.path.join(base_dir, "enrichment_results")

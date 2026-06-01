@@ -900,7 +900,7 @@ def create_autogen_team(session_id, use_simple_team=False, team_type='magentic')
         # Create LangGraph adapter with UI callbacks configured
         adapter = create_langgraph_adapter(
             session_id=session_id,
-            model_name="gemini-3-pro-preview"
+            model_name="gemini-3.5-flash"
         )
         
         # Set up callbacks for UI updates

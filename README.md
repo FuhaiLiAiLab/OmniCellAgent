@@ -16,8 +16,6 @@ Additional links:
 - GitHub: https://github.com/FuhaiLiAiLab/OmniCellAgent
 - Paper: https://www.biorxiv.org/content/10.1101/2025.07.31.667797v1
 
-demo at https://agent.omni-cells.com
- (might not always be up due to maintainence and updates)
 
 ## 🤝 AI Agent Integration
 
@@ -452,7 +450,7 @@ tail -f logs/service-logs/gretriever_service_output.log
 **Use the automated startup script**:
 
 ```bash
-# Start all services (Neo4j, RAG tools, microservices)
+ # Start all services (Neo4j, RAG tools, microservices)
 bash scripts/startup.sh
 
 # Test all services are running
