@@ -201,6 +201,14 @@ def preprocess_markdown(md_path: str) -> str:
             continue
 
         if is_table_row:
+            for raw, display in {
+                "OmicMiningAgent": "Omic-Mining Agent",
+                "BioMarkerKGAgent": "BioMarker-KG Agent",
+                "PubMedResearcher": "PubMed Researcher",
+                "GoogleSearcher": "Google Searcher",
+                "ScientistsAgent": "Scientists Agent",
+            }.items():
+                stripped = stripped.replace(raw, display)
             # Add explicit padding to table cells for better column separation
             padded_line = re.sub(r'\|([^|])', r'|  \1', stripped)
             padded_line = re.sub(r'([^|])\|', r'\1  |', padded_line)
@@ -249,7 +257,7 @@ def compile_pdf_from_md(md_path: str, pdf_path: str, header_file: str) -> bool:
         "-V", "geometry:margin=0.9in",
         "-V", "fontsize=11pt",
         "-V", "documentclass=article",
-        "-V", "papersize=a4",
+        "-V", "papersize=letter",
         "-V", "lang=en",
         "--columns=72",
     ]

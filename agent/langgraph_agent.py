@@ -2436,6 +2436,51 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
         if state.get("status") == "reporting":
             return "report"
         return "execute"
+
+    @staticmethod
+    def _appendix_table_cell(value: Any, max_chars: int = None) -> str:
+        """Normalize appendix table text so pipe tables keep their shape."""
+        text = " ".join(str(value if value is not None else "N/A").split())
+        text = text.replace("|", "/")
+        if max_chars and len(text) > max_chars:
+            text = text[: max_chars - 3].rstrip() + "..."
+        return text
+
+    @staticmethod
+    def _display_agent_name(agent_name: str) -> str:
+        """Add break opportunities for long agent identifiers in PDF tables."""
+        display_names = {
+            "OmicMiningAgent": "Omic-Mining Agent",
+            "BioMarkerKGAgent": "BioMarker-KG Agent",
+            "PubMedResearcher": "PubMed Researcher",
+            "GoogleSearcher": "Google Searcher",
+            "ScientistsAgent": "Scientists Agent",
+        }
+        return display_names.get(agent_name, agent_name)
+
+    def _format_execution_plan_table(self, plan: List[Dict[str, Any]]) -> str:
+        """Render A2 using the same pipe-table style as the main report tables."""
+        table = [
+            "| Step | Task ID | Agent | Description | Status |\n",
+            "| :--- | :--- | :--- | :--- | :--- |\n",
+        ]
+        for i, task in enumerate(plan, 1):
+            table.append(
+                "| {step} | {task_id} | {agent} | {description} | {status} |\n".format(
+                    step=i,
+                    task_id=self._appendix_table_cell(task.get("id", f"task_{i}")),
+                    agent=self._appendix_table_cell(
+                        self._display_agent_name(task.get("assigned_agent", "Unknown"))
+                    ),
+                    description=self._appendix_table_cell(
+                        task.get("description", "N/A"),
+                        max_chars=220,
+                    ),
+                    status=self._appendix_table_cell(task.get("status", "pending")),
+                )
+            )
+        table.append("\n")
+        return "".join(table)
     
     def _generate_appendix(self, state: AgentState) -> str:
         """Generate appendix section with state metadata and detailed outputs"""
@@ -2452,18 +2497,7 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
         plan = state.get("plan", [])
         if plan:
             appendix_parts.append("## A2. Execution Plan\n\n")
-            appendix_parts.append("| Step | Task ID | Agent | Description | Status |\n")
-            appendix_parts.append("|------|---------|-------|-------------|--------|\n")
-            for i, task in enumerate(plan, 1):
-                task_id = task.get('id', f'task_{i}')
-                agent = task.get('assigned_agent', 'Unknown')
-                description = task.get('description', 'N/A')
-                # Truncate long descriptions
-                if len(description) > 60:
-                    description = description[:57] + "..."
-                status = task.get('status', 'pending')
-                appendix_parts.append(f"| {i} | {task_id} | {agent} | {description} | {status} |\n")
-            appendix_parts.append("\n")
+            appendix_parts.append(self._format_execution_plan_table(plan))
         
         # A3: Process Log
         process_log = state.get("process_log", [])
@@ -2545,10 +2579,13 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
         Strategy 2 (fallback):  pandoc → HTML → wkhtmltopdf with CSS.
         Strategy 3 (last):      standalone HTML with water.css CDN.
         """
+        tmp_md_path = None
         try:
             import subprocess
             import shutil
             import tempfile
+            import textwrap
+            import re
 
             pdf_path = markdown_path.replace('.md', '.pdf')
             html_path = markdown_path.replace('.md', '.html')
@@ -2565,39 +2602,124 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
                 print("   Install with: sudo apt-get install pandoc")
                 return None
 
-            # ── Preprocess markdown: insert blank lines around tables ────
-            # Pandoc 2.x requires a blank line before/after pipe tables;
-            # LLM-generated reports often omit them.
-            with open(markdown_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            fixed_lines: list[str] = []
-            for line in lines:
-                stripped = line.rstrip()
-                is_tbl = stripped.startswith('|') and stripped.endswith('|')
-                if is_tbl:
-                    if fixed_lines and fixed_lines[-1].strip() != '' and not (
-                        fixed_lines[-1].rstrip().startswith('|') and fixed_lines[-1].rstrip().endswith('|')
-                    ):
-                        fixed_lines.append('\n')
-                else:
-                    if (fixed_lines
-                        and fixed_lines[-1].rstrip().startswith('|')
-                        and fixed_lines[-1].rstrip().endswith('|')
-                        and stripped != ''):
-                        fixed_lines.append('\n')
-                fixed_lines.append(line)
+            def cleanup(*paths):
+                for path in paths:
+                    if not path:
+                        continue
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+
+            def preprocess_markdown(md_path: str) -> str:
+                """Use the report-bundle preprocessing for agent-generated PDFs."""
+                agent_display_names = {
+                    "OmicMiningAgent": "Omic-Mining Agent",
+                    "BioMarkerKGAgent": "BioMarker-KG Agent",
+                    "PubMedResearcher": "PubMed Researcher",
+                    "GoogleSearcher": "Google Searcher",
+                    "ScientistsAgent": "Scientists Agent",
+                }
+
+                with open(md_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+
+                out = []
+                in_code_block = False
+
+                for i, line in enumerate(lines):
+                    stripped = line.rstrip()
+
+                    if stripped.startswith("```"):
+                        in_code_block = not in_code_block
+                        out.append(line)
+                        continue
+
+                    if in_code_block:
+                        if len(stripped) > 100:
+                            broken = stripped
+                            broken = re.sub(r"('\s*,\s*')", r"',\n'", broken)
+                            broken = re.sub(r'("\s*,\s*")', r'",\n"', broken)
+                            broken = re.sub(r"(},\s*{)", r"},\n{", broken)
+                            broken = re.sub(r"(\],\s*\[)", r"],\n[", broken)
+                            broken = re.sub(r"(:\s*True,)", r": True,\n", broken)
+                            broken = re.sub(r"(:\s*False,)", r": False,\n", broken)
+                            broken = re.sub(r"(\.\s+)([A-Z])", r".\n\2", broken)
+                            if any(len(segment) > 90 for segment in broken.split("\n")):
+                                new_broken = []
+                                for segment in broken.split("\n"):
+                                    if len(segment) > 90:
+                                        words = segment.split(" ")
+                                        current_line = []
+                                        current_len = 0
+                                        for word in words:
+                                            if current_len + len(word) + 1 > 80 and current_line:
+                                                new_broken.append(" ".join(current_line))
+                                                current_line = [word]
+                                                current_len = len(word)
+                                            else:
+                                                current_line.append(word)
+                                                current_len += len(word) + 1
+                                        if current_line:
+                                            new_broken.append(" ".join(current_line))
+                                    else:
+                                        new_broken.append(segment)
+                                broken = "\n".join(new_broken)
+                            out.append(broken + "\n")
+                        else:
+                            out.append(line)
+                        continue
+
+                    is_table_row = stripped.startswith("|") and stripped.endswith("|")
+                    is_image = stripped.startswith("![") and "](" in stripped
+
+                    if is_image:
+                        if out and out[-1].strip() != "":
+                            out.append("\n")
+                        out.append(line)
+                        if i + 1 < len(lines) and lines[i + 1].strip() != "":
+                            out.append("\n")
+                        continue
+
+                    if is_table_row:
+                        for raw, display in agent_display_names.items():
+                            stripped = stripped.replace(raw, display)
+                        padded_line = re.sub(r"\|([^|])", r"|  \1", stripped)
+                        padded_line = re.sub(r"([^|])\|", r"\1  |", padded_line)
+                        line = padded_line + "\n"
+                        stripped = padded_line
+
+                        if out and out[-1].strip() != "" and not (
+                            out[-1].rstrip().startswith("|") and out[-1].rstrip().endswith("|")
+                        ):
+                            out.append("\n")
+                    else:
+                        if (
+                            out
+                            and out[-1].rstrip().startswith("|")
+                            and out[-1].rstrip().endswith("|")
+                            and stripped != ""
+                        ):
+                            out.append("\n")
+
+                    out.append(line)
+
+                return "".join(out)
 
             tmp_md_fd, tmp_md_path = tempfile.mkstemp(suffix='.md', prefix='oca_pp_', dir=session_dir)
             with os.fdopen(tmp_md_fd, 'w', encoding='utf-8') as f:
-                f.writelines(fixed_lines)
+                f.write(preprocess_markdown(markdown_path))
 
             # ── Strategy 1: pandoc + xelatex with custom LaTeX header ──
             if has_xelatex:
                 latex_header = r"""
+% Fonts
 \usepackage{fontspec}
 \setmainfont{DejaVu Serif}
 \setsansfont{DejaVu Sans}
 \setmonofont[Scale=0.85]{DejaVu Sans Mono}
+
+% Page layout
 \usepackage{fancyhdr}
 \pagestyle{fancy}
 \fancyhf{}
@@ -2605,16 +2727,52 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
 \fancyhead[R]{\small\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \fancyfoot{}
+
+% Tables
 \usepackage{makecell}
 \usepackage{etoolbox}
-\renewcommand{\arraystretch}{1.35}
-\AtBeginEnvironment{longtable}{\small}
+\usepackage{array}
+\usepackage{tabularx}
+\renewcommand{\arraystretch}{1.5}
+\AtBeginEnvironment{longtable}{\footnotesize\setlength{\tabcolsep}{10pt}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\setlength{\arrayrulewidth}{0.4pt}
+\AtBeginEnvironment{longtable}{%
+  \setlength{\tabcolsep}{8pt}%
+  \renewcommand{\arraystretch}{1.4}%
+}
+\newcommand{\thmark}{\rule[-0.5ex]{0.4pt}{2.5ex}}
+
+% Images
 \makeatletter
-\def\maxwidth{\ifdim\Gin@nat@width>0.92\linewidth 0.92\linewidth\else\Gin@nat@width\fi}
+\def\maxwidth{\ifdim\Gin@nat@width>0.85\linewidth 0.85\linewidth\else\Gin@nat@width\fi}
 \makeatother
 \setkeys{Gin}{width=\maxwidth,keepaspectratio}
+\usepackage{float}
+\let\origfigure\figure
+\let\endorigfigure\endfigure
+\renewenvironment{figure}[1][htbp]{%
+  \origfigure[H]%
+  \centering
+}{%
+  \endorigfigure
+}
+\let\oldincludegraphics\includegraphics
+\renewcommand{\includegraphics}[2][]{%
+  \par\vspace{12pt}%
+  \begin{center}%
+    \oldincludegraphics[#1]{#2}%
+  \end{center}%
+  \vspace{12pt}\par%
+}
+
+% Code blocks
 \usepackage{fvextra}
-\fvset{breaklines,breakanywhere,fontsize=\scriptsize}
+\fvset{breaklines,breakanywhere,fontsize=\scriptsize,breaksymbol=,breakanywheresymbolpre=,breakbeforesymbolpre=,breakaftersymbolpre=}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\},fontsize=\scriptsize}
+
+% Section spacing
 \usepackage{titlesec}
 \titleformat{\section}{\Large\bfseries}{}{0em}{}[\vspace{4pt}\hrule\vspace{6pt}]
 \titleformat{\subsection}{\large\bfseries}{}{0em}{}
@@ -2623,6 +2781,7 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
 \renewcommand{\section}{\clearpage\oldsection}
 \PassOptionsToPackage{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!70!black}{hyperref}
 \usepackage{microtype}
+\usepackage{seqsplit}
 """
                 header_fd, header_path = tempfile.mkstemp(suffix='.tex', prefix='oca_hdr_')
                 with os.fdopen(header_fd, 'w') as f:
@@ -2635,7 +2794,7 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
                     '-V', 'geometry:margin=0.9in',
                     '-V', 'fontsize=11pt',
                     '-V', 'documentclass=article',
-                    '-V', 'papersize=a4',
+                    '-V', 'papersize=letter',
                     '--toc', '--toc-depth=2',
                     '--highlight-style=tango',
                     '--resource-path', session_dir,
@@ -2643,56 +2802,85 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True,
                                         cwd=session_dir, timeout=300)
-                try:
-                    os.remove(header_path)
-                except OSError:
-                    pass
+                cleanup(header_path)
 
                 if result.returncode == 0:
                     print(f"📄 PDF generated (xelatex): {pdf_path}")
-                    try: os.remove(tmp_md_path)
-                    except OSError: pass
+                    cleanup(tmp_md_path)
                     return pdf_path
                 print(f"⚠️ xelatex PDF failed, trying HTML method...")
+                if result.stderr:
+                    for line in result.stderr.strip().split("\n")[-8:]:
+                        print(f"   {line}")
 
             # ── Strategy 2: Pandoc → HTML → wkhtmltopdf ─────────────────
             if has_wkhtmltopdf:
-                css_content = """
-body {
-    font-family: "DejaVu Sans", "Noto Sans", "Segoe UI", Roboto, Arial, sans-serif;
-    font-size: 11pt; line-height: 1.55; color: #1a1a1a; max-width: 100%;
-}
-h1 { font-size: 1.6em; border-bottom: 2px solid #2c3e50; padding-bottom: 6px; margin-top: 30px; }
-h2 { font-size: 1.3em; border-bottom: 1px solid #bdc3c7; padding-bottom: 4px; margin-top: 24px; }
-h3 { font-size: 1.1em; margin-top: 18px; }
-h1, h2, h3 { page-break-after: avoid; }
-img {
-    max-width: 100% !important; max-height: 600px !important;
-    height: auto !important; width: auto !important;
-    display: block; margin: 12px auto; page-break-inside: avoid;
-}
-table {
-    width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 9pt;
-    page-break-inside: avoid; table-layout: fixed;
-    word-wrap: break-word; overflow-wrap: break-word;
-}
-th, td {
-    border: 1px solid #ccc; padding: 5px 7px; text-align: left;
-    vertical-align: top; word-wrap: break-word; overflow-wrap: break-word;
-}
-th { background-color: #ecf0f1; font-weight: 600; }
-tr:nth-child(even) { background-color: #f9f9f9; }
-pre, code {
-    font-family: "DejaVu Sans Mono", "Consolas", monospace;
-    font-size: 8pt; background-color: #f5f5f5; border-radius: 3px;
-}
-pre {
-    padding: 8px 10px; overflow-x: auto; white-space: pre-wrap;
-    word-wrap: break-word; border: 1px solid #e0e0e0; page-break-inside: auto;
-}
-blockquote { border-left: 3px solid #3498db; padding-left: 12px; color: #555; }
-hr { border: none; border-top: 1px solid #bbb; margin: 20px 0; }
-"""
+                css_content = textwrap.dedent("""\
+                body {
+                    font-family: "DejaVu Sans", "Noto Sans", "Segoe UI", Roboto, Arial, sans-serif;
+                    font-size: 11pt;
+                    line-height: 1.55;
+                    color: #1a1a1a;
+                    max-width: 100%;
+                }
+                h1 { font-size: 1.6em; border-bottom: 2px solid #2c3e50; padding-bottom: 6px; margin-top: 30px; }
+                h2 { font-size: 1.3em; border-bottom: 1px solid #bdc3c7; padding-bottom: 4px; margin-top: 24px; }
+                h3 { font-size: 1.1em; margin-top: 18px; }
+                h1, h2, h3 { page-break-after: avoid; }
+                p > img, figure, .figure {
+                    display: block !important;
+                    margin-left: auto !important;
+                    margin-right: auto !important;
+                    text-align: center !important;
+                    max-width: 85% !important;
+                    max-height: 550px !important;
+                    height: auto !important;
+                    width: auto !important;
+                    page-break-inside: avoid;
+                }
+                figure { text-align: center; }
+                figcaption { text-align: center; font-style: italic; margin-top: 8px; }
+                table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 14px 0;
+                    font-size: 9pt;
+                    page-break-inside: avoid;
+                    table-layout: auto;
+                }
+                th, td {
+                    border: 1px solid #ccc;
+                    padding: 6px 10px;
+                    text-align: left;
+                    vertical-align: top;
+                    word-wrap: break-word;
+                    overflow-wrap: break-word;
+                    max-width: 200px;
+                }
+                th { background-color: #ecf0f1; font-weight: 600; white-space: nowrap; }
+                tr:nth-child(even) { background-color: #f9f9f9; }
+                pre, code {
+                    font-family: "DejaVu Sans Mono", "Consolas", monospace;
+                    font-size: 7.5pt;
+                    background-color: #f5f5f5;
+                    border-radius: 3px;
+                }
+                pre {
+                    padding: 10px 12px;
+                    overflow-x: hidden;
+                    white-space: pre-wrap;
+                    word-wrap: break-word;
+                    word-break: break-all;
+                    border: 1px solid #e0e0e0;
+                    max-width: 100%;
+                    line-height: 1.4;
+                }
+                code {
+                    word-break: break-all;
+                }
+                blockquote { border-left: 3px solid #3498db; padding-left: 12px; color: #555; }
+                hr { border: none; border-top: 1px solid #bbb; margin: 20px 0; }
+                """)
                 css_path = os.path.join(session_dir, '_report_style.css')
                 with open(css_path, 'w') as f:
                     f.write(css_content)
@@ -2708,6 +2896,7 @@ hr { border: none; border-top: 1px solid #bbb; margin: 20px 0; }
                 if result.returncode == 0:
                     pdf_cmd = [
                         'wkhtmltopdf', '--enable-local-file-access',
+                        '--page-size', 'Letter',
                         '--margin-top', '18mm', '--margin-bottom', '18mm',
                         '--margin-left', '14mm', '--margin-right', '14mm',
                         '--footer-center', '[page]', '--footer-font-size', '9',
@@ -2717,22 +2906,14 @@ hr { border: none; border-top: 1px solid #bbb; margin: 20px 0; }
                                              cwd=session_dir, timeout=180)
                     if result2.returncode == 0:
                         print(f"📄 PDF generated (wkhtmltopdf): {pdf_path}")
-                        for p in (html_path, css_path, tmp_md_path):
-                            try:
-                                os.remove(p)
-                            except OSError:
-                                pass
+                        cleanup(html_path, css_path, tmp_md_path)
                         return pdf_path
                     else:
                         print(f"⚠️ wkhtmltopdf failed: {result2.stderr[:200] if result2.stderr else ''}")
                 else:
                     print(f"⚠️ Pandoc HTML conversion failed: {result.stderr[:200] if result.stderr else ''}")
 
-                for p in (css_path, html_path):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
+                cleanup(css_path, html_path)
 
             # ── Strategy 3: Standalone HTML (always works) ───────────────
             html_cmd = [
@@ -2749,24 +2930,26 @@ hr { border: none; border-top: 1px solid #bbb; margin: 20px 0; }
             if result.returncode == 0:
                 print(f"📄 HTML report generated: {html_path}")
                 print("   (PDF requires: wkhtmltopdf or texlive-xetex)")
-                try: os.remove(tmp_md_path)
-                except OSError: pass
+                cleanup(tmp_md_path)
                 return html_path
 
             print(f"⚠️ Could not generate PDF or HTML: {result.stderr[:300]}")
-            try: os.remove(tmp_md_path)
-            except OSError: pass
+            cleanup(tmp_md_path)
             return None
 
         except subprocess.TimeoutExpired:
             print("⚠️ PDF generation timed out")
-            try: os.remove(tmp_md_path)  # type: ignore[possibly-undefined]
-            except (OSError, NameError): pass
+            try:
+                os.remove(tmp_md_path)  # type: ignore[arg-type]
+            except (OSError, TypeError):
+                pass
             return None
         except Exception as e:
             print(f"⚠️ Error generating PDF: {e}")
-            try: os.remove(tmp_md_path)  # type: ignore[possibly-undefined]
-            except (OSError, NameError): pass
+            try:
+                os.remove(tmp_md_path)  # type: ignore[arg-type]
+            except (OSError, TypeError):
+                pass
             return None
     
     def _save_report(self, query: str, report: str, state: AgentState = None) -> Optional[str]:
