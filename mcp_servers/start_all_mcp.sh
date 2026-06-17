@@ -34,11 +34,12 @@ start_server() {
 }
 
 # Start all servers
-start_server "PubMed" "pubmed_server.py" 9001
-start_server "WebSearch" "websearch_server.py" 9002
+start_server "PubMed" "pubmed_server.py" 9010
+start_server "WebSearch" "websearch_server.py" 9011
 start_server "KnowledgeGraph" "knowledge_graph_server.py" 9003
 start_server "ScientistRAG" "scientist_rag_server.py" 9004
 start_server "OmicsAnalysis" "omics_server.py" 9005
+start_server "LiteratureSearch" "literature_server.py" 9012
 
 echo ""
 echo "=================================="
@@ -46,11 +47,12 @@ echo "  All MCP servers started!"
 echo "=================================="
 echo ""
 echo "Server Status:"
-echo "  PubMed:          http://localhost:9001"
-echo "  Web Search:      http://localhost:9002"
+echo "  PubMed:          http://localhost:9010"
+echo "  Web Search:      http://localhost:9011"
 echo "  Knowledge Graph: http://localhost:9003"
 echo "  Scientist RAG:   http://localhost:9004"
 echo "  Omics Analysis:  http://localhost:9005"
+echo "  Literature:      http://localhost:9012"
 echo ""
 echo "Logs: $LOG_DIR"
 echo ""

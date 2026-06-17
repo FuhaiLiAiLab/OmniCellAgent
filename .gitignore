@@ -52,6 +52,7 @@ dataset_outputs/*
 webapp/sessions/*
 cache/*
 models/*
+mcp_servers/literature_outputs/*
 
 benchmark/peer_review_results/*
 benchmark/ai_review_results/*
@@ -155,4 +156,3 @@ tools/omic_tools/outputs/*.csv
 
 # Manuscript folder (LaTeX sources and figures live elsewhere; do not commit here)
 manuscript/
-

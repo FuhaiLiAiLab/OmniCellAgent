@@ -5,7 +5,7 @@ This demonstrates how to connect OmniCellAgent's modular MCP servers
 with a LangGraph agent for orchestrated biomedical research.
 
 Architecture:
-- Each MCP server runs independently (ports 9001-9005)
+- Each MCP server runs independently (ports 9010-9012 and 9003-9005)
 - LangGraph agent connects via MCP protocol
 - Tools are exposed as LangChain tools
 - Session ID passed to maintain file organization
@@ -128,7 +128,7 @@ async def create_omnicell_agent(project_root: str):
     tools = []
     
     try:
-        # PubMed (port 9001)
+        # PubMed (port 9010)
         pubmed_tool = await tool_builder.create_tool(
             "pubmed_server.py",
             "search_pubmed"
@@ -136,7 +136,7 @@ async def create_omnicell_agent(project_root: str):
         tools.append(pubmed_tool)
         print("  ✓ PubMed tool connected")
         
-        # Web Search (port 9002)
+        # Web Search (port 9011)
         web_tool = await tool_builder.create_tool(
             "websearch_server.py",
             "search_web"

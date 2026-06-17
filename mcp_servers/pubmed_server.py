@@ -1,4 +1,4 @@
-"""PubMed MCP Server - Port 9001"""
+"""PubMed MCP Server - Port 9010"""
 import os
 import sys
 from typing import Optional
@@ -64,12 +64,12 @@ async def search_pubmed(
 
 
 if __name__ == "__main__":
-    # Run as SSE server on port 9001 or stdio
+    # Run as SSE server on port 9010 or stdio
     import sys
     
     if "--sse" in sys.argv:
         # Run as HTTP/SSE server
-        mcp.run(transport="sse", port=9001)
+        mcp.run(transport="sse", port=9010)
     else:
         # Run as stdio server (default)
         mcp.run()

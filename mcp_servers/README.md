@@ -6,11 +6,12 @@ Modular MCP servers exposing biomedical research tools via Model Context Protoco
 
 ```
 LangGraph Agent
-    ├── PubMed MCP (port 9001)
-    ├── WebSearch MCP (port 9002)
+    ├── PubMed MCP (port 9010)
+    ├── WebSearch MCP (port 9011)
     ├── KnowledgeGraph MCP (port 9003)
     ├── ScientistRAG MCP (port 9004)
-    └── Omics MCP (port 9005)
+    ├── Omics MCP (port 9005)
+    └── LiteratureSearch MCP (port 9012)
 ```
 
 Each server runs independently - failure of one doesn't affect others.
@@ -45,12 +46,12 @@ python mcp_servers/pubmed_server.py --sse
 
 ## MCP Servers
 
-### PubMed (Port 9001)
+### PubMed (Port 9010)
 - **Tool**: `search_pubmed(query, top_k, session_id)`
 - **Function**: Search PubMed, download PDFs, extract full-text
 - **Output**: `webapp/sessions/{session_id}/pubmed/`
 
-### Web Search (Port 9002)
+### Web Search (Port 9011)
 - **Tool**: `search_web(query, target_results, use_llm_filter)`
 - **Function**: Google Custom Search with content extraction
 
@@ -69,6 +70,18 @@ python mcp_servers/pubmed_server.py --sse
 - **Function**: Single-cell RNA-seq analysis (NER, DEG, KEGG)
 - **Output**: `webapp/sessions/{session_id}/dataset_outputs/`
 - **Requires**: GLiNER (8002), BioBERT (8003), OmniCellTOSG database
+
+### Literature Search (Port 9012)
+- **Tools**:
+  - `search_pubmed_abstracts_langchain(query, top_k, session_id, doc_content_chars_max)`
+  - `search_pubmed_abstracts(query, top_k, session_id)`
+  - `search_pubmed_full_papers(query, top_k, session_id, max_message_chars_per_paper)`
+  - `search_web_full_text(query, target_results, session_id, use_llm_filter)`
+  - `search_literature_bundle(query, abstract_top_k, full_paper_top_k, web_results, session_id, abstract_source)`
+- **Function**: Abstract search, PubMed full-paper retrieval, and text-browser literature search
+- **Output**: JSON strings with `message` for direct LLM use and `metadata` containing raw abstracts, full paper text, or web page text
+- **Storage**: uses the shared configured PubMed JSONL/DOI cache; response payload snapshots are saved under `mcp_servers/literature_outputs/`
+- **Agent docs**: [LITERATURE_SEARCH_README.md](LITERATURE_SEARCH_README.md), [LITERATURE_MCP_AGENT_DEV_GUIDE.md](LITERATURE_MCP_AGENT_DEV_GUIDE.md)
 
 ## Session Management
 
@@ -111,8 +124,8 @@ async with stdio_client(server_params) as (read, write):
 
 **Server won't start:**
 ```bash
-lsof -i :9001  # Check port usage
-kill $(lsof -t -i:9001)  # Kill process
+lsof -i :9010  # Check PubMed MCP port usage
+kill $(lsof -t -i:9010)  # Kill process using PubMed MCP port
 ```
 
 **Connection errors:**
@@ -130,11 +143,12 @@ bash scripts/startup.sh  # Start backend services
 
 | Server | Port | Backend Service | Port |
 |--------|------|-----------------|------|
-| PubMed | 9001 | - | - |
-| WebSearch | 9002 | - | - |
+| PubMed | 9010 | - | - |
+| WebSearch | 9011 | - | - |
 | KnowledgeGraph | 9003 | GRetriever | 8001 |
 | ScientistRAG | 9004 | Scientist RAG | 8000 |
 | Omics | 9005 | GLiNER, BioBERT | 8002, 8003 |
+| LiteratureSearch | 9012 | - | - |
 
 ## Resources
 

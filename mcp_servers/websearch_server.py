@@ -1,4 +1,4 @@
-"""Web Search MCP Server - Port 9002"""
+"""Web Search MCP Server - Port 9011"""
 import os
 import sys
 
@@ -59,6 +59,6 @@ if __name__ == "__main__":
     import sys
     
     if "--sse" in sys.argv:
-        mcp.run(transport="sse", port=9002)
+        mcp.run(transport="sse", port=9011)
     else:
         mcp.run()
