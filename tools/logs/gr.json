@@ -3,28 +3,28 @@
   "results": [
     {
       "rank": "#1",
-      "name": "RPL9",
-      "summary": "Name: ribosomal protein L9"
+      "name": "MAP3K15",
+      "summary": "Name: mitogen-activated protein kinase kinase kinase 15"
     },
     {
       "rank": "#2",
-      "name": "positive regulation of toll-like receptor 9 signaling pathway",
-      "summary": " "
+      "name": "MAPK15",
+      "summary": "Name: mitogen-activated protein kinase 15"
     },
     {
       "rank": "#3",
-      "name": "RA biosynthesis pathway",
-      "summary": "The major activated retinoid, all-trans-retinoic acid (atRA) is produced by the dehydrogenation of all-trans-retinol (atROL) by members of the short chain dehydrogenase/reductase (SDR) and aldehyde dehydrogenase (RALDH) gene families (Das et al. 2014, Napoli 2012)."
+      "name": "MAP3K11",
+      "summary": "Name: mitogen-activated protein kinase kinase kinase 11"
     },
     {
       "rank": "#4",
-      "name": "RHO GTPases activate PKNs",
-      "summary": "Protein kinases N (PKN), also known as protein kinase C-related kinases (PKR) feature a C-terminal serine/threonine kinase domain and three RHO-binding motifs at the N-terminus. RHO GTPases RHOA, RHOB, RHOC and RAC1 bind PKN1, PKN2 and PKN3 (Maesaki et al. 1999, Zhong et al. 1999, Owen et al. 2003, Modha et al. 2008, Hutchinson et al. 2011, Hutchinson et al. 2013), bringing them in proximity to the PIP3-activated co-activator PDPK1 (PDK1) (Flynn et al. 2000, Torbett et al. 2003). PDPK1 phosphorylates PKNs on a highly conserved threonine residue in the kinase activation loop, which is a prerequisite for PKN activation. Phosphorylation of other residues might also be involved in activation (Flynn et al. 2000, Torbett et al. 2003, Dettori et al. 2009). PKNs are activated by fatty acids like arachidonic acid and phospholipids in vitro, but the in vivo significance of this activation remains unclear (Palmer et al. 1995, Yoshinaga et al. 1999).<p>PKNs play important roles in diverse functions, including regulation of cell cycle, receptor trafficking, vesicle transport and apoptosis. PKN is also involved in the ligand-dependent transcriptional activation by the androgen receptor. More than 20 proteins and several peptides have been shown to be phosphorylated by PKN1 and PKN2, including CPI-17 (Hamaguchi et al. 2000), alpha-actinin (Mukai et al. 1997), adducin (Collazos et al. 2011), CDC25C (Misaki et al. 2001), vimentin (Matsuzawa et al. 1997), TRAF1 (Kato et al. 2008), CLIP170 (Collazos et al. 2011) and EGFR (Collazos et al. 2011). There are no known substrates for PKN3 (Collazos et al. 2011)."
+      "name": "MAP3K14",
+      "summary": "Name: mitogen-activated protein kinase kinase kinase 14"
     },
     {
       "rank": "#5",
-      "name": "Recycling pathway of L1",
-      "summary": "L1 functions in many aspects of neuronal development including axon outgrowth and neuronal migration. These functions require coordination between L1 and the actin cytoskeleton. F-actin continuously moves in a retrograde direction from the P-(peripheral) domain of the growth cone towards the growth cone's C-(central) domain. L1, attached to the actin cytoskeleton via membrane cytoskeletal linkers (MCKs) such as ankyrins (Ankyrin-G, -B and -R) and members of the ERMs (ezrin, radixin, and moesin) family, link this retrograde F-actin flow with extracellular immobile ligands.<br>Forward translocation of growth cone requires not only the CAM-actin linkage but also a gradient of cell substrate adhesion (strong adhesion at the front and weak adhesion at the rear) so that the cytoskeletal machinery is able to pull the cell forward as attachments at the rear are released. This asymmetry is achieved in part by internalizing L1 molecules as they are moved to the rear of the growth cone coupled to retrograde F-actin flow and recycling them to the leading edge plasma membrane.<br>L1 internalization is mediated by phosphorylation and dephosphorylation. The L1 cytoplasmic domain (L1CD) carries an endocytic or sorting motif, YRSLE, that is recognized by the clathrin associated adaptor protein-2 (AP-2). AP-2 binds the YRSLE motif only when its tyrosine is not phosphorylated and triggers L1 endocytosis. SRC kinase associated with lipid rafts in the P-domain membrane phosphorylates L1 molecules on tyrosine-1176, stabilizing them in the plasma membrane. L1 endocytosis is triggered by the dephosphorylation of Y1176 within the C domain. Some of these internalized L1 molecules are transported in an anterograde direction along microtubules for reuse in the leading edge."
+      "name": "MAPKAPK3",
+      "summary": "Name: MAPK activated protein kinase 3"
     }
   ]
 }

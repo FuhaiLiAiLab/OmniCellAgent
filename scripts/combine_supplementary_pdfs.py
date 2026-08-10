@@ -18,7 +18,9 @@ Requirements:
     pandoc + xelatex available on PATH for the preferred PDF conversion path
 """
 import argparse
+import datetime
 import os
+import re
 import sys
 import tempfile
 import subprocess
@@ -27,11 +29,11 @@ import textwrap
 from pathlib import Path
 
 try:
-    from PyPDF2 import PdfMerger, PdfReader
+    from PyPDF2 import PdfReader
 except ImportError:
     print("❌ PyPDF2 not installed. Installing...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyPDF2"])
-    from PyPDF2 import PdfMerger, PdfReader
+    from PyPDF2 import PdfReader
 
 
 # ---------- LaTeX header for PDF generation (same as regenerate_pdfs.py) ----------
@@ -73,10 +75,13 @@ LATEX_HEADER = r"""
 \newcommand{\thmark}{\rule[-0.5ex]{0.4pt}{2.5ex}}
 
 % ── Images ───────────────────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage{needspace}
 \makeatletter
-\def\maxwidth{\ifdim\Gin@nat@width>0.85\linewidth 0.85\linewidth\else\Gin@nat@width\fi}
+\def\maxwidth{\ifdim\Gin@nat@width>0.72\linewidth 0.72\linewidth\else\Gin@nat@width\fi}
+\def\maxheight{\ifdim\Gin@nat@height>0.34\textheight 0.34\textheight\else\Gin@nat@height\fi}
 \makeatother
-\setkeys{Gin}{width=\maxwidth,keepaspectratio}
+\setkeys{Gin}{width=\maxwidth,height=\maxheight,keepaspectratio}
 
 % Force figures to be centered with vertical space
 \usepackage{float}
@@ -87,16 +92,6 @@ LATEX_HEADER = r"""
   \centering
 }{%
   \endorigfigure
-}
-
-% Add space around standalone images (not in figures)
-\let\oldincludegraphics\includegraphics
-\renewcommand{\includegraphics}[2][]{%
-  \par\vspace{12pt}%
-  \begin{center}%
-    \oldincludegraphics[#1]{#2}%
-  \end{center}%
-  \vspace{12pt}\par%
 }
 
 % ── Code blocks ──────────────────────────────────────────────────────
@@ -119,6 +114,13 @@ LATEX_HEADER = r"""
 \usepackage{microtype}
 \usepackage{seqsplit}
 """
+
+
+CASE_LABELS = {
+    "AD": "Alzheimer's Disease",
+    "PDAC": "Pancreatic Ductal Adenocarcinoma",
+    "LungCancer": "Lung Adenocarcinoma",
+}
 
 
 def preprocess_markdown(md_path: str) -> str:
@@ -233,9 +235,23 @@ def preprocess_markdown(md_path: str) -> str:
     return "".join(out)
 
 
-def compile_pdf_from_md(md_path: str, pdf_path: str, header_file: str) -> bool:
+def compile_pdf_from_md(
+    md_path: str,
+    pdf_path: str,
+    header_file: str,
+    resource_paths: list[str] | None = None,
+    working_dir: str | None = None,
+) -> bool:
     """Run pandoc + xelatex to produce PDF with the custom header."""
-    session_dir = os.path.dirname(md_path)
+    if working_dir:
+        session_dir = working_dir
+    else:
+        session_dir = os.path.dirname(md_path)
+
+    if resource_paths:
+        resource_path_arg = os.pathsep.join(resource_paths)
+    else:
+        resource_path_arg = session_dir
 
     # Preprocess markdown so pandoc parses tables and long code blocks cleanly.
     fixed_md = preprocess_markdown(md_path)
@@ -253,7 +269,7 @@ def compile_pdf_from_md(md_path: str, pdf_path: str, header_file: str) -> bool:
         "-H", header_file,
         "--toc", "--toc-depth=2",
         "--highlight-style=tango",
-        "--resource-path", session_dir,
+        "--resource-path", resource_path_arg,
         "-V", "geometry:margin=0.9in",
         "-V", "fontsize=11pt",
         "-V", "documentclass=article",
@@ -466,6 +482,258 @@ def find_report_mds(sessions_dir: Path, session_suffix: str = "-test") -> dict:
     return results
 
 
+def strip_yaml_frontmatter(text: str) -> str:
+    """Remove one or more leading YAML frontmatter blocks from markdown."""
+    cleaned = text
+    while cleaned.startswith("---\n"):
+        parts = cleaned.split("\n---\n", 1)
+        if len(parts) != 2:
+            break
+        cleaned = parts[1].lstrip()
+    return cleaned
+
+
+def rewrite_local_image_paths(md_text: str, session_dir: Path) -> str:
+    """Rewrite local markdown image paths to absolute paths under session_dir."""
+    image_pat = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+    def _replace(match: re.Match) -> str:
+        alt_text = match.group(1)
+        raw_path = match.group(2).strip()
+
+        # Keep remote URLs/data URIs untouched.
+        if raw_path.startswith(("http://", "https://", "data:")):
+            return match.group(0)
+
+        # Remove optional angle brackets around local path.
+        if raw_path.startswith("<") and raw_path.endswith(">"):
+            raw_path = raw_path[1:-1].strip()
+
+        # Leave absolute filesystem paths untouched.
+        path_obj = Path(raw_path)
+        if path_obj.is_absolute():
+            return match.group(0)
+
+        abs_img = (session_dir / raw_path).resolve()
+        return f"![{alt_text}](<{abs_img.as_posix()}>)"
+
+    return image_pat.sub(_replace, md_text)
+
+
+def relabel_figures_with_offset(md_text: str, start_index: int = 0) -> tuple[str, int]:
+    """Relabel image captions to Fig S<n> starting from start_index + 1.
+
+    The function is driven by markdown image markers only (`![]()`). Each
+    detected image is assigned the next sequential figure label, and any
+    nearby legacy caption lines are discarded.
+    """
+    image_pat = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+    raw_lines = md_text.splitlines()
+    # Split any line that contains image markers so each image lives on its own line
+    # (handles `![A](x)![B](y)` and `text ![A](x) text ![B](y) text`).
+    lines: list[str] = []
+    for raw in raw_lines:
+        if "![" not in raw:
+            lines.append(raw)
+            continue
+        pos = 0
+        for m in image_pat.finditer(raw):
+            prefix = raw[pos:m.start()].rstrip()
+            if prefix:
+                lines.append(prefix)
+            lines.append(m.group(0))
+            pos = m.end()
+        suffix = raw[pos:].lstrip()
+        if suffix:
+            lines.append(suffix)
+    out: list[str] = []
+    in_code_block = False
+    fig_idx = start_index
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            in_code_block = not in_code_block
+            out.append(line)
+            i += 1
+            continue
+
+        if in_code_block:
+            out.append(line)
+            i += 1
+            continue
+
+        img_match = image_pat.match(stripped)
+        if img_match:
+            alt_text = img_match.group(1).strip()
+            img_path = img_match.group(2).strip().strip("<>")
+
+            fig_idx += 1
+            caption_text = alt_text if alt_text else "Plot"
+            # Ensure a blank line precedes the raw-LaTeX figure block so pandoc
+            # treats it as block-level (otherwise a preceding `---` rule or text
+            # merges with it and the figure is dropped).
+            if out and out[-1].strip() != "":
+                out.append("")
+            out.append(rf"\Needspace{{18\baselineskip}}")
+            out.append(r"\begin{center}")
+            out.append(rf"\includegraphics{{{img_path}}}")
+            out.append(r"\end{center}")
+            out.append("")
+            out.append(rf"\noindent\textbf{{Fig S{fig_idx}: {caption_text}}}")
+            out.append("")
+
+            # Drop one nearby legacy caption line if it looks like a figure label.
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines):
+                next_line = lines[j].strip().strip("*_` ")
+                if re.match(r"^(?:fig(?:ure)?\.?\s*[:\-\u2014]|figure\s+\d+\s*[:\-\u2014])", next_line, flags=re.IGNORECASE):
+                    i = j
+
+            i += 1
+            continue
+
+        out.append(line)
+        i += 1
+
+    return "\n".join(out).strip() + "\n", fig_idx
+
+
+def build_raw_appended_markdown(
+    reports: dict,
+    sessions_dir: Path,
+    session_suffix: str,
+) -> str:
+    """Concatenate the report markdown files into one raw temp markdown."""
+    today = datetime.date.today().isoformat()
+
+    index_lines = [
+        "| Disease | Report Version | Session | Source Markdown |",
+        "| :--- | :--- | :--- | :--- |",
+    ]
+
+    body_blocks: list[str] = []
+    case_order = ["AD", "PDAC", "LungCancer"]
+
+    for case in case_order:
+        if case not in reports:
+            continue
+
+        for version_key, version_name in (("first_run", "Original"), ("revised", "Revised")):
+            md_path = reports[case].get(version_key)
+            if md_path is None:
+                continue
+
+            disease = CASE_LABELS.get(case, case)
+            session_name = f"{case}{session_suffix}"
+            index_lines.append(
+                f"| {disease} | {version_name} | `{session_name}` | `{md_path.name}` |"
+            )
+
+            raw_text = md_path.read_text(encoding="utf-8")
+            report_text = strip_yaml_frontmatter(raw_text)
+            body_blocks.append(
+                "\n".join([
+                    f"<!-- REPORT_SOURCE: {md_path.parent} -->",
+                    "\\newpage",
+                    f"# Disease: {disease}",
+                    f"## Report Version: {version_name}",
+                    f"### Source: `{md_path.name}`",
+                    "",
+                    report_text.strip(),
+                    "",
+                ])
+            )
+
+    frontmatter = textwrap.dedent(
+        f"""\
+        ---
+        title: OmniCellAgent Supplementary Information
+        subtitle: Benchmark Report Collection ({session_suffix})
+        date: {today}
+        ---
+        """
+    ).strip()
+
+    title_page = "\n".join([
+        "# Supplementary Information",
+        "",
+        "## OmniCellAgent Benchmark Reports",
+        "",
+        f"This supplementary file compiles all original and revised disease reports for session suffix `{session_suffix}`.",
+        "",
+        "## Structure",
+        "",
+        "Reports are grouped by disease, then by report version (Original, Revised).",
+        "",
+        *index_lines,
+        "",
+    ])
+
+    return "\n\n".join([frontmatter, title_page, *body_blocks]) + "\n"
+
+
+def preprocess_combined_markdown(
+    md_text: str,
+    sessions_dir: Path,
+    figure_offset: int,
+) -> tuple[str, list[str]]:
+    """Normalize a combined markdown document for PDF generation."""
+    resource_paths = [str(sessions_dir)]
+    current_offset = figure_offset
+    processed_blocks: list[str] = []
+
+    current_source_dir = sessions_dir
+    pending_lines: list[str] = []
+
+    def flush_pending() -> None:
+        nonlocal current_offset
+        if not pending_lines:
+            return
+        part = "\n".join(pending_lines).strip()
+        if part:
+            normalized = rewrite_local_image_paths(part, current_source_dir)
+            normalized, current_offset = relabel_figures_with_offset(
+                normalized,
+                start_index=current_offset,
+            )
+            processed_blocks.append(normalized.strip())
+        pending_lines.clear()
+
+    for line in md_text.splitlines():
+        marker = re.match(r"<!--\s*REPORT_SOURCE:\s*(.+?)\s*-->", line)
+        if marker:
+            flush_pending()
+            current_source_dir = Path(marker.group(1).strip())
+            continue
+        pending_lines.append(line)
+
+    flush_pending()
+
+    processed = "\n\n\\newpage\n\n".join(processed_blocks).strip() + "\n"
+    return processed, resource_paths
+
+
+def build_combined_supplementary_markdown(
+    reports: dict,
+    sessions_dir: Path,
+    session_suffix: str,
+    figure_offset: int = 0,
+) -> tuple[str, list[str]]:
+    raw_markdown = build_raw_appended_markdown(reports, sessions_dir, session_suffix)
+    processed_markdown, resource_paths = preprocess_combined_markdown(
+        raw_markdown,
+        sessions_dir=sessions_dir,
+        figure_offset=figure_offset,
+    )
+    return processed_markdown, resource_paths
+
+
 def main():
     parser = argparse.ArgumentParser(description="Combine report PDFs into supplementary document")
     parser.add_argument("--skip-regenerate", action="store_true",
@@ -484,6 +752,11 @@ def main():
         "--sessions-dir", default=None,
         help="Override sessions directory (default webapp/sessions). "
              "The original script used webapp/assets/sessions; pass the right one for your layout.",
+    )
+    parser.add_argument(
+        "--figure-offset", type=int, default=0,
+        help="Figure numbering offset for supplementary labels (Fig S<n>). "
+             "Example: --figure-offset 11 starts at Fig S12.",
     )
     args = parser.parse_args()
 
@@ -528,62 +801,44 @@ def main():
     with os.fdopen(header_fd, "w") as f:
         f.write(LATEX_HEADER)
     
-    # Process and combine PDFs
-    print(f"\n📚 Processing PDFs...")
-    print("  Using original style: regenerate from Markdown, then merge report PDFs directly.")
-    merger = PdfMerger()
-    
-    case_order = ['AD', 'PDAC', 'LungCancer']
-    
+    # Build one combined markdown so section structure and figure numbering are global.
+    print(f"\n📚 Building combined supplementary markdown...")
+    combined_md, resource_paths = build_combined_supplementary_markdown(
+        reports=reports,
+        sessions_dir=sessions_dir,
+        session_suffix=args.session_suffix,
+        figure_offset=args.figure_offset,
+    )
+    if not combined_md.strip():
+        print("❌ No report content found to compile.")
+        _cleanup(header_path)
+        return 1
+
+    suffix_token = "default" if args.session_suffix == "-test" else args.session_suffix.strip("-")
+    combined_md_path = export_dir / f"supplementary_reports_{suffix_token}.md"
+    combined_md_path.write_text(combined_md, encoding="utf-8")
+    print(f"  ✅ Wrote combined markdown: {combined_md_path}")
+
+    # Compile one PDF from the combined markdown.
+    print(f"\n🧱 Compiling supplementary PDF from combined markdown...")
+    ok = compile_pdf_from_md(
+        md_path=str(combined_md_path),
+        pdf_path=str(output_path),
+        header_file=header_path,
+        resource_paths=resource_paths,
+        working_dir=str(project_root),
+    )
+    if not ok:
+        _cleanup(header_path)
+        print("❌ Failed to compile supplementary PDF")
+        return 1
+
     total_pages = 0
-    
-    # First pass: regenerate PDFs and collect page counts.
-    pdf_entries = []
-    for case in case_order:
-        if case not in reports:
-            continue
-        paths = reports[case]
-        
-        for version, md_path in [('First Run', paths['first_run']), ('Revised', paths['revised'])]:
-            if md_path is None:
-                continue
-            
-            pdf_path = md_path.with_suffix('.pdf')
-            
-            # Regenerate PDF if needed
-            if not args.skip_regenerate or not pdf_path.exists():
-                print(f"  ⏳ Regenerating: {case} ({version})...")
-                if compile_pdf_from_md(str(md_path), str(pdf_path), header_path):
-                    print(f"    ✅ Generated: {pdf_path.name}")
-                else:
-                    print(f"    ❌ Failed to generate PDF for {md_path.name}")
-                    continue
-            
-            if pdf_path.exists():
-                try:
-                    reader = PdfReader(str(pdf_path))
-                    num_pages = len(reader.pages)
-                    pdf_entries.append({
-                        'case': case,
-                        'version': version,
-                        'pdf_path': pdf_path,
-                        'num_pages': num_pages
-                    })
-                except Exception as e:
-                    print(f"  ⚠️  Could not read {pdf_path.name}: {e}")
-
-    # Second pass: merge report PDFs directly, matching supplementary_reports.pdf.
-    for entry in pdf_entries:
-        pdf_path = entry['pdf_path']
-        num_pages = entry['num_pages']
-
-        merger.append(str(pdf_path))
-        print(f"  ✅ Added {pdf_path.name} ({num_pages} pages)")
-        total_pages += num_pages
-    
-    # Write output
-    merger.write(str(output_path))
-    merger.close()
+    try:
+        reader = PdfReader(str(output_path))
+        total_pages = len(reader.pages)
+    except Exception as e:
+        print(f"⚠️  Could not read output PDF for page count: {e}")
     
     # Clean up
     try:
