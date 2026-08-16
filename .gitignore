@@ -47,7 +47,12 @@ LightRAG
 doi_cache/*
 jsonl_cache/*
 MEDIAL.py
-enrichment/*
+
+
+enrichment_bkp
+enrichment/__pycache__/
+enrichment/dataset_outputs/*
+
 dataset_outputs/*
 webapp/sessions/*
 cache/*
