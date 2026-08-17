@@ -221,3 +221,68 @@ def test_success_return_dict_exposes_contrast():
     assert len(success_dicts) == 1, "expected exactly one success return dict"
     keys = {k.value for k in success_dicts[0].keys if isinstance(k, ast.Constant)}
     assert "contrast" in keys
+
+
+@requires_fixture
+def test_breast_cancer_cohort_is_unreliable(cohort):
+    """4 checks fail: protocol, dataset overlap, donor count, donor dominance."""
+    from cohort_diagnostics import compute_cohort_diagnostics
+
+    X, Y, meta = cohort
+    lib = X.values.sum(axis=1)
+    diag = compute_cohort_diagnostics(meta, Y == 0, Y == 1, lib_sizes=lib)
+
+    assert diag["verdict"] == "unreliable"
+    names = {c["check"] for c in diag["failed_checks"]}
+    assert "protocol_balance" in names
+    assert "dataset_overlap" in names
+    assert "donor_count" in names
+    assert "donor_dominance" in names
+
+
+def test_balanced_cohort_is_ok():
+    from cohort_diagnostics import compute_cohort_diagnostics
+
+    n = 400
+    meta = pd.DataFrame({
+        "suspension_type": ["cell"] * n,
+        "dataset_id": [f"ds{i % 12}" for i in range(n)],
+        "donor_id": [f"donor{i % 40}" for i in range(n)],
+    })
+    # Block split, not row-interleaved: with a period-2 interleave, the even
+    # moduli used for dataset_id (%12) and donor_id (%40) alias perfectly
+    # with group parity (gcd(2, 12) = gcd(2, 40) = 2), so each group would
+    # only ever see half the datasets/donors -- e.g. 0 of 12 datasets shared,
+    # a spurious FAIL in a fixture meant to be genuinely comparable.
+    is_ref = np.array([True] * (n // 2) + [False] * (n // 2))
+    diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref,
+                                      lib_sizes=np.full(n, 1000.0))
+    assert diag["verdict"] == "ok"
+    assert diag["failed_checks"] == []
+
+
+def test_unknown_donors_are_not_treated_as_one_donor():
+    """35% of microglia_brain cells carry donor_id 'unknown'."""
+    from cohort_diagnostics import compute_cohort_diagnostics
+
+    n = 100
+    meta = pd.DataFrame({
+        "suspension_type": ["cell"] * n,
+        "dataset_id": [f"ds{i % 6}" for i in range(n)],
+        "donor_id": ["unknown"] * 40 + [f"donor{i % 30}" for i in range(60)],
+    })
+    is_ref = np.array([True, False] * 50)
+    diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref)
+    names = {c["check"] for c in diag["failed_checks"]}
+    assert "donor_usability" in names
+    assert diag["checks"]["donor_usability"]["value"] == pytest.approx(0.40)
+
+
+def test_missing_columns_do_not_raise():
+    from cohort_diagnostics import compute_cohort_diagnostics
+
+    meta = pd.DataFrame({"irrelevant": range(10)})
+    is_ref = np.array([True] * 5 + [False] * 5)
+    diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref)
+    assert diag["verdict"] in {"ok", "caution", "unreliable"}
+    assert isinstance(diag["failed_checks"], list)
