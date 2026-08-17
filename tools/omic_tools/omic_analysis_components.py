@@ -43,7 +43,40 @@ def create_directories_parallel(directories):
     Parallel(n_jobs=-1)(delayed(create_dir)(directory) for directory in directories)
 
 
-def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = True, session_dir: str = None) -> dict:
+def _resolve_gene_names(gene_names, n_features: int, session_dir: str = None) -> list:
+    """Resolve gene symbols for the expression feature axis.
+
+    The loader returns a DataFrame whose columns are HGNC symbols, so the caller
+    should pass them in. Falls back to the loader's own sidecar file, then fails
+    loudly rather than guessing.
+    """
+    if gene_names is not None:
+        names = list(gene_names)
+        if len(names) != n_features:
+            raise ValueError(
+                f"gene_names has {len(names)} entries but the matrix has "
+                f"{n_features} features."
+            )
+        return names
+
+    choice_path = os.path.join(session_dir or "", "bmg_to_gene_choice.csv")
+    if os.path.exists(choice_path):
+        names = pd.read_csv(choice_path)["gene_name"].tolist()
+        if len(names) == n_features:
+            return names
+        raise ValueError(
+            f"{choice_path} has {len(names)} genes but the matrix has "
+            f"{n_features} features."
+        )
+
+    raise ValueError(
+        "Cannot determine gene names: none were passed and "
+        f"{choice_path} is missing. The loader emits gene symbols as the "
+        "columns of `dataset.data`; capture them before np.nan_to_num()."
+    )
+
+
+def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = True, session_dir: str = None, gene_names: list = None) -> dict:
     """
     Perform omic analysis on the input data dictionary.
 
@@ -66,58 +99,31 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     combined_disease_matrix = np.nan_to_num(combined_disease_matrix, nan=0.0)
     combined_normal_matrix = np.nan_to_num(combined_normal_matrix, nan=0.0)
     
-    # Load transcriptomics and proteomics data
-    transcriptomics_data_path = os.path.join(BMG_DIR, "Entity/Transcript/BioMedGraphica_Conn_Transcript.csv")
-    proteomics_data_path = os.path.join(BMG_DIR, "Entity/Protein/BioMedGraphica_Conn_Protein_Display_Name.csv")
-    # Load the transcriptomics and proteomics data
-    transcriptomics_data = pd.read_csv(transcriptomics_data_path).rename(columns={'HGNC_Symbol': 'Name'})
-    proteomics_data = pd.read_csv(proteomics_data_path).rename(columns={'BMG_Protein_Name': 'Name'})
-    omics_data = pd.concat([transcriptomics_data, proteomics_data], axis=0)
-    print(f"Omics data shape: {omics_data.shape}")
-    
-    # Clear intermediate data
-    del transcriptomics_data, proteomics_data
+    n_features = combined_disease_matrix.shape[1]
+    gene_names = _resolve_gene_names(gene_names, n_features, session_dir)
+
+    # The loader already collapsed transcripts to one representative per gene
+    # (CellTOSG_Loader/data_loader.py: bmg_matrix_to_gene_matrix), so the feature
+    # axis is 41,149 HGNC symbols. Do not re-derive it from the BioMedGraphica
+    # entity tables — those describe a 533,458-row axis this data no longer uses.
+    print("Creating disease DataFrame...")
+    combined_disease_df = pd.DataFrame(
+        combined_disease_matrix.T,
+        columns=[f'ds_sample_{i}' for i in range(combined_disease_matrix.shape[0])],
+    )
+    combined_disease_df.insert(0, 'Name', gene_names)
+    del combined_disease_matrix
     gc.collect()
 
-    # Transpose the combined matrices and convert to DataFrame and rename the columns
-    # Process one at a time to reduce peak memory
-    print("Creating disease DataFrame...")
-    combined_disease_df = pd.DataFrame(combined_disease_matrix.T, columns=[f'ds_sample_{i}' for i in range(combined_disease_matrix.shape[0])])
-    del combined_disease_matrix  # Free original matrix immediately
-    gc.collect()
-    
     print("Creating normal DataFrame...")
-    combined_normal_df = pd.DataFrame(combined_normal_matrix.T, columns=[f'ns_sample_{i}' for i in range(combined_normal_matrix.shape[0])])
-    del combined_normal_matrix  # Free original matrix immediately
+    combined_normal_df = pd.DataFrame(
+        combined_normal_matrix.T,
+        columns=[f'ns_sample_{i}' for i in range(combined_normal_matrix.shape[0])],
+    )
+    combined_normal_df.insert(0, 'Name', gene_names)
+    del combined_normal_matrix
     gc.collect()
-    
-    # Convert to list to avoid index alignment issues
-    biomedgraphica_ids = omics_data['BioMedGraphica_Conn_ID'].tolist()
-    # Insert a new column 'BioMedGraphica_Conn_ID' as the first column in both DataFrames
-    combined_disease_df.insert(0, 'BioMedGraphica_Conn_ID', biomedgraphica_ids)
-    combined_normal_df.insert(0, 'BioMedGraphica_Conn_ID', biomedgraphica_ids)
-    # Filter out only the transcript data
-    combined_disease_df = combined_disease_df[combined_disease_df['BioMedGraphica_Conn_ID'].str.contains("BMGC_TS")]
-    combined_normal_df = combined_normal_df[combined_normal_df['BioMedGraphica_Conn_ID'].str.contains("BMGC_TS")]
-    gc.collect()
-    
-    # Map the IDs to gene names
-    mapping_dict = dict(zip(omics_data['BioMedGraphica_Conn_ID'], omics_data['Name']))
-    del omics_data  # Free omics_data after extracting what we need
-    gc.collect()
-    
-    combined_disease_df['Name'] = combined_disease_df['BioMedGraphica_Conn_ID'].map(mapping_dict)
-    combined_normal_df['Name'] = combined_normal_df['BioMedGraphica_Conn_ID'].map(mapping_dict)
-    combined_disease_df = combined_disease_df.drop(columns=['BioMedGraphica_Conn_ID'])
-    combined_normal_df = combined_normal_df.drop(columns=['BioMedGraphica_Conn_ID'])
-    combined_disease_df = combined_disease_df[['Name'] + [col for col in combined_disease_df.columns if col != 'Name']]
-    combined_normal_df = combined_normal_df[['Name'] + [col for col in combined_normal_df.columns if col != 'Name']]
-    
-    # Aggregate with mean average across the rows with the same gene name
-    combined_disease_df = combined_disease_df.groupby('Name').mean().reset_index()
-    combined_normal_df = combined_normal_df.groupby('Name').mean().reset_index()
-    gc.collect()
-    
+
     # Print the shapes of the aggregated DataFrames
     print(f"Disease DataFrame shape after aggregation: {combined_disease_df.shape}")
     print(f"Normal DataFrame shape after aggregation: {combined_normal_df.shape}")

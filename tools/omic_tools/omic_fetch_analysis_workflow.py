@@ -625,6 +625,10 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
      actual_label, label_fallback_message) = omic_fetch_with_new_loader(
         fetch_dict, session_dir, label=label
     )
+    # The loader returns a DataFrame whose columns are HGNC gene symbols.
+    # Capture them now: np.nan_to_num() downstream returns a bare ndarray and
+    # destroys column labels.
+    gene_names = list(X.columns) if hasattr(X, "columns") else None
     times['fetch_end'] = time.time()
 
     if actual_label != label:
@@ -760,7 +764,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                         comparison_name,
                         data_dict,
                         enable_plotting=enable_plotting,
-                        session_dir=session_dir
+                        session_dir=session_dir,
+                        gene_names=gene_names,
                     )
                     analysis_success = True
                     analysis_paths = {
