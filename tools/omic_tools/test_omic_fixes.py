@@ -493,3 +493,19 @@ def test_top_genes_are_reported_as_symbols(cohort):
     assert all(isinstance(s, str) and s for s in symbols)
     # MALAT1 dominates both cohorts on this data.
     assert "MALAT1" in symbols
+
+
+def test_suspension_type_is_an_optional_parameter():
+    """Default None must preserve current fetch behaviour exactly."""
+    import inspect
+    from omic_fetch_analysis_workflow import (
+        omic_fetch_analysis_workflow,
+        omic_fetch_with_new_loader,
+    )
+
+    outer = inspect.signature(omic_fetch_analysis_workflow).parameters
+    inner = inspect.signature(omic_fetch_with_new_loader).parameters
+    assert "suspension_type" in outer
+    assert outer["suspension_type"].default is None
+    assert "suspension_type" in inner
+    assert inner["suspension_type"].default is None

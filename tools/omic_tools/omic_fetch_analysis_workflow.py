@@ -331,7 +331,8 @@ def select_contrast(Y, mapping: dict):
     }
 
 
-def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease"):
+def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease",
+                               suspension_type: str = None):
     """
     Fetch single-cell RNA-seq data using the new CellTOSGDataLoader with soft matching.
 
@@ -345,6 +346,9 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         label (str): Column used to split samples for downstream differential
             expression. Defaults to "disease" (disease vs non-disease). Other
             valid choices include "gender" (female vs male) and "cell_type".
+        suspension_type (str): Optional 'cell' or 'nucleus'. Default None keeps
+            current behaviour (no protocol filter). When set, constrains both
+            the disease and matched-control arms to a single assay protocol.
 
     Returns:
         tuple: (X, Y, metadata, similar_terms, retrieval_success)
@@ -383,6 +387,11 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         # The loader resolves condition keys through FIELD_ALIAS, which knows
         # "sex" (-> sex_normalized) but not "gender".
         conditions["sex"] = gender
+    if suspension_type:
+        # Whole-cell and single-nucleus profiles are not interchangeable. Setting
+        # this constrains BOTH arms, because the loader applies query conditions
+        # to the control group as well.
+        conditions["suspension_type"] = suspension_type
 
     if not conditions:
         print("[Omic Fetch] No valid conditions extracted from NER")
@@ -624,7 +633,7 @@ TOP_K_GENES = 20
 def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                                  organ=None, tissue=None, gender=None, session_dir=None,
                                  enable_differential_expression=True, enable_plotting=True,
-                                 label="disease"):
+                                 label="disease", suspension_type=None):
     """
     Perform the complete single-cell omic analysis workflow.
 
@@ -645,6 +654,10 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
             Defaults to "disease" (disease vs non-disease via stratified
             balancing). Set to "gender" to compare female vs male within the
             queried subset, or "cell_type" for cell-type-stratified analyses.
+        suspension_type: Optional 'cell' or 'nucleus'. Default None keeps current
+            behaviour. Assay protocol is confounded with disease status in several
+            cohorts (breast_cancer is 73% whole-cell in normal vs 81% nucleus in
+            disease); setting this constrains both arms to one protocol.
     """
     times = {}
     times['start'] = time.time()
@@ -703,7 +716,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     
     (X, Y, metadata, similar_terms, retrieval_success,
      actual_label, label_fallback_message, label_mapping) = omic_fetch_with_new_loader(
-        fetch_dict, session_dir, label=label
+        fetch_dict, session_dir, label=label, suspension_type=suspension_type
     )
     # The loader returns a DataFrame whose columns are HGNC gene symbols.
     # Capture them now: np.nan_to_num() downstream returns a bare ndarray and
@@ -1128,7 +1141,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         "comparison_name": comparison_name if de_gated else None,
         "contrast": contrast,
         "num_samples": metadata.shape[0] if metadata is not None else 0,
-        "num_features": len(top_gene_indices) if top_gene_indices else 0,
+        "num_features": int(X.shape[1]) if X is not None and len(X.shape) > 1 else 0,
         "top_gene_indices": top_gene_indices,
         "top_gene_names": top_gene_names,
         "top_gene_values": top_gene_values,
