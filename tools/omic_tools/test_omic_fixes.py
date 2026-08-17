@@ -478,3 +478,18 @@ def test_pdf_renders_cohort_caveat():
     assert "failed_checks" in fn_source and "caution_checks" in fn_source, (
         "caveat must surface both failed_checks and caution_checks"
     )
+
+
+@requires_fixture
+def test_top_genes_are_reported_as_symbols(cohort):
+    """A bare integer index is not an interpretable result."""
+    from omic_fetch_analysis_workflow import compute_top_genes, normalize_cp10k
+
+    X, _, _ = cohort
+    names = list(X.columns)
+    idx, _values = compute_top_genes(normalize_cp10k(X).values, 20)
+    symbols = [names[i] for i in idx]
+    assert len(symbols) == 20
+    assert all(isinstance(s, str) and s for s in symbols)
+    # MALAT1 dominates both cohorts on this data.
+    assert "MALAT1" in symbols

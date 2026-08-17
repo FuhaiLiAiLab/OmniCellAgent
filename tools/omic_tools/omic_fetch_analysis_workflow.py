@@ -604,14 +604,17 @@ def normalize_cp10k(X, target_sum: float = 1e4):
 
 
 def compute_top_genes(X, top_k=100):
-    """Compute top K genes by mean expression."""
+    """Compute top K genes by mean expression. Returns (indices, values)."""
     if X is None or X.shape[0] == 0:
         return [], []
-    
-    mean_expr = np.mean(X, axis=0)
+
+    # Always work on a bare ndarray: np.mean() on a DataFrame returns a Series,
+    # and indexing that Series with integer positions is deprecated in pandas.
+    values = X.values if hasattr(X, "values") else np.asarray(X)
+    mean_expr = np.mean(values, axis=0)
     top_k_indices = np.argsort(mean_expr)[-top_k:][::-1]
     top_k_values = mean_expr[top_k_indices]
-    
+
     return top_k_indices.tolist(), top_k_values.tolist()
 
 
@@ -763,29 +766,38 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         }
     
     # ===========================================================================
-    # STEP 3: Compute top genes by mean expression
+    # STEP 3: Abundance QC — most-expressed genes
     # ===========================================================================
+    # This is a data-quality check, NOT a discovery step. The top of this list is
+    # dominated by MALAT1, mitochondrial pseudogenes and housekeeping genes.
+    # Tissue markers appearing here (SFTPB/SFTPC in lung, SPP1/CD74 in microglia)
+    # confirm the intended cell population was retrieved.
     print(f"\n{'='*70}")
-    print(f"STEP 3: Computing Top {TOP_K_GENES} Genes by Mean Expression")
+    print(f"STEP 3: Abundance QC — Top {TOP_K_GENES} Genes by Mean Expression (CP10K)")
     print(f"{'='*70}")
-    
+
     top_gene_indices, top_gene_values = compute_top_genes(X, TOP_K_GENES)
-    print(f"[Genes] Top {len(top_gene_indices)} genes computed")
-    if len(top_gene_indices) > 0:
-        print(f"  Top 5 gene indices: {top_gene_indices[:5]}")
-        print(f"  Top 5 mean values: {[f'{v:.4f}' for v in top_gene_values[:5]]}")
-    
+    top_gene_names = (
+        [gene_names[i] for i in top_gene_indices] if gene_names else []
+    )
+    print(f"[QC] Top {len(top_gene_indices)} genes computed")
+    if top_gene_names:
+        print(f"  Top 5 genes: {top_gene_names[:5]}")
+        print(f"  Top 5 mean values (CP10K): {[f'{v:.4f}' for v in top_gene_values[:5]]}")
+        print("  NOTE: abundance reflects data characteristics, not disease signal.")
+
     times['gene_end'] = time.time()
-    
+
     if len(top_gene_indices) > 0:
         top_genes_df = pd.DataFrame({
             "rank": range(1, len(top_gene_indices) + 1),
             "gene_index": top_gene_indices,
-            "mean_expression": top_gene_values
+            "gene_name": top_gene_names or [""] * len(top_gene_indices),
+            "mean_expression_cp10k": top_gene_values,
         })
         top_genes_path = os.path.join(session_dir, "top_genes_by_expression.csv")
         top_genes_df.to_csv(top_genes_path, index=False)
-        print(f"[Genes] Saved to: {top_genes_path}")
+        print(f"[QC] Saved to: {top_genes_path}")
     
     # ===========================================================================
     # STEP 4: Differential Expression Analysis (label-driven)
@@ -1118,6 +1130,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         "num_samples": metadata.shape[0] if metadata is not None else 0,
         "num_features": len(top_gene_indices) if top_gene_indices else 0,
         "top_gene_indices": top_gene_indices,
+        "top_gene_names": top_gene_names,
         "top_gene_values": top_gene_values,
         "top_genes_by_fdr": top_genes_by_fdr,
         "similar_terms": similar_terms,
