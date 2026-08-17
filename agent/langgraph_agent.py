@@ -1985,7 +1985,13 @@ Create thorough plans that:
                 if top_genes:
                     shared_data["top_genes"] = top_genes
                     print(f"[SharedData] Stored {len(top_genes)} genes from OmicAnalysis")
-                
+
+                verdict = result_content.get("cohort_verdict")
+                if verdict:
+                    shared_data["cohort_verdict"] = verdict
+                    shared_data["cohort_diagnostics"] = result_content.get("cohort_diagnostics")
+                    print(f"[SharedData] Cohort verdict: {verdict}")
+
                 # Also extract disease and cell type
                 extracted = result_content.get("extracted_entities", {})
                 if extracted.get("disease"):

@@ -76,7 +76,7 @@ def _resolve_gene_names(gene_names, n_features: int, session_dir: str = None) ->
     )
 
 
-def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = True, session_dir: str = None, gene_names: list = None) -> dict:
+def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = True, session_dir: str = None, gene_names: list = None, diagnostics_text: str = "") -> dict:
     """
     Perform omic analysis on the input data dictionary.
 
@@ -151,6 +151,10 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     directories_to_create = [de_output_dir, volcano_dir, enrich_output_dir, plot_enrich_dir]
     create_directories_parallel(directories_to_create)
 
+    if diagnostics_text:
+        with open(os.path.join(de_output_dir, "COHORT_DIAGNOSTICS.txt"), "w") as handle:
+            handle.write(diagnostics_text + "\n")
+
     # Perform the differential expression analysis
     significant_genes, result_df = perform_unpaired_differential_expression(
         disease_df=combined_disease_df, 
@@ -160,7 +164,8 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         sig_top_n=1000,  # change to 1000
         disease=disease_name,
         de_output_dir=de_output_dir,
-        n_jobs=-1  # Use all available cores for maximum speed
+        n_jobs=-1,  # Use all available cores for maximum speed
+        diagnostics_text=diagnostics_text,
     )
 
     # Create volcano plots with different thresholds in parallel
@@ -188,12 +193,13 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         print("Creating volcano plots...")
         for config in volcano_configs:
             create_volcano_plot(
-                result_df, 
-                config['p_value_threshold'], 
+                result_df,
+                config['p_value_threshold'],
                 config['log2fc_threshold'],
                 config['save_path'],
                 config['plot_title'],
-                config['highlight_top_n']
+                config['highlight_top_n'],
+                diagnostics_text=diagnostics_text,
             )
         return "Volcano plots completed"
     
@@ -255,10 +261,10 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     return data_and_analysis_dict
         
 
-def perform_unpaired_differential_expression(disease_df, normal_df, 
-                                    p_value_threshold=0.05, log2fc_threshold=1.5, 
+def perform_unpaired_differential_expression(disease_df, normal_df,
+                                    p_value_threshold=0.05, log2fc_threshold=1.5,
                                     sig_top_n=100, n_jobs=16, disease="Disease",
-                                    de_output_dir=None) -> tuple[dict, pd.DataFrame]:
+                                    de_output_dir=None, diagnostics_text: str = "") -> tuple[dict, pd.DataFrame]:
     """
     Perform unpaired non-parametric differential expression analysis using Mann–Whitney U test.
 
@@ -414,7 +420,10 @@ def perform_unpaired_differential_expression(disease_df, normal_df,
     ]
     
     def save_dataframe(df, filepath):
-        df.to_csv(filepath, index=False)
+        with open(filepath, "w") as handle:
+            for line in (diagnostics_text or "").splitlines():
+                handle.write(f"# {line}\n")
+            df.to_csv(handle, index=False)
         return f"Saved {filepath}"
     
     print("Saving differential expression results in parallel...")
@@ -549,8 +558,9 @@ def parallel_mannwhitney_optimized(disease_matrix, control_matrix, n_jobs=-1):
     print("Using batch-processed Mann-Whitney method...")
     return parallel_mannwhitney(disease_matrix, control_matrix, n_jobs)
 
-def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5, 
-                         save_path=None, plot_title=None, highlight_top_n=50):
+def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5,
+                         save_path=None, plot_title=None, highlight_top_n=50,
+                         diagnostics_text: str = ""):
     """
     Create a volcano plot from differential expression results.
     Saves both static PNG and interactive HTML (plotly) versions.
@@ -673,6 +683,10 @@ def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5
     # Customize the plot
     ax.grid(True, linestyle='--', alpha=0.3)
     
+    if diagnostics_text:
+        verdict_line = diagnostics_text.splitlines()[0]
+        plt.figtext(0.5, 0.005, verdict_line, ha="center", fontsize=8, color="firebrick")
+
     # Save the PNG plot
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     fig.savefig(save_path, dpi=150, bbox_inches='tight', pad_inches=0.2, facecolor='white')

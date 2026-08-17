@@ -286,3 +286,98 @@ def test_missing_columns_do_not_raise():
     diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref)
     assert diag["verdict"] in {"ok", "caution", "unreliable"}
     assert isinstance(diag["failed_checks"], list)
+
+
+def test_success_return_dict_exposes_cohort_diagnostics():
+    """Task 6: top_genes_by_fdr reaches PubMed search and the PDF with no
+    verdict attached unless cohort_diagnostics/cohort_verdict ride along in
+    the same success return dict."""
+    import ast
+    import inspect
+    from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
+
+    source = inspect.getsource(omic_fetch_analysis_workflow)
+    tree = ast.parse(source)
+    success_dicts = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value == "comparison_name"
+            for k in node.value.keys
+        )
+    ]
+    assert len(success_dicts) == 1, "expected exactly one success return dict"
+    keys = {k.value for k in success_dicts[0].keys if isinstance(k, ast.Constant)}
+    assert "cohort_diagnostics" in keys
+    assert "cohort_verdict" in keys
+
+
+def test_format_diagnostics_text_lists_failures():
+    from cohort_diagnostics import format_diagnostics_text
+
+    diag = {
+        "verdict": "unreliable",
+        "groups": {
+            "reference": {"name": "normal", "n_cells": 67},
+            "alternate": {"name": "breast cancer", "n_cells": 67},
+        },
+        "failed_checks": [{"check": "donor_count", "detail": "donors per group: normal=45, breast cancer=5"}],
+        "caution_checks": [],
+    }
+    text = format_diagnostics_text(diag)
+    assert "UNRELIABLE" in text
+    assert "donor_count" in text
+    assert "normal (n=67)" in text
+    assert "anti-conservative" in text
+
+
+def test_save_dataframe_stamps_diagnostics_header_under_joblib(tmp_path):
+    """save_dataframe runs inside joblib.Parallel(n_jobs=-1); a closure over
+    diagnostics_text must still pickle to worker processes, and the CSVs it
+    writes must be re-readable with pd.read_csv(path, comment="#")."""
+    from omic_analysis_components import perform_unpaired_differential_expression
+
+    rng = np.random.default_rng(0)
+    n_genes, n_disease, n_control = 40, 6, 6
+    disease_df = pd.DataFrame(
+        rng.poisson(5, size=(n_genes, n_disease)).astype(float),
+        columns=[f"ds_sample_{i}" for i in range(n_disease)],
+    )
+    disease_df.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
+    control_df = pd.DataFrame(
+        rng.poisson(5, size=(n_genes, n_control)).astype(float),
+        columns=[f"ns_sample_{i}" for i in range(n_control)],
+    )
+    control_df.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
+
+    diagnostics_text = (
+        "COHORT DIAGNOSTICS: UNRELIABLE\n"
+        "  contrast: normal (n=6) vs breast cancer (n=6)\n"
+        "  FAIL    donor_count: donors per group: normal=6, breast cancer=1"
+    )
+
+    perform_unpaired_differential_expression(
+        disease_df=disease_df,
+        normal_df=control_df,
+        p_value_threshold=0.5,
+        log2fc_threshold=0.0,
+        sig_top_n=n_genes,
+        n_jobs=-1,
+        disease="test",
+        de_output_dir=str(tmp_path),
+        diagnostics_text=diagnostics_text,
+    )
+
+    out_path = os.path.join(str(tmp_path), "unpaired_differential_expression_results.csv")
+    with open(out_path) as handle:
+        header_lines = [next(handle) for _ in range(3)]
+    assert header_lines[0] == "# COHORT DIAGNOSTICS: UNRELIABLE\n"
+    assert header_lines[1].startswith("#   contrast:")
+    assert header_lines[2].startswith("#   FAIL")
+
+    reloaded = pd.read_csv(out_path, comment="#")
+    assert len(reloaded) == n_genes
+    assert "Name" in reloaded.columns
+    assert "FDR" in reloaded.columns

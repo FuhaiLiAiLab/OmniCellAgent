@@ -25,12 +25,14 @@ Based on the working CellTOSGDataLoader example pattern.
 
 from ner_tool import ner
 from omic_analysis_components import omic_analysis
+from cohort_diagnostics import compute_cohort_diagnostics, format_diagnostics_text
 from subprocess_r import run_r_script
 
 import sys
 import os
 import time
 import gc
+import json
 import zipfile
 from difflib import get_close_matches
 import numpy as np
@@ -792,6 +794,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     analysis_success = False
     analysis_paths = None
     top_genes_by_fdr = []
+    cohort_diagnostics = None
+    diagnostics_text = ""
 
     # Build a comparison name used for output directory / plot titles.
     # For label="disease" this stays as the disease string (back-compat);
@@ -849,6 +853,20 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                     "omic_label": Y
                 }
 
+                cohort_diagnostics = compute_cohort_diagnostics(
+                    metadata,
+                    Y == contrast["ref_class"],
+                    Y == contrast["alt_class"],
+                    lib_sizes=lib_sizes,
+                    ref_name=contrast["ref_name"],
+                    alt_name=contrast["alt_name"],
+                )
+                diagnostics_text = format_diagnostics_text(cohort_diagnostics)
+                print(f"\n{diagnostics_text}\n")
+
+                with open(os.path.join(session_dir, "cohort_diagnostics.json"), "w") as handle:
+                    json.dump(cohort_diagnostics, handle, indent=2, default=str)
+
                 try:
                     data_and_analysis_dict = omic_analysis(
                         comparison_name,
@@ -856,6 +874,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                         enable_plotting=enable_plotting,
                         session_dir=session_dir,
                         gene_names=gene_names,
+                        diagnostics_text=diagnostics_text,
                     )
                     analysis_success = True
                     analysis_paths = {
@@ -869,7 +888,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                         "significant_genes_by_fdr.csv"
                     )
                     if os.path.exists(gene_file):
-                        gene_df = pd.read_csv(gene_file)
+                        gene_df = pd.read_csv(gene_file, comment="#")
                         # Store full statistics for top genes
                         top_genes_by_fdr = []
                         for idx, row in gene_df.head(TOP_K_GENES).iterrows():
@@ -1094,6 +1113,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         "extracted_entities": fetch_dict,
         "retrieval_success": True,
         "analysis_success": analysis_success,
+        "cohort_diagnostics": cohort_diagnostics,
+        "cohort_verdict": (cohort_diagnostics or {}).get("verdict"),
         "kegg_success": kegg_success,
         "analysis_paths": analysis_paths,
         "plot_paths": plot_paths,  # HTML paths for backward compatibility

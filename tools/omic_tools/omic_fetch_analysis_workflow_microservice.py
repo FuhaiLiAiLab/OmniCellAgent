@@ -158,7 +158,7 @@ def omic_fetch_analysis_workflow_core(text: str, top_k: Optional[int] = 20) -> D
     times['analysis_end'] = time()
     
     # Step 4: Read topk fdr genes and finally passed to the agent for further analysis 
-    gene_dataset = pd.read_csv(f"{data_and_analysis_dict['differential_expression_dir']}/significant_genes_by_fdr.csv")
+    gene_dataset = pd.read_csv(f"{data_and_analysis_dict['differential_expression_dir']}/significant_genes_by_fdr.csv", comment="#")
     top_genes = gene_dataset['Name'].astype(str).values.tolist()[:top_k]
     times['gene_processing_end'] = time()
 
