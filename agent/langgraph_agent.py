@@ -2523,6 +2523,20 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
             top_genes = shared_data.get("top_genes", [])
             if top_genes:
                 appendix_parts.append("### Top Differentially Expressed Genes\n\n")
+
+                cohort_verdict = shared_data.get("cohort_verdict")
+                if cohort_verdict and cohort_verdict != "ok":
+                    appendix_parts.append(
+                        f"**Cohort Diagnostics: {cohort_verdict.upper()}** — this contrast did not "
+                        "pass all comparability checks; the ranking below may be anti-conservative.\n\n"
+                    )
+                    cohort_diag = shared_data.get("cohort_diagnostics") or {}
+                    for item in cohort_diag.get("failed_checks", []):
+                        appendix_parts.append(f"- **{item.get('check')}**: {item.get('detail')}\n")
+                    for item in cohort_diag.get("caution_checks", []):
+                        appendix_parts.append(f"- {item.get('check')}: {item.get('detail')}\n")
+                    appendix_parts.append("\n")
+
                 appendix_parts.append("| # | Gene | Log2FC | FDR | Direction |\n")
                 appendix_parts.append("|---|------|--------|-----|----------|\n")
                 for i, gene in enumerate(top_genes[:50], 1):  # Top 50 genes

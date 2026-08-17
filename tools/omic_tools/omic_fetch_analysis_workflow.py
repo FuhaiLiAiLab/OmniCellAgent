@@ -853,19 +853,30 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                     "omic_label": Y
                 }
 
-                cohort_diagnostics = compute_cohort_diagnostics(
-                    metadata,
-                    Y == contrast["ref_class"],
-                    Y == contrast["alt_class"],
-                    lib_sizes=lib_sizes,
-                    ref_name=contrast["ref_name"],
-                    alt_name=contrast["alt_name"],
-                )
-                diagnostics_text = format_diagnostics_text(cohort_diagnostics)
-                print(f"\n{diagnostics_text}\n")
+                # Diagnostics are advisory only: the gate warns, it never
+                # withholds. Any failure here (bad metadata shape, a
+                # read-only/full session_dir on the json.dump, a future bug
+                # in compute_cohort_diagnostics) must not prevent DE from
+                # running, so it gets its own non-fatal try/except separate
+                # from the omic_analysis try/except below.
+                try:
+                    cohort_diagnostics = compute_cohort_diagnostics(
+                        metadata,
+                        Y == contrast["ref_class"],
+                        Y == contrast["alt_class"],
+                        lib_sizes=lib_sizes,
+                        ref_name=contrast["ref_name"],
+                        alt_name=contrast["alt_name"],
+                    )
+                    diagnostics_text = format_diagnostics_text(cohort_diagnostics)
+                    print(f"\n{diagnostics_text}\n")
 
-                with open(os.path.join(session_dir, "cohort_diagnostics.json"), "w") as handle:
-                    json.dump(cohort_diagnostics, handle, indent=2, default=str)
+                    with open(os.path.join(session_dir, "cohort_diagnostics.json"), "w") as handle:
+                        json.dump(cohort_diagnostics, handle, indent=2, default=str)
+                except Exception as e:
+                    print(f"[DE] WARNING: cohort diagnostics failed ({e}); proceeding without them")
+                    cohort_diagnostics = None
+                    diagnostics_text = ""
 
                 try:
                     data_and_analysis_dict = omic_analysis(

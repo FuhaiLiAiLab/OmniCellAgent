@@ -381,3 +381,100 @@ def test_save_dataframe_stamps_diagnostics_header_under_joblib(tmp_path):
     assert len(reloaded) == n_genes
     assert "Name" in reloaded.columns
     assert "FDR" in reloaded.columns
+
+
+def test_diagnostics_failure_does_not_block_de():
+    """Fix-round 1, Finding 1: diagnostics are advisory only. A failure inside
+    compute_cohort_diagnostics or the cohort_diagnostics.json sidecar write
+    must not prevent DE (the omic_analysis call) from running. They must live
+    in their own try/except, separate from the try/except guarding
+    omic_analysis, with a non-fatal fallback to cohort_diagnostics=None /
+    diagnostics_text=""."""
+    import ast
+    import inspect
+    from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
+
+    source = inspect.getsource(omic_fetch_analysis_workflow)
+    tree = ast.parse(source)
+
+    def calls_name(node, name):
+        return any(
+            isinstance(n, ast.Call)
+            and (
+                (isinstance(n.func, ast.Name) and n.func.id == name)
+                or (isinstance(n.func, ast.Attribute) and n.func.attr == name)
+            )
+            for n in ast.walk(node)
+        )
+
+    diagnostics_trys = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Try) and calls_name(node, "compute_cohort_diagnostics")
+    ]
+    assert len(diagnostics_trys) == 1, (
+        "compute_cohort_diagnostics must be wrapped in exactly one try block"
+    )
+    diag_try = diagnostics_trys[0]
+
+    assert not calls_name(diag_try, "omic_analysis"), (
+        "the diagnostics try/except must be separate from the try/except guarding omic_analysis"
+    )
+
+    assert len(diag_try.handlers) == 1, "expected exactly one except handler"
+    handler = diag_try.handlers[0]
+    assert isinstance(handler.type, ast.Name) and handler.type.id == "Exception", (
+        "must catch broadly with except Exception -- this is advisory code"
+    )
+
+    def assigned_names(stmts):
+        names = set()
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Assign):
+                    names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+        return names
+
+    fallback_names = assigned_names(handler.body)
+    assert "cohort_diagnostics" in fallback_names, "handler must reset cohort_diagnostics"
+    assert "diagnostics_text" in fallback_names, "handler must reset diagnostics_text"
+
+
+def test_pdf_renders_cohort_caveat():
+    """Fix-round 1, Finding 2: the PDF's Shared Data Summary (A4) must render
+    a cohort-diagnostics caveat before the top-genes table whenever
+    cohort_verdict is not "ok". Storing the verdict in shared_data (Task 6
+    Step 6) is not enough if the PDF section never reads it back.
+
+    Reads agent/langgraph_agent.py's source text directly instead of
+    importing the module, since the module has heavy side-effecting imports
+    (langgraph/langchain, API clients) unrelated to this check.
+    """
+    import ast
+
+    agent_path = os.path.join(REPO_ROOT, "agent", "langgraph_agent.py")
+    with open(agent_path) as handle:
+        source = handle.read()
+    tree = ast.parse(source)
+
+    appendix_fn = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_generate_appendix"
+    )
+    fn_source = ast.get_source_segment(source, appendix_fn)
+    assert fn_source is not None
+
+    verdict_idx = fn_source.find("cohort_verdict")
+    table_idx = fn_source.find("| # | Gene")
+    assert verdict_idx != -1, "PDF appendix must read shared_data['cohort_verdict']"
+    assert table_idx != -1, "top-genes table markup not found (fixture out of date?)"
+    assert verdict_idx < table_idx, "cohort caveat must render BEFORE the top-genes table"
+
+    assert '!= "ok"' in fn_source or "!= 'ok'" in fn_source, (
+        "caveat must be gated on the verdict not being 'ok'"
+    )
+    assert "cohort_diagnostics" in fn_source, (
+        "caveat must read shared_data['cohort_diagnostics'] to surface check details"
+    )
+    assert "failed_checks" in fn_source and "caution_checks" in fn_source, (
+        "caveat must surface both failed_checks and caution_checks"
+    )
