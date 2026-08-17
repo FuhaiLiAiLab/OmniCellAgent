@@ -193,3 +193,31 @@ def test_all_return_paths_have_matching_arity():
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
     }
     assert arities == {8}, f"inconsistent return arities: {sorted(arities)}"
+
+
+def test_success_return_dict_exposes_contrast():
+    """The contrast identity must be machine-readable, not just printed.
+
+    Without this, a no-disease query (e.g. "microglia in brain") runs DE under
+    comparison_name="comparison" and the caller has no way to learn which two
+    classes were actually compared.
+    """
+    import ast
+    import inspect
+    from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
+
+    source = inspect.getsource(omic_fetch_analysis_workflow)
+    tree = ast.parse(source)
+    success_dicts = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value == "comparison_name"
+            for k in node.value.keys
+        )
+    ]
+    assert len(success_dicts) == 1, "expected exactly one success return dict"
+    keys = {k.value for k in success_dicts[0].keys if isinstance(k, ast.Constant)}
+    assert "contrast" in keys
