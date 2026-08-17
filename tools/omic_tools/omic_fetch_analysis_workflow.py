@@ -44,7 +44,7 @@ from utils.path_config import get_path
 # Add the OmniCellTOSG directory to path to import the new loader
 omnicell_root = get_path('external.omnicell_root', absolute=True)
 sys.path.insert(0, omnicell_root)
-from CellTOSG_Loader_new import CellTOSGDataLoader, CellTOSGSubsetBuilder
+from CellTOSG_Loader import CellTOSGDataLoader, CellTOSGSubsetBuilder
 
 # Global cache for query builder
 _query_builder = None
@@ -328,7 +328,9 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
     # using gender as the label column (otherwise filtering by one gender would
     # leave only one group).
     if gender and label != "gender":
-        conditions["gender"] = gender
+        # The loader resolves condition keys through FIELD_ALIAS, which knows
+        # "sex" (-> sex_normalized) but not "gender".
+        conditions["sex"] = gender
 
     if not conditions:
         print("[Omic Fetch] No valid conditions extracted from NER")
@@ -344,8 +346,12 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         print(f"[Omic Fetch] Unknown label '{label}', falling back to 'disease'")
         label = "disease"
 
-    task = label
-    label_column = label
+    # This module's public vocabulary says "gender"; the loader's TASK_CONFIG and
+    # LABEL_ZERO_LABELS_BY_LABEL_COLUMN say "sex". Translate at the boundary only,
+    # so `actual_label` and the report naming below keep using "gender".
+    _LOADER_LABEL = {"gender": "sex"}
+    task = _LOADER_LABEL.get(label, label)
+    label_column = task
 
     # Stratified balancing only meaningful when the label naturally has a
     # priority "normal" / control class (disease task).
@@ -373,7 +379,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
             random_state=2025,
             train_text=False,
             train_bio=False,
-            dataset_correction=None,
+            correction_method=None,
             output_dir=output_dir
         )
         
@@ -392,7 +398,12 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
 
         # Capture loader constants before we delete `dataset` — needed for label fallback.
         field_alias = dict(dataset.query.FIELD_ALIAS)
-        priority_by_task = dict(type(dataset).PRIORITY_LABELS_BY_TASK)
+        priority_by_task = dict(type(dataset).LABEL_ZERO_LABELS_BY_LABEL_COLUMN)
+        # The fallback candidates below use this module's "gender" wording, while
+        # both loader dicts are keyed "sex". Alias so the column lookup in
+        # _build_labels_from_metadata and the priority-set lookup both resolve.
+        field_alias.setdefault("gender", field_alias.get("sex", "sex_normalized"))
+        priority_by_task.setdefault("gender", priority_by_task.get("sex", set()))
 
         # Extract similar terms from soft matching
         similar_terms = {}
@@ -440,6 +451,28 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
             except (TypeError, ValueError):
                 return {}
             return {int(c): int(np.sum(int_arr == c)) for c in np.unique(int_arr)}
+
+        # The loader only builds a numeric Y when extract_mode="train"; under
+        # "inference" it deliberately returns the metadata frame as `.labels`
+        # (CellTOSG_Loader/dataset.py:112-116). Encode the *requested* label here
+        # so DE gets a usable Y before the fallback logic below ever considers
+        # switching to a different label.
+        if metadata is not None and not isinstance(Y, np.ndarray):
+            encoded = _build_labels_from_metadata(
+                metadata, label, field_alias, priority_by_task.get(label, set())
+            )
+            if encoded is None:
+                Y = None
+                print(f"[Label] Could not encode '{label}' from metadata (<2 non-empty classes)")
+            elif X.shape[0] != len(encoded[3]):
+                Y = None
+                print(f"[Label] Row mismatch (X={X.shape[0]}, metadata={len(encoded[3])}); skipping encode")
+            else:
+                Y_enc, enc_mapping, enc_counts, enc_mask = encoded
+                X = X[enc_mask]
+                Y = Y_enc[enc_mask]
+                metadata = metadata[enc_mask].reset_index(drop=True)
+                print(f"[Label] Encoded '{label}' from metadata: {enc_mapping} -> counts {enc_counts}")
 
         current_counts = _count_groups(Y)
         has_two_groups = sum(1 for c in current_counts.values() if c > 0) >= 2
