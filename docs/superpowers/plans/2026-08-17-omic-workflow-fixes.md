@@ -857,7 +857,12 @@ def test_balanced_cohort_is_ok():
         "dataset_id": [f"ds{i % 12}" for i in range(n)],
         "donor_id": [f"donor{i % 40}" for i in range(n)],
     })
-    is_ref = np.array([True, False] * (n // 2))
+    # Block split, NOT [True, False] * (n // 2). A period-2 interleave aliases
+    # with the even moduli above: even indices would take only even-numbered
+    # datasets and odd indices only odd-numbered ones, giving 0 of 12 shared
+    # datasets and a correct "unreliable" verdict — the opposite of what this
+    # test intends to assert. Verified: interleave -> 0/12 shared, block -> 12/12.
+    is_ref = np.array([True] * (n // 2) + [False] * (n // 2))
     diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref,
                                       lib_sizes=np.full(n, 1000.0))
     assert diag["verdict"] == "ok"
