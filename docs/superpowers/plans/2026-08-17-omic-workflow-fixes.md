@@ -396,7 +396,7 @@ Sequencing depth is confounded with disease status (median library size 681,715 
 **Interfaces:**
 - Consumes: `gene_names` capture from Task 1 (normalization must preserve it).
 - Produces: `normalize_cp10k(X, target_sum: float = 1e4)` returning the same type as `X` (DataFrame in, DataFrame out).
-- Produces: module-level `lib_sizes` (numpy array of pre-normalization per-cell totals), consumed by Task 5.
+- Produces: `lib_sizes`, a float numpy array of pre-normalization per-cell totals. It is a **local variable inside `omic_fetch_analysis_workflow()`**, in the same scope as Task 1's `gene_names` — not a module global. Task 6 reads it from that scope and passes it to Task 5's function as a parameter; nothing imports it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -688,20 +688,28 @@ The label mapping is built inside `omic_fetch_with_new_loader`, so expose it. In
 
 **There are FIVE return statements in this function, not two.** Verified line numbers:
 
+Line numbers below were re-measured at commit `ed6fb92`, after Tasks 1 and 3.
+Verify each by reading the line before editing; do not trust the number alone.
+
 | Line | Current | Must become |
 | --- | --- | --- |
-| 336 | `return None, None, None, {}, False` — **only 5 values** | `return None, None, None, {}, False, label, None, None` |
-| 397 | `return None, None, None, {}, False, label, None` | add `, None` |
-| 516 | `return X, Y, metadata, similar_terms, True, actual_label, fallback_message` | add `, label_mapping` |
-| 520 | `return None, None, None, {}, False, label, None` | add `, None` |
-| 526 | `return None, None, None, {}, False, label, None` | add `, None` |
+| 341 | `return None, None, None, {}, False` — **only 5 values** | `return None, None, None, {}, False, label, None, None` |
+| 401 | `return None, None, None, {}, False, label, None` | add `, None` |
+| 520 | `return X, Y, metadata, similar_terms, True, actual_label, fallback_message` | add `, label_mapping` |
+| 524 | `return None, None, None, {}, False, label, None` | add `, None` |
+| 530 | `return None, None, None, {}, False, label, None` | add `, None` |
 
-Line 336 is a **pre-existing latent crash**: it returns 5 values while the caller
-at line 625 unpacks 7, so an empty-conditions query raises
+Do NOT touch the two returns at lines 282-283 — those belong to
+`_build_labels_from_metadata`, a different function, and return 4 values by
+design. The dict-comprehension `return` at 457 is inside a nested helper and is
+also out of scope.
+
+Line 341 is a **pre-existing latent crash**: it returns 5 values while the caller
+unpacks 7, so a query that extracts no valid conditions raises
 `ValueError: not enough values to unpack (expected 7, got 5)`. Fixing it is
 required here because this task changes the arity to 8 regardless.
 
-Then update the unpack site in `omic_fetch_analysis_workflow` (line 625) to receive eight values:
+Then update the unpack site in `omic_fetch_analysis_workflow` (line 651) to receive eight values:
 
 ```python
     (X, Y, metadata, similar_terms, retrieval_success,
@@ -728,7 +736,9 @@ def test_all_return_paths_have_matching_arity():
     assert arities == {8}, f"inconsistent return arities: {sorted(arities)}"
 ```
 
-Then replace the `de_gated` block (around line 722):
+Then replace the `de_gated` block (line 760 at commit `ed6fb92`; the group split
+is at 787-788 and the skip-reason branch at 853 — match on the code shown, not
+the numbers):
 
 ```python
     # DE only runs when we actually have group labels. Disease-mode also
