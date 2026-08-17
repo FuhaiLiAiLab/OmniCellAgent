@@ -509,3 +509,84 @@ def test_suspension_type_is_an_optional_parameter():
     assert outer["suspension_type"].default is None
     assert "suspension_type" in inner
     assert inner["suspension_type"].default is None
+
+
+def test_num_features_reports_true_feature_width():
+    """Regression guard: num_features must be computed from X.shape[1] (the
+    true feature count, 41149), not len(top_gene_indices) (the fixed
+    TOP_K_GENES=20 top-gene count)."""
+    import ast
+    import inspect
+    from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
+
+    source = inspect.getsource(omic_fetch_analysis_workflow)
+    tree = ast.parse(source)
+    success_dicts = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant) and k.value == "comparison_name"
+            for k in node.value.keys
+        )
+    ]
+    assert len(success_dicts) == 1, "expected exactly one success return dict"
+    d = success_dicts[0]
+    value_node = next(
+        v for k, v in zip(d.keys, d.values)
+        if isinstance(k, ast.Constant) and k.value == "num_features"
+    )
+    value_source = ast.get_source_segment(source, value_node)
+    assert value_source is not None
+    assert "top_gene_indices" not in value_source, (
+        f"num_features must not be derived from top_gene_indices: {value_source!r}"
+    )
+    assert "X.shape[1]" in value_source, (
+        f"num_features must be computed from X.shape[1]: {value_source!r}"
+    )
+
+
+def test_suspension_type_alone_does_not_satisfy_conditions_guard():
+    """suspension_type is a co-constraint on an existing query, not a
+    standalone filter -- unlike organ/disease/cell_type/tissue/gender, it does
+    not pin down a biological subset by itself. Setting it alone (with no
+    other extracted entity) must not satisfy the `if not conditions` guard,
+    or a caller would silently fetch the entire metadata table restricted
+    only by protocol for both arms of the DE comparison."""
+    import ast
+    import inspect
+    from omic_fetch_analysis_workflow import omic_fetch_with_new_loader
+
+    source = inspect.getsource(omic_fetch_with_new_loader)
+    tree = ast.parse(source)
+
+    def assigns_suspension_type_key(node):
+        return any(
+            isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Subscript)
+            and isinstance(n.targets[0].value, ast.Name)
+            and n.targets[0].value.id == "conditions"
+            and isinstance(n.targets[0].slice, ast.Constant)
+            and n.targets[0].slice.value == "suspension_type"
+            for n in ast.walk(node)
+        )
+
+    guard_ifs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.If) and assigns_suspension_type_key(node)
+    ]
+    assert len(guard_ifs) == 1, "expected exactly one suspension_type assignment guard"
+    test_node = guard_ifs[0].test
+    test_source = ast.get_source_segment(source, test_node)
+    assert isinstance(test_node, ast.BoolOp) and isinstance(test_node.op, ast.And), (
+        f"suspension_type guard must be a boolean AND, got: {test_source!r}"
+    )
+    operand_names = {n.id for n in test_node.values if isinstance(n, ast.Name)}
+    assert "suspension_type" in operand_names, (
+        f"guard must test suspension_type: {test_source!r}"
+    )
+    assert "conditions" in operand_names, (
+        f"guard must also require a non-empty conditions dict: {test_source!r}"
+    )

@@ -387,10 +387,15 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         # The loader resolves condition keys through FIELD_ALIAS, which knows
         # "sex" (-> sex_normalized) but not "gender".
         conditions["sex"] = gender
-    if suspension_type:
+    if suspension_type and conditions:
         # Whole-cell and single-nucleus profiles are not interchangeable. Setting
         # this constrains BOTH arms, because the loader applies query conditions
-        # to the control group as well.
+        # to the control group as well. suspension_type is a co-constraint on an
+        # existing query, not a standalone filter -- unlike organ/disease/
+        # cell_type/tissue/gender, it does not pin down a biological subset by
+        # itself, so it must not by itself satisfy the empty-conditions guard
+        # below (that would fetch the entire metadata table restricted only by
+        # protocol, for both the "disease" and "normal" arms).
         conditions["suspension_type"] = suspension_type
 
     if not conditions:
