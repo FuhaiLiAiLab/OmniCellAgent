@@ -64,7 +64,11 @@ def get_suggestions(conditions: dict, n_matches: int = 5) -> str:
     Returns a formatted message with suggestions.
     """
     query_builder = _get_query_builder()
-    field_map = {"disease": "disease", "cell_type": "cell_type", "tissue_general": "tissue_general"}
+    # available_conditions() filters include_fields directly against dataframe
+    # columns and does NOT apply FIELD_ALIAS (subset_builder.py:67). Resolve here
+    # or suggestions come from a column the query never touches.
+    field_map = dict(getattr(query_builder, "FIELD_ALIAS", {}))
+    field_map.setdefault("tissue_general", "tissue_general")
     suggestions = {}
     
     for field, value in conditions.items():

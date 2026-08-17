@@ -61,3 +61,36 @@ def test_omic_analysis_accepts_gene_names_and_completes(cohort, tmp_path):
     assert len(table) == 41149
     assert table["Name"].iloc[0] == "ARF5"
     assert table["Name"].notna().all()
+
+
+DATASET_ROOT = "/storage3/fs1/fuhai.li/Active/Shared/dataset/OmniCellTOSG_dataset"
+
+requires_dataset = pytest.mark.skipif(
+    not os.path.exists(os.path.join(DATASET_ROOT, "cell_metadata_with_mappings.parquet")),
+    reason="OmniCellTOSG dataset not present",
+)
+
+
+@requires_dataset
+def test_suggestions_come_from_the_queried_column():
+    """Suggestions must be values that a query can actually match.
+
+    'Alzheimer disease' lives in the raw `disease` column; queries filter
+    `disease_BMG_name`, which holds only "Alzheimer's Disease".
+    """
+    from omic_fetch_analysis_workflow import get_suggestions
+
+    meta = pd.read_parquet(
+        os.path.join(DATASET_ROOT, "cell_metadata_with_mappings.parquet"),
+        columns=["disease_BMG_name"],
+    )
+    queryable = set(meta["disease_BMG_name"].dropna().astype(str))
+
+    message = get_suggestions({"disease": "Alzheimer disease"}, n_matches=5)
+
+    assert "Alzheimer's Disease" in message
+    # Every suggested value must exist in the column that is actually filtered.
+    import ast
+    suggested = message.split("-> try ", 1)[1].strip()
+    for value in ast.literal_eval(suggested):
+        assert value in queryable, f"suggested {value!r} is not in disease_BMG_name"
