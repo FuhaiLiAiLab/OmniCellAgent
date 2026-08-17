@@ -1017,7 +1017,12 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     # ===========================================================================
     # Cleanup and return results
     # ===========================================================================
-    del X
+    # NOTE: X is deliberately NOT deleted here. The success return dict below
+    # still reads X.shape[1] for num_features, so an early `del X` raises
+    # UnboundLocalError on every cohort that reaches this point (Python treats
+    # X as local-but-unbound for the whole function once any `del X` exists in
+    # it). X is freed naturally when this function returns and its frame is
+    # discarded; Y is not referenced again, so it is still deleted eagerly.
     if Y is not None:
         del Y
     gc.collect()
