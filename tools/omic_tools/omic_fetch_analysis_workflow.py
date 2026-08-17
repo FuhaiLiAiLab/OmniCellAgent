@@ -269,18 +269,64 @@ def _build_labels_from_metadata(metadata, label_col: str, field_alias: dict,
     else:
         sorted_labels = sorted(set(unique_vals), key=lambda x: str(x).lower())
 
-    mapping = {label_name: idx for idx, label_name in enumerate(sorted_labels)}
+    # Match CellTOSG_Loader.build_split_labels: ALL label-zero values collapse
+    # into class 0. Giving each its own index produces an arbitrary contrast
+    # downstream (e.g. normal vs "Unclassified" with 10 cells).
+    has_priority = any(str(v).lower() in priority_lower for v in unique_vals)
+    if has_priority:
+        mapping = {}
+        next_idx = 1
+        for label_name in sorted_labels:
+            if str(label_name).lower() in priority_lower:
+                mapping[label_name] = 0
+            else:
+                mapping[label_name] = next_idx
+                next_idx += 1
+    else:
+        mapping = {label_name: idx for idx, label_name in enumerate(sorted_labels)}
     # Sentinel -1 for NaN/unknown so we can filter them out
     Y_mapped = series.map(lambda x: mapping.get(x, -1)).values.astype(int)
     valid_mask = Y_mapped != -1
     counts = {
         int(idx): int(np.sum((Y_mapped == idx) & valid_mask))
-        for idx in mapping.values()
+        for idx in sorted(set(mapping.values()))
     }
     nonempty = sum(1 for c in counts.values() if c > 0)
     if nonempty < 2:
         return None
     return Y_mapped, mapping, counts, valid_mask
+
+
+def select_contrast(Y, mapping: dict):
+    """Choose the two-group contrast for differential expression.
+
+    Reference is class 0 (the collapsed label-zero group, e.g. "normal").
+    The alternate is the LARGEST non-reference class, so a cohort carrying many
+    rare labels yields the dominant comparison rather than an arbitrary one.
+
+    Returns None when fewer than two non-empty classes exist.
+    """
+    Y = np.asarray(Y)
+    counts = {int(c): int(np.sum(Y == c)) for c in np.unique(Y) if int(c) >= 0}
+    if counts.get(0, 0) == 0:
+        return None
+    non_ref = {c: n for c, n in counts.items() if c != 0 and n > 0}
+    if not non_ref:
+        return None
+
+    alt_class = max(non_ref, key=lambda c: (non_ref[c], -c))
+    reverse = {}
+    for name, idx in mapping.items():
+        reverse.setdefault(int(idx), []).append(str(name))
+
+    return {
+        "ref_class": 0,
+        "alt_class": int(alt_class),
+        "ref_name": "/".join(sorted(reverse.get(0, ["class_0"]))),
+        "alt_name": "/".join(sorted(reverse.get(int(alt_class), [f"class_{alt_class}"]))),
+        "excluded": sorted(c for c in non_ref if c != alt_class),
+        "counts": counts,
+    }
 
 
 def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease"):
@@ -338,7 +384,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
 
     if not conditions:
         print("[Omic Fetch] No valid conditions extracted from NER")
-        return None, None, None, {}, False
+        return None, None, None, {}, False, label, None, None
 
     # Resolve task and label_column from the user-supplied label argument.
     # Default behavior (label="disease") matches the prior implementation:
@@ -398,7 +444,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
 
         if X is None or X.shape[0] == 0:
             print(f"\n[Omic Fetch] No samples matched the conditions")
-            return None, None, None, {}, False, label, None
+            return None, None, None, {}, False, label, None, None
 
         # Capture loader constants before we delete `dataset` — needed for label fallback.
         field_alias = dict(dataset.query.FIELD_ALIAS)
@@ -445,6 +491,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         # -----------------------------------------------------------------
         actual_label = label
         fallback_message = None
+        label_mapping = None
 
         def _count_groups(Y_arr):
             if Y_arr is None:
@@ -476,6 +523,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
                 X = X[enc_mask]
                 Y = Y_enc[enc_mask]
                 metadata = metadata[enc_mask].reset_index(drop=True)
+                label_mapping = enc_mapping
                 print(f"[Label] Encoded '{label}' from metadata: {enc_mapping} -> counts {enc_counts}")
 
         current_counts = _count_groups(Y)
@@ -498,6 +546,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
                 Y = Y_new[valid_mask]
                 metadata = metadata[valid_mask].reset_index(drop=True)
                 actual_label = alt
+                label_mapping = _mapping
                 fallback_message = (
                     f"Requested label='{label}' had only one non-empty class in this cohort "
                     f"(counts={current_counts}); fell back to label='{alt}' with class counts {alt_counts}."
@@ -517,17 +566,17 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         if os.path.exists(expression_matrix_path):
             compress_expression_matrix(expression_matrix_path)
 
-        return X, Y, metadata, similar_terms, True, actual_label, fallback_message
+        return X, Y, metadata, similar_terms, True, actual_label, fallback_message, label_mapping
 
     except ValueError as e:
         print(f"\n[Omic Fetch] No match: {str(e)}")
-        return None, None, None, {}, False, label, None
+        return None, None, None, {}, False, label, None, None
 
     except Exception as e:
         print(f"\n[Omic Fetch] Unexpected issue: {str(e)}")
         import traceback
         traceback.print_exc()
-        return None, None, None, {}, False, label, None
+        return None, None, None, {}, False, label, None, None
 
 
 def normalize_cp10k(X, target_sum: float = 1e4):
@@ -648,7 +697,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     print(f"{'='*70}")
     
     (X, Y, metadata, similar_terms, retrieval_success,
-     actual_label, label_fallback_message) = omic_fetch_with_new_loader(
+     actual_label, label_fallback_message, label_mapping) = omic_fetch_with_new_loader(
         fetch_dict, session_dir, label=label
     )
     # The loader returns a DataFrame whose columns are HGNC gene symbols.
@@ -755,11 +804,13 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     else:
         comparison_name = f"{disease_name or 'cohort'}_by_{actual_label}"
 
-    # DE only runs when we actually have group labels. Disease-mode also
-    # requires a disease query (otherwise the loader returns a single class).
-    de_gated = enable_differential_expression and Y is not None and (
-        actual_label != "disease" or disease_name is not None
-    )
+    # DE runs whenever two non-empty classes exist. The old disease-specific
+    # gate is superseded: label collapsing now guarantees a meaningful class 0,
+    # and select_contrast names exactly what is being compared.
+    contrast = None
+    if enable_differential_expression and Y is not None:
+        contrast = select_contrast(Y, label_mapping or {})
+    de_gated = contrast is not None
 
     if de_gated:
         print(f"\n{'='*70}")
@@ -775,8 +826,13 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         # For DE analysis, we need at least 2 groups with samples
         if len(unique_labels) >= 2 and all(label_counts.get(l, 0) > 0 for l in unique_labels[:2]):
             # Get the two groups based on labels
-            group0_count = np.sum(Y == 0)
-            group1_count = np.sum(Y == 1) if 1 in unique_labels else 0
+            group0_count = int(np.sum(Y == contrast["ref_class"]))
+            group1_count = int(np.sum(Y == contrast["alt_class"]))
+            print(f"[DE] Contrast: '{contrast['ref_name']}' (n={group0_count}) "
+                  f"vs '{contrast['alt_name']}' (n={group1_count})")
+            if contrast["excluded"]:
+                print(f"[DE] Excluded {len(contrast['excluded'])} other class(es) "
+                      f"from this contrast: {contrast['excluded']}")
 
             print(f"[DE] Found {group0_count} samples in group 0 and {group1_count} samples in group 1")
 
@@ -784,8 +840,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                 # Split data into two groups. Group 0 is the reference class
                 # (e.g. "normal" for disease, "female" for gender — see
                 # CellTOSGDataLoader.PRIORITY_LABELS_BY_TASK).
-                normal_omic_feature = X[Y == 0]
-                disease_omic_feature = X[Y == 1]
+                normal_omic_feature = X[Y == contrast["ref_class"]]
+                disease_omic_feature = X[Y == contrast["alt_class"]]
 
                 data_dict = {
                     "normal_omic_feature": normal_omic_feature,
@@ -849,8 +905,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         print(f"{'='*70}")
         if not enable_differential_expression:
             print("  Reason: disabled by parameter")
-        elif actual_label == "disease" and not disease_name:
-            print("  Reason: label='disease' but no disease specified in the query")
+        elif Y is not None and contrast is None:
+            print("  Reason: fewer than two non-empty classes after label collapsing")
         elif Y is None:
             print("  Reason: no labels available")
         if label_fallback_message:

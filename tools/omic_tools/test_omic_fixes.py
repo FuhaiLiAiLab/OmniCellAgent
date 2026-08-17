@@ -135,3 +135,61 @@ def test_normalize_cp10k_handles_all_zero_cell():
     out = normalize_cp10k(X).values
     assert np.isfinite(out).all()
     assert out[0].sum() == pytest.approx(0.0)
+
+
+def test_priority_labels_collapse_to_class_zero():
+    """Match the loader: every label-zero value becomes class 0, not 0/1/2."""
+    from omic_fetch_analysis_workflow import _build_labels_from_metadata
+
+    meta = pd.DataFrame({
+        "disease_BMG_name": (
+            ["normal"] * 5 + ["unknown"] * 2 + ["Unclassified"] * 2
+            + ["Alzheimer's Disease"] * 4 + ["Glioma"] * 3
+        )
+    })
+    priority = {"normal", "unclassified", "unknown"}
+    Y, mapping, counts, valid = _build_labels_from_metadata(
+        meta, "disease", {"disease": "disease_BMG_name"}, priority
+    )
+    assert mapping["normal"] == 0
+    assert mapping["unknown"] == 0
+    assert mapping["Unclassified"] == 0
+    assert mapping["Alzheimer's Disease"] != 0
+    assert mapping["Glioma"] != 0
+    assert mapping["Alzheimer's Disease"] != mapping["Glioma"]
+    assert counts[0] == 9
+
+
+def test_select_contrast_picks_largest_non_reference_class():
+    """microglia_brain shape: normal vs the dominant disease, not vs the rarest."""
+    from omic_fetch_analysis_workflow import select_contrast
+
+    Y = np.array([0] * 1000 + [1] * 10 + [2] * 393 + [3] * 25)
+    mapping = {"normal": 0, "Unclassified": 1, "Alzheimer's Disease": 2, "ALS": 3}
+    contrast = select_contrast(Y, mapping)
+    assert contrast["ref_class"] == 0
+    assert contrast["alt_class"] == 2
+    assert contrast["alt_name"] == "Alzheimer's Disease"
+    assert sorted(contrast["excluded"]) == [1, 3]
+
+
+def test_select_contrast_returns_none_with_one_class():
+    from omic_fetch_analysis_workflow import select_contrast
+
+    assert select_contrast(np.zeros(10, dtype=int), {"normal": 0}) is None
+
+
+def test_all_return_paths_have_matching_arity():
+    """Line 336 returned 5 values while the caller unpacks 8."""
+    import ast
+    import inspect
+    from omic_fetch_analysis_workflow import omic_fetch_with_new_loader
+
+    source = inspect.getsource(omic_fetch_with_new_loader)
+    tree = ast.parse(source)
+    arities = {
+        len(node.value.elts)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
+    }
+    assert arities == {8}, f"inconsistent return arities: {sorted(arities)}"
