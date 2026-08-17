@@ -530,6 +530,28 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         return None, None, None, {}, False, label, None
 
 
+def normalize_cp10k(X, target_sum: float = 1e4):
+    """Scale each cell to `target_sum` total counts (counts per 10K).
+
+    Depth is confounded with group membership in these cohorts, so every
+    statistic downstream must run on normalized values. `log1p` is deliberately
+    NOT applied: it does not change Mann-Whitney ranks, and feeding log-scale
+    values into log2(mean_a / mean_b) silently turns the fold change into a
+    ratio of log means. Staying linear keeps that formula correct.
+
+    Returns the same container type it was given, so gene-symbol columns survive.
+    """
+    if X is None:
+        return None
+    is_frame = hasattr(X, "columns")
+    values = (X.values if is_frame else np.asarray(X)).astype(np.float64)
+    sums = values.sum(axis=1, keepdims=True)
+    scaled = values * (target_sum / np.maximum(sums, 1e-12))
+    if is_frame:
+        return pd.DataFrame(scaled, index=X.index, columns=X.columns)
+    return scaled
+
+
 def compute_top_genes(X, top_k=100):
     """Compute top K genes by mean expression."""
     if X is None or X.shape[0] == 0:
@@ -633,6 +655,14 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     # Capture them now: np.nan_to_num() downstream returns a bare ndarray and
     # destroys column labels.
     gene_names = list(X.columns) if hasattr(X, "columns") else None
+
+    # Record pre-normalization depth for the cohort diagnostics, then normalize.
+    lib_sizes = None
+    if X is not None:
+        raw_values = X.values if hasattr(X, "values") else np.asarray(X)
+        lib_sizes = np.asarray(raw_values).sum(axis=1).astype(np.float64)
+        X = normalize_cp10k(X)
+        print(f"[Normalize] CP10K applied; median library size before = {np.median(lib_sizes):,.0f}")
     times['fetch_end'] = time.time()
 
     if actual_label != label:

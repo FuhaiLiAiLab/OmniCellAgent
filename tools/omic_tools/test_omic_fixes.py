@@ -94,3 +94,44 @@ def test_suggestions_come_from_the_queried_column():
     suggested = message.split("-> try ", 1)[1].strip()
     for value in ast.literal_eval(suggested):
         assert value in queryable, f"suggested {value!r} is not in disease_BMG_name"
+
+
+def test_normalize_cp10k_removes_pure_depth_artifact():
+    """A group that differs only by 2x depth must show log2FC 0 after CP10K."""
+    from omic_fetch_analysis_workflow import normalize_cp10k
+
+    rng = np.random.default_rng(0)
+    base = rng.poisson(5, size=(50, 200)).astype(float)
+    X = np.vstack([base, base * 2.0])
+    Y = np.array([0] * 50 + [1] * 50)
+    eps = 1e-8
+
+    def median_lfc(matrix):
+        d = matrix[Y == 1].mean(axis=0)
+        c = matrix[Y == 0].mean(axis=0)
+        return float(np.median(np.log2((d + eps) / (c + eps))))
+
+    assert median_lfc(X) == pytest.approx(1.0, abs=1e-6)
+    normalized = normalize_cp10k(pd.DataFrame(X)).values
+    assert median_lfc(normalized) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_normalize_cp10k_preserves_dataframe_columns():
+    """Gene symbols must survive normalization; Task 1 depends on X.columns."""
+    from omic_fetch_analysis_workflow import normalize_cp10k
+
+    X = pd.DataFrame([[1.0, 3.0], [2.0, 2.0]], columns=["ARF5", "M6PR"])
+    out = normalize_cp10k(X)
+    assert isinstance(out, pd.DataFrame)
+    assert list(out.columns) == ["ARF5", "M6PR"]
+    assert out.values.sum(axis=1) == pytest.approx([1e4, 1e4])
+
+
+def test_normalize_cp10k_handles_all_zero_cell():
+    """An all-zero cell must not produce inf or nan."""
+    from omic_fetch_analysis_workflow import normalize_cp10k
+
+    X = pd.DataFrame([[0.0, 0.0], [1.0, 1.0]])
+    out = normalize_cp10k(X).values
+    assert np.isfinite(out).all()
+    assert out[0].sum() == pytest.approx(0.0)
