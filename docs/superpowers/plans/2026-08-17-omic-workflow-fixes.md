@@ -319,10 +319,15 @@ def test_suggestions_come_from_the_queried_column():
 
     assert "Alzheimer's Disease" in message
     # Every suggested value must exist in the column that is actually filtered.
+    import ast
     suggested = message.split("-> try ", 1)[1].strip()
-    for value in eval(suggested):  # the message formats a Python list literal
+    for value in ast.literal_eval(suggested):
         assert value in queryable, f"suggested {value!r} is not in disease_BMG_name"
 ```
+
+`get_suggestions` formats each line as `  <field>: '<query>' -> try [<values>]`,
+so the text after `-> try ` is a Python list literal. Parse it with
+`ast.literal_eval`, never `eval`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
