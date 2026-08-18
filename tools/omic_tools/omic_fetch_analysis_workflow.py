@@ -1193,7 +1193,7 @@ Examples:
   python omic_fetch_analysis_workflow.py --disease "lung adenocarcinoma" --organ "lung" --session-id "lung_cancer_test"
   
   # Analyze Alzheimer's disease
-  python omic_fetch_analysis_workflow.py --disease "Alzheimer disease" --organ "brain" --session-id "alzheimer_test"
+  python omic_fetch_analysis_workflow.py --disease "Alzheimer's Disease" --organ "brain" --session-id "alzheimer_test"
   
   # Analyze specific cell type
   python omic_fetch_analysis_workflow.py --cell-type "microglial cell" --organ "brain" --session-id "microglia_test"
@@ -1206,8 +1206,11 @@ Examples:
         """
     )
     
-    parser.add_argument("--disease", type=str, help="Disease name (e.g., 'lung adenocarcinoma', 'Alzheimer disease')")
-    parser.add_argument("--cell-type", type=str, help="Cell type (e.g., 'microglial cell', 'T cell')")
+    parser.add_argument("--disease", type=str, help="Disease name, matched EXACTLY against the disease_BMG_name column "
+             "(e.g. 'lung adenocarcinoma', \"Alzheimer's Disease\"). A near-miss "
+             "returns 0 samples and prints the closest valid alternatives.")
+    parser.add_argument("--cell-type", type=str, help="Cell type, matched EXACTLY against the CMT_name column "
+             "(e.g. 'microglial cell', 'CD4-positive, alpha-beta T cell').")
     parser.add_argument("--organ", type=str, help="Organ filter for memory efficiency (e.g., 'lung', 'brain')")
     parser.add_argument("--tissue", type=str, help="Specific tissue filter")
     parser.add_argument("--text", type=str, help="Free-form text query (uses NER extraction)")
@@ -1239,6 +1242,11 @@ Examples:
         # Test configurations
         TESTS = [
             {"name": "lung_adenocarcinoma", "disease": "lung adenocarcinoma", "organ": "lung"},
+            # INTENTIONAL near-miss: "Alzheimer disease" is NOT a disease_BMG_name
+            # value (the real one is "Alzheimer's Disease"). This case exists to
+            # exercise the no-match path and assert the suggestion engine offers a
+            # queryable alternative. Do not "correct" it -- doing so deletes the
+            # only coverage of that path.
             {"name": "alzheimer_disease", "disease": "Alzheimer disease", "organ": "brain"},
             {"name": "breast_cancer", "disease": "breast cancer", "organ": "breast"},
             {"name": "leukemia", "disease": "leukemia"},
