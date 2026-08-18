@@ -145,12 +145,26 @@ Written by `perform_unpaired_differential_expression` in
 
 The test used is a vectorised Mann-Whitney U (`fast_mannwhitney_vectorized`
 / `parallel_mannwhitney_optimized`); p-values are corrected via
-Benjamini–Hochberg into FDR. log2FC is computed on the raw counts.
+Benjamini–Hochberg into FDR. Expression is CP10K-normalized (each cell
+scaled to 10,000 total counts) before any statistic is computed; `log1p` is
+deliberately NOT applied, so log2FC stays a genuine fold change on the linear
+scale. Sequencing depth is confounded with group membership in these cohorts
+(median library size differed 0.557× between arms in the breast_cancer test
+fixture), which is why normalization is mandatory rather than optional.
 
 All five CSVs below open with `#`-prefixed comment lines carrying the cohort
 validity diagnostics (verdict, contrast, FAIL/CAUTION checks) ahead of the
 real header row. Read them with `pd.read_csv(path, comment="#")` — a plain
 `pd.read_csv(path)` raises `ParserError: Expected 1 fields in line N, saw M`.
+
+> **Known limitation — the cohort verdict does NOT reach the generated PDF report
+> or the agent's downstream literature search.** It is written to five places:
+> stdout, the workflow's return dict, `cohort_diagnostics.json`, the `#` headers
+> on these five CSVs, and the volcano-plot caption. It is *not* carried into
+> `shared_data` inside `agent/langgraph_agent.py`, because that path reads the
+> sub-agent's prose rather than the tool's return value, so the PDF's top-genes
+> table renders with no caveat attached. When a cohort is flagged `unreliable`,
+> read `cohort_diagnostics.json` — do not infer trustworthiness from the PDF.
 
 | File                                             | Columns                                                                            | Meaning                                                                                                                                               |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |

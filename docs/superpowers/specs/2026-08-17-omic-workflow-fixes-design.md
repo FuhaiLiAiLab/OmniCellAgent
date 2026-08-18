@@ -255,6 +255,19 @@ DE always runs regardless of verdict. Diagnostics propagate to **six** channels:
 5. the volcano plot subtitle
 6. `shared_data`, so downstream agents and `_compile_pdf` receive it
 
+> **POST-IMPLEMENTATION CORRECTION — channel 6 does not work, and the premise
+> below is false.** The final whole-branch review established that the
+> `shared_data` path is unreachable: `agent/langgraph_agent.py` registers the
+> agent as `"OmicMiningAgent"`, not `"OmicAnalysis"`, and unknown names are
+> coerced to `"GoogleSearcher"` before the extraction code runs. Independently,
+> `SubAgent.execute` returns a **string**, so the `isinstance(result_content,
+> dict)` guard is always False. Critically, `shared_data["top_genes"]` was
+> **equally dead before this branch** — so the justification below describes a
+> path that never carried anything. Repairing it requires capturing the tool's
+> return dict in `SubAgent.execute` rather than parsing the LLM's prose, which
+> is beyond this plan's agreed scope. **Deferred by explicit user decision.**
+> Five channels work and carry the verdict; the agent and the PDF do not.
+
 Channel 6 matters because `top_genes_by_fdr` already flows to
 `shared_data["top_genes"]` (`agent/langgraph_agent.py:1984-1986`) and from there
 into literature search (`:1912`) and the PDF (`:2517`). Genes from an
@@ -320,13 +333,14 @@ than the true feature count. Corrected to the actual number of genes.
    compositional differences and neither is a meaningful target.
 5. **Validity gate.** Assert breast_cancer and microglia_brain yield
    `unreliable`, lung_adenocarcinoma yields `caution`, and that
-   `cohort_diagnostics` is present in all six channels.
+   `cohort_diagnostics` is present in the five working channels (see the
+   correction above — channel 6 is unreachable and was deferred).
 6. **End to end.** Re-run `--run-tests`; assert `de_success` is `True` for
    lung_adenocarcinoma, breast_cancer, and microglia_brain.
 
 ## Risks
 
-- **Warnings ignored downstream.** Accepted by the user. Mitigated by six-channel
+- **Warnings ignored downstream.** Accepted by the user. Mitigated by five-channel
   propagation, not eliminated. If report readers overlook the caveat, they will
   read `unreliable` results as findings.
 - **More cohorts now produce DE.** Replacing the disease-specific gate with the
