@@ -131,7 +131,7 @@ Written by `compute_top_genes` in `omic_fetch_analysis_workflow.py`.
 
 | File                            | Columns                               | Meaning                                                                                                                                                                                                                     |
 | ------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `top_genes_by_expression.csv` | `rank, gene_index, mean_expression` | Top-20 genes ranked by**mean expression across all cells in the cohort** (NOT differential). Used as a sanity check / "housekeeping" view; high-mean genes are often ribosomal (`RPL*`, `RPS*`) or mitochondrial. |
+| `top_genes_by_expression.csv` | `rank, gene_index, gene_name, mean_expression_cp10k` | Top-20 genes ranked by**mean expression across all cells in the cohort** (NOT differential). Used as a sanity check / "housekeeping" view; high-mean genes are often ribosomal (`RPL*`, `RPS*`) or mitochondrial. |
 
 ### 3.3 Differential expression — STEP 4a
 
@@ -146,6 +146,11 @@ Written by `perform_unpaired_differential_expression` in
 The test used is a vectorised Mann-Whitney U (`fast_mannwhitney_vectorized`
 / `parallel_mannwhitney_optimized`); p-values are corrected via
 Benjamini–Hochberg into FDR. log2FC is computed on the raw counts.
+
+All five CSVs below open with `#`-prefixed comment lines carrying the cohort
+validity diagnostics (verdict, contrast, FAIL/CAUTION checks) ahead of the
+real header row. Read them with `pd.read_csv(path, comment="#")` — a plain
+`pd.read_csv(path)` raises `ParserError: Expected 1 fields in line N, saw M`.
 
 | File                                             | Columns                                                                            | Meaning                                                                                                                                               |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |

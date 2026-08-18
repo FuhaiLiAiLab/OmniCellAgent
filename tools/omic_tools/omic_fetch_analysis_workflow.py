@@ -868,12 +868,10 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
                 print(f"[DE] Excluded {len(contrast['excluded'])} other class(es) "
                       f"from this contrast: {contrast['excluded']}")
 
-            print(f"[DE] Found {group0_count} samples in group 0 and {group1_count} samples in group 1")
-
             if group0_count > 0 and group1_count > 0:
                 # Split data into two groups. Group 0 is the reference class
                 # (e.g. "normal" for disease, "female" for gender — see
-                # CellTOSGDataLoader.PRIORITY_LABELS_BY_TASK).
+                # CellTOSGDataLoader.LABEL_ZERO_LABELS_BY_LABEL_COLUMN).
                 normal_omic_feature = X[Y == contrast["ref_class"]]
                 disease_omic_feature = X[Y == contrast["alt_class"]]
 
@@ -1017,12 +1015,13 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     # ===========================================================================
     # Cleanup and return results
     # ===========================================================================
-    # NOTE: X is deliberately NOT deleted here. The success return dict below
-    # still reads X.shape[1] for num_features, so an early `del X` raises
-    # UnboundLocalError on every cohort that reaches this point (Python treats
-    # X as local-but-unbound for the whole function once any `del X` exists in
-    # it). X is freed naturally when this function returns and its frame is
-    # discarded; Y is not referenced again, so it is still deleted eagerly.
+    # Capture the feature width before releasing X — the success return dict
+    # below needs it for num_features, and X (like data_and_analysis_dict and
+    # normal_omic_feature/disease_omic_feature/data_dict above) is freed via
+    # `del` immediately after its last use rather than left for the frame to
+    # release on return.
+    n_features = int(X.shape[1]) if X is not None and len(X.shape) > 1 else 0
+    del X
     if Y is not None:
         del Y
     gc.collect()
@@ -1151,7 +1150,7 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         "comparison_name": comparison_name if de_gated else None,
         "contrast": contrast,
         "num_samples": metadata.shape[0] if metadata is not None else 0,
-        "num_features": int(X.shape[1]) if X is not None and len(X.shape) > 1 else 0,
+        "num_features": n_features,
         "top_gene_indices": top_gene_indices,
         "top_gene_names": top_gene_names,
         "top_gene_values": top_gene_values,

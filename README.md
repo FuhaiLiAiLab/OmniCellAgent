@@ -678,6 +678,12 @@ webapp/sessions/<session_id>/
 └── top_genes_by_expression.csv        # From workflow
 ```
 
+The five `differential_expression/*.csv` files each begin with `#`-prefixed
+comment lines carrying the cohort validity diagnostics (verdict, contrast,
+caveats) before the CSV header row. Read them with
+`pd.read_csv(path, comment="#")` — a plain `pd.read_csv(path)` raises a
+`ParserError`.
+
 ### Key Files
 
 | File                                                 | Purpose                                   |

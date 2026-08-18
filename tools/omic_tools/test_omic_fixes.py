@@ -383,6 +383,88 @@ def test_save_dataframe_stamps_diagnostics_header_under_joblib(tmp_path):
     assert "FDR" in reloaded.columns
 
 
+def test_save_dataframe_survives_non_utf8_locale_default(monkeypatch, tmp_path):
+    """Fix 3: save_dataframe's `open(filepath, "w")` omitted `encoding`, so it
+    inherited whatever codec the process locale defaulted to. Under a
+    non-UTF-8 locale, a non-ASCII character in diagnostics_text (or a gene
+    name) raised UnicodeEncodeError inside the joblib worker running
+    save_dataframe and killed the DE table writes -- silently, since that
+    worker's exception surfaces far from any cohort-diagnostics code.
+
+    save_dataframe runs inside Parallel(n_jobs=-1), which defaults to
+    process-based (loky) workers that re-import this module fresh, so a
+    monkeypatch on `open` made from this test process would not be visible
+    there. Forcing the threading backend keeps save_dataframe in-process
+    (loky vs threading changes only where the closure runs, not what
+    arguments it passes to open()) so the patch is actually exercised. The
+    patch itself simulates "no explicit encoding -> locale default" by
+    defaulting this module's `open` to ascii exactly when the caller (as the
+    pre-fix code did) omits `encoding=`; passing `encoding="utf-8"`, as the
+    fixed code does, must sail through unpatched.
+
+    This is a real execution of the current save_dataframe closure: reverting
+    Fix 3 makes this test raise UnicodeEncodeError, not just fail an
+    assertion.
+    """
+    import builtins
+    import inspect
+
+    import joblib
+    import omic_analysis_components as oac
+
+    real_open = builtins.open
+
+    def ascii_when_unspecified(file, mode="r", *args, **kwargs):
+        if "b" not in mode and "encoding" not in kwargs:
+            kwargs = dict(kwargs)
+            kwargs["encoding"] = "ascii"
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(oac, "open", ascii_when_unspecified, raising=False)
+
+    rng = np.random.default_rng(2)
+    n_genes, n = 20, 4
+    disease_df = pd.DataFrame(
+        rng.poisson(5, size=(n_genes, n)).astype(float),
+        columns=[f"ds_sample_{i}" for i in range(n)],
+    )
+    disease_df.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
+    control_df = pd.DataFrame(
+        rng.poisson(5, size=(n_genes, n)).astype(float),
+        columns=[f"ns_sample_{i}" for i in range(n)],
+    )
+    control_df.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
+
+    # En dash: non-ASCII, the same family of character format_diagnostics_text
+    # emits in its caveat lines.
+    diagnostics_text = "COHORT DIAGNOSTICS: CAUTION\n  dataset_overlap: 2 of 5 – shared"
+
+    with joblib.parallel_backend("threading"):
+        oac.perform_unpaired_differential_expression(
+            disease_df=disease_df,
+            normal_df=control_df,
+            p_value_threshold=0.5,
+            log2fc_threshold=0.0,
+            sig_top_n=n_genes,
+            n_jobs=-1,
+            disease="test",
+            de_output_dir=str(tmp_path),
+            diagnostics_text=diagnostics_text,
+        )
+
+    out_path = os.path.join(str(tmp_path), "unpaired_differential_expression_results.csv")
+    with open(out_path, encoding="utf-8") as handle:
+        content = handle.read()
+    assert "–" in content
+
+    # newline="" is the other half of Fix 3. Its effect (a stray \r from
+    # double newline-translation) isn't independently observable through
+    # Python's own csv writer on this platform's os.linesep, so guard it
+    # structurally alongside the executing check above.
+    save_source = inspect.getsource(oac.perform_unpaired_differential_expression)
+    assert 'newline=""' in save_source
+
+
 def test_diagnostics_failure_does_not_block_de():
     """Fix-round 1, Finding 1: diagnostics are advisory only. A failure inside
     compute_cohort_diagnostics or the cohort_diagnostics.json sidecar write
@@ -437,6 +519,52 @@ def test_diagnostics_failure_does_not_block_de():
     fallback_names = assigned_names(handler.body)
     assert "cohort_diagnostics" in fallback_names, "handler must reset cohort_diagnostics"
     assert "diagnostics_text" in fallback_names, "handler must reset diagnostics_text"
+
+
+def test_cohort_diagnostics_write_failure_does_not_block_de(tmp_path):
+    """Fix 2: the COHORT_DIAGNOSTICS.txt write inside omic_analysis's body
+    (omic_analysis_components.py) sat unguarded. A read-only directory or a
+    full disk there would raise straight out of omic_analysis with no DE
+    output at all -- the diagnostics machinery, meant only to annotate the
+    DE table, taking the whole analysis down with it. The cohort validity
+    gate must WARN and NEVER withhold.
+
+    Forces the write to fail deterministically -- by pre-occupying its exact
+    path with a directory, which makes open(path, "w") raise regardless of
+    filesystem permissions or uid (no chmod/root-bypass concerns) -- and
+    confirms omic_analysis still completes and the real DE table still gets
+    written."""
+    from omic_analysis_components import omic_analysis
+
+    rng = np.random.default_rng(3)
+    n_genes, n = 30, 5
+    gene_names = [f"GENE{i}" for i in range(n_genes)]
+    data_dict = {
+        "normal_omic_feature": rng.poisson(5, size=(n, n_genes)).astype(float),
+        "disease_omic_feature": rng.poisson(5, size=(n, n_genes)).astype(float),
+        "omic_label": np.array([0] * n + [1] * n),
+    }
+
+    conflict_path = os.path.join(
+        str(tmp_path), "differential_expression", "COHORT_DIAGNOSTICS.txt"
+    )
+    os.makedirs(conflict_path, exist_ok=True)  # guarantees open(path, "w") raises
+
+    result = omic_analysis(
+        "test_contrast",
+        data_dict,
+        enable_plotting=False,
+        session_dir=str(tmp_path),
+        gene_names=gene_names,
+        diagnostics_text="COHORT DIAGNOSTICS: UNRELIABLE\n  contrast: normal (n=5) vs disease (n=5)",
+    )
+
+    assert isinstance(result, dict)
+    de_dir = result["differential_expression_dir"]
+    de_table = os.path.join(de_dir, "unpaired_differential_expression_results.csv")
+    assert os.path.exists(de_table), "DE table must exist even though the diagnostics write failed"
+    reloaded = pd.read_csv(de_table, comment="#")
+    assert len(reloaded) == n_genes
 
 
 def test_pdf_renders_cohort_caveat():
@@ -512,9 +640,17 @@ def test_suspension_type_is_an_optional_parameter():
 
 
 def test_num_features_reports_true_feature_width():
-    """Regression guard: num_features must be computed from X.shape[1] (the
-    true feature count, 41149), not len(top_gene_indices) (the fixed
-    TOP_K_GENES=20 top-gene count)."""
+    """Regression guard: num_features must reflect the true feature count
+    (41149 on the breast_cancer fixture), not len(top_gene_indices) (the
+    fixed TOP_K_GENES=20 top-gene count).
+
+    Fix 4 moved the X.shape[1] read into an `n_features` capture ahead of
+    `del X` (see test_capture_feature_width_before_deleting_x for the
+    executing version of that guard), so the return dict no longer reads
+    X.shape[1] inline. This test checks the wiring instead: the dict's
+    num_features entry must be that captured variable, not a fresh
+    recomputation and not top_gene_indices -- and that variable must itself
+    trace back to X.shape[1]."""
     import ast
     import inspect
     from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
@@ -542,9 +678,94 @@ def test_num_features_reports_true_feature_width():
     assert "top_gene_indices" not in value_source, (
         f"num_features must not be derived from top_gene_indices: {value_source!r}"
     )
-    assert "X.shape[1]" in value_source, (
-        f"num_features must be computed from X.shape[1]: {value_source!r}"
+    assert isinstance(value_node, ast.Name), (
+        f"num_features should reference a variable captured earlier in the "
+        f"function, not recompute inline: {value_source!r}"
     )
+    feature_var = value_node.id
+
+    assign_node = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == feature_var
+    )
+    assign_source = ast.get_source_segment(source, assign_node)
+    assert "X.shape[1]" in assign_source, (
+        f"{feature_var} must be computed from X.shape[1]: {assign_source!r}"
+    )
+
+
+def test_capture_feature_width_before_deleting_x():
+    """Fix 4 (strictly-better fix for Task 9's UnboundLocalError): `del X`
+    must not run until AFTER the feature width has been captured. Python
+    makes a name local-but-unbound for a function's ENTIRE frame once any
+    `del X` appears anywhere in it, so deleting X before capturing
+    X.shape[1] raised UnboundLocalError on every cohort that reached the
+    return statement -- AFTER DE had already succeeded, so the outer
+    --run-tests except-Exception loop silently overwrote a good result with
+    success=False, samples=0 (Task 9's real finding; see progress.md).
+
+    Rather than statically checking the AST shape, this extracts the actual
+    capture-then-delete statements from the live function source (not a
+    hand-copied duplicate) and executes them. A future edit that puts `del
+    X` back before the capture -- or otherwise reorders the two -- makes
+    this test raise for real (a NameError, the module-level analogue of the
+    UnboundLocalError Task 9 hit inside the real function frame), the same
+    way the live run broke, rather than only tripping a shape check."""
+    import ast
+    import inspect
+    import textwrap
+
+    from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
+
+    source = inspect.getsource(omic_fetch_analysis_workflow)
+    tree = ast.parse(source)
+    func_node = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "omic_fetch_analysis_workflow"
+    )
+    assign_node = next(
+        node for node in ast.walk(func_node)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "n_features"
+    )
+    del_node = next(
+        node for node in ast.walk(func_node)
+        if isinstance(node, ast.Delete)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "X"
+    )
+    assert assign_node.lineno < del_node.lineno, (
+        "n_features must be captured BEFORE `del X`, or the capture reads "
+        "an already-deleted X"
+    )
+
+    lines = source.splitlines()
+    snippet = textwrap.dedent(
+        "\n".join(lines[assign_node.lineno - 1: del_node.end_lineno])
+    )
+
+    # Real X: capture must equal the true feature width, and X must end up
+    # deleted -- the eager-free intent (freeing a ~658MB object right after
+    # its last use, matching this function's own del-after-last-use pattern)
+    # must survive alongside the bugfix.
+    ns = {"X": np.zeros((5, 41149))}
+    exec(compile(snippet, "<fix4-capture-then-delete>", "exec"), ns)
+    assert ns["n_features"] == 41149
+    assert "X" not in ns, "X must be deleted immediately after the capture"
+
+    # X is None: an earlier guard in the function already returns before this
+    # point whenever X is None, but the ternary's None-handling branch and
+    # the unconditional `del X` after it must still hold up on their own.
+    ns_none = {"X": None}
+    exec(compile(snippet, "<fix4-capture-then-delete>", "exec"), ns_none)
+    assert ns_none["n_features"] == 0
+    assert "X" not in ns_none
 
 
 def test_suspension_type_alone_does_not_satisfy_conditions_guard():

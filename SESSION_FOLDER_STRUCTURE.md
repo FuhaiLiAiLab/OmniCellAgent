@@ -106,7 +106,8 @@ Columns:
 
 - `rank`: rank by average expression across the selected cohort.
 - `gene_index`: feature index in the expression matrix.
-- `mean_expression`: cohort-level mean expression for that feature.
+- `gene_name`: gene symbol for that feature.
+- `mean_expression_cp10k`: cohort-level mean expression for that feature, CP10K-normalized.
 
 Biomedical meaning:
 
@@ -147,6 +148,11 @@ Files:
   change.
 - `significant_downregulated_genes.csv`: significant genes with negative log2
   fold change.
+
+Each of these five files opens with `#`-prefixed comment lines (cohort
+validity verdict, contrast, FAIL/CAUTION checks) before the real header row.
+Read them with `pd.read_csv(path, comment="#")` — a plain `pd.read_csv(path)`
+raises a `ParserError`.
 
 Common columns:
 

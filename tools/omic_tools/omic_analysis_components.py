@@ -152,8 +152,11 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     create_directories_parallel(directories_to_create)
 
     if diagnostics_text:
-        with open(os.path.join(de_output_dir, "COHORT_DIAGNOSTICS.txt"), "w") as handle:
-            handle.write(diagnostics_text + "\n")
+        try:
+            with open(os.path.join(de_output_dir, "COHORT_DIAGNOSTICS.txt"), "w", encoding="utf-8") as handle:
+                handle.write(diagnostics_text + "\n")
+        except Exception as e:
+            print(f"[WARNING] Could not write COHORT_DIAGNOSTICS.txt: {e}")
 
     # Perform the differential expression analysis
     significant_genes, result_df = perform_unpaired_differential_expression(
@@ -420,7 +423,7 @@ def perform_unpaired_differential_expression(disease_df, normal_df,
     ]
     
     def save_dataframe(df, filepath):
-        with open(filepath, "w") as handle:
+        with open(filepath, "w", encoding="utf-8", newline="") as handle:
             for line in (diagnostics_text or "").splitlines():
                 handle.write(f"# {line}\n")
             df.to_csv(handle, index=False)
