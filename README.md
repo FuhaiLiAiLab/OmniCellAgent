@@ -551,7 +551,6 @@ python tools/google_search_tools/google_search_w3m.py # Test Google search
 
 # Test utilities
 python utils/path_config.py                           # Verify path configuration
-python tools/omic_tools/ner_tool.py                   # Test NER extraction
 ```
 
 This makes it easy to isolate and debug specific components without running the full agent system.
@@ -612,7 +611,7 @@ The omic analysis tool follows a multi-stage pipeline architecture:
 │                                                                             │
 │  omic_fetch_analysis_workflow()                                             │
 │         │                                                                   │
-│         ├── STEP 1: NER extraction (ner_tool.py)                            │
+│         ├── STEP 1: Build query from direct parameters                      │
 │         │                                                                   │
 │         ├── STEP 2: Data retrieval (CellTOSGDataLoader)                     │
 │         │                                                                   │
@@ -691,6 +690,9 @@ caveats) before the CSV header row. Read them with
 | `agent/simple_magentic_agent.py`                   | Main agent with FunctionTool wrapper      |
 | `tools/omic_tools/omic_fetch_analysis_workflow.py` | Orchestrates the full pipeline            |
 | `tools/omic_tools/omic_analysis.py`                | Core DE analysis and enrichment functions |
-| `tools/omic_tools/ner_tool.py`                     | Named entity recognition for queries      |
+| `tools/omic_tools/donor_sampling.py`               | Known-donor disease/control metacell sampling |
+| `tools/omic_tools/celltosg_runtime_adapter.py`     | HGNC gene selection and writable CellTOSG root |
+| `tools/omic_tools/cohort_diagnostics.py`           | Donor-key cohort checks before DE          |
+| `tools/omic_tools/pseudobulk_pipeline/`            | Separate donor-level DESeq2 pipeline       |
 | `tools/omic_tools/subprocess_r.py`                 | R script execution helper                 |
 | `enrichment/kegg.R`                                | KEGG pathway visualization (R/plotly)     |

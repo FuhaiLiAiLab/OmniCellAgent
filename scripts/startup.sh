@@ -51,19 +51,9 @@ echo "Started Scientist RAG Tool"
 nohup "$AUTOGEN_PY" "$PROJECT_ROOT/tools/gretriever_tools/gretriever_service.py" > "$LOG_DIR/gretriever_service_output.log" 2>&1 &
 echo "Started GRetriever Service"
 
-# Start Omic Fetch Analysis Workflow Microservice (commented out - already integrated)
-# nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/omic_fetch_analysis_workflow_microservice.py" > "$LOG_DIR/omic_load_fetch_service.log" 2>&1 &
-# echo "Started Omic Fetch Analysis Service"
-
-# GLiNER Service intentionally disabled — the LangGraph agent path does its
-# own NER via the LLM, and the package isn't installed in langgraph-dev.
-# Re-enable below if you want text-mode NER for the omic_fetch_analysis CLI.
-# nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/microservice/gliner_service.py" > "$LOG_DIR/gliner_service.log" 2>&1 &
-# echo "Started GLiNER Service"
-
-# Start BioBERT Service
-nohup "$LG_PY" "$PROJECT_ROOT/tools/omic_tools/microservice/biobert_service.py" > "$LOG_DIR/biobert_service.log" 2>&1 &
-echo "Started BioBERT Service"
+# The omic fetch/analysis microservice, GLiNER and BioBERT services were
+# removed along with the standalone NER path. The omic workflow is called
+# in-process, and the LangGraph agent does entity extraction via the LLM.
 
 # Start ngrok tunnel
 nohup ngrok http --domain=agent.omni-cells.com 8050 > "$LOG_DIR/ngrok.out" 2>&1 &

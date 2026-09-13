@@ -18,8 +18,13 @@ import matplotlib.lines
 import os
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-BASE_DIR = '/home/lilab/AD-test-2/gender_de_results/cell_type_stratified'
-PLOT_DIR = '/home/lilab/AD-test-2/plots/gender_celltype'
+# Override the data root with AD_TEST_ROOT; the default is the machine this
+# figure was originally produced on and does not exist elsewhere.
+# Note: this reads cell_type_stratified, which disease_sex_de_analysis.py does
+# not write. That upstream step is not in this repository.
+ROOT = os.environ.get('AD_TEST_ROOT', '/home/lilab/AD-test-2')
+BASE_DIR = os.path.join(ROOT, 'gender_de_results', 'cell_type_stratified')
+PLOT_DIR = os.path.join(ROOT, 'plots', 'gender_celltype')
 os.makedirs(PLOT_DIR, exist_ok=True)
 
 # ─── Global style ─────────────────────────────────────────────────────────────

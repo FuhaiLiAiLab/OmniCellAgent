@@ -17,9 +17,11 @@ import matplotlib.patches as mpatches
 from matplotlib.patches import Rectangle
 import os
 
-# paths
-BASE_DIR = '/home/lilab/AD-test-2/gender_de_results/disease_sex_stratified'
-PLOT_DIR = '/home/lilab/AD-test-2/plots/gender_celltype'
+# paths. Override the data root with AD_TEST_ROOT; the default is the machine
+# this figure was originally produced on and does not exist elsewhere.
+ROOT = os.environ.get('AD_TEST_ROOT', '/home/lilab/AD-test-2')
+BASE_DIR = os.path.join(ROOT, 'gender_de_results', 'disease_sex_stratified')
+PLOT_DIR = os.path.join(ROOT, 'plots', 'gender_celltype')
 os.makedirs(PLOT_DIR, exist_ok=True)
 
 # parameters

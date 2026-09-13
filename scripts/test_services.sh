@@ -103,49 +103,19 @@ if test_service "Query Endpoint" "http://localhost:8001/query" "POST" "$gretriev
 fi
 echo ""
 
-# 4. Omic Fetch Analysis Workflow (commented out - not started by default)
-# echo "4. Omic Fetch Analysis Workflow"
-# ((total++))
-# if ps aux | grep -E "python.*omic_fetch_analysis_workflow_microservice" | grep -v grep > /dev/null; then
-#     echo -e "${GREEN}✓ Process Running${NC}"
-#     ((passed++))
-# else
-#     echo -e "${RED}✗ Process Not Running${NC}"
-# fi
-# echo ""
+# The omic fetch/analysis microservice, GLiNER and BioBERT services were
+# removed with the standalone NER path, so there is nothing to probe for them.
 
-# 4. GLiNER Service
-echo "4. GLiNER Service"
-((total++))
-if ps aux | grep -E "python.*gliner_service" | grep -v grep > /dev/null; then
-    echo -e "${GREEN}✓ Process Running${NC}"
-    ((passed++))
-else
-    echo -e "${RED}✗ Process Not Running${NC}"
-fi
-echo ""
-
-# 5. BioBERT Service
-echo "5. BioBERT Service"
-((total++))
-if ps aux | grep -E "python.*biobert_service" | grep -v grep > /dev/null; then
-    echo -e "${GREEN}✓ Process Running${NC}"
-    ((passed++))
-else
-    echo -e "${RED}✗ Process Not Running${NC}"
-fi
-echo ""
-
-# 6. Webapp (port 8050)
-echo "6. Webapp (port 8050)"
+# 4. Webapp (port 8050)
+echo "4. Webapp (port 8050)"
 ((total++))
 if test_service "Webapp" "http://localhost:8050"; then
     ((passed++))
 fi
 echo ""
 
-# 7. Ngrok Tunnel
-echo "7. Ngrok Tunnel"
+# 5. Ngrok Tunnel
+echo "5. Ngrok Tunnel"
 ((total++))
 if ps aux | grep -E "ngrok.*8050" | grep -v grep > /dev/null; then
     echo -e "${GREEN}✓ Process Running${NC}"

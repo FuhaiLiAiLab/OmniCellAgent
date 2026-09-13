@@ -15,11 +15,15 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-EXPR_MATRIX  = '/home/lilab/AD-test-2/expression_matrix.npy'
-LABELS_CSV   = '/home/lilab/AD-test-2/labels_full_disease.csv'
-GENE_CSV     = '/home/lilab/AD-test-2/biomedgraphica_gene.csv'
-EXPR_IDX_NPY = '/home/lilab/AD-test-2/expressed_col_indices.npy'
-OUT_BASE     = '/home/lilab/AD-test-2/gender_de_results/disease_sex_stratified'
+# Data root. Override with AD_TEST_ROOT; the default is the machine this
+# analysis was originally run on and does not exist elsewhere.
+ROOT         = os.environ.get('AD_TEST_ROOT', '/home/lilab/AD-test-2')
+
+EXPR_MATRIX  = os.path.join(ROOT, 'expression_matrix.npy')
+LABELS_CSV   = os.path.join(ROOT, 'labels_full_disease.csv')
+GENE_CSV     = os.path.join(ROOT, 'biomedgraphica_gene.csv')
+EXPR_IDX_NPY = os.path.join(ROOT, 'expressed_col_indices.npy')
+OUT_BASE     = os.path.join(ROOT, 'gender_de_results', 'disease_sex_stratified')
 MIN_CELLS    = 10
 LOAD_BATCH   = 200
 

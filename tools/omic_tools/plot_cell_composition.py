@@ -2,6 +2,7 @@
 Publication-quality cell composition barplot — Figure A only
 Facet by Disease (AD | Control), Sex as bar fill
 """
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -30,9 +31,11 @@ plt.rcParams.update({
 })
 
 # ── 1. Load & clean ──────────────────────────────────────────────────────────
-df = pd.read_csv(
-    "/home/luegg/OCA_sample-selected/AD-test-2/labels_full_disease.csv"
-)
+# Override the data root with AD_TEST_ROOT; the default is the machine this
+# figure was originally produced on and does not exist elsewhere.
+ROOT = Path(os.environ.get(
+    "AD_TEST_ROOT", "/home/luegg/OCA_sample-selected/AD-test-2"))
+df = pd.read_csv(ROOT / "labels_full_disease.csv")
 
 def _norm_disease(s: str) -> str | None:
     n = s.lower().replace("’", "'")

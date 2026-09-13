@@ -51,9 +51,6 @@ stop_process() {
 # Stop all services
 stop_process "Scientist RAG Tool" "python.*scientist_tool.py"
 stop_process "GRetriever Service" "python.*gretriever_service.py"
-stop_process "Omic Fetch Analysis" "python.*omic_fetch_analysis_workflow_microservice.py"
-stop_process "GLiNER Service" "python.*gliner_service.py"
-stop_process "BioBERT Service" "python.*biobert_service.py"
 stop_process "Webapp" "python.*webapp/index.py"
 stop_process "Ngrok" "ngrok.*8050"
 
@@ -75,7 +72,7 @@ echo ""
 
 # Verify nothing is left running
 echo "Verifying all services are stopped..."
-remaining=$(ps aux | grep -E "(scientist_tool|gretriever_service|omic_fetch|gliner_service|biobert_service|webapp/index|ngrok.*8050)" | grep -v grep | wc -l)
+remaining=$(ps aux | grep -E "(scientist_tool|gretriever_service|webapp/index|ngrok.*8050)" | grep -v grep | wc -l)
 
 if [ "$remaining" -eq 0 ]; then
     echo "✓ All services successfully stopped"

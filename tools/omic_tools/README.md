@@ -93,45 +93,40 @@ external:
   biomedgraphica_dir: "/home/hao/BioProtocol/OmniCellTOSG/OmniCellTOSG_Dataset/BioMedGraphica-Conn"
 ```
 
-### 3. Start the Microservice
+### 3. Run the Workflow
 
-The microservice uses **memory-efficient on-demand loading** - no pre-loading of matrices:
+There is no microservice. The workflow runs in-process, either from the CLI or
+by importing it. Matrices are still loaded on demand, so startup is cheap and
+only the rows matching the query are read.
 
 ```bash
-# Activate your environment
-conda activate autogen-dev
-
-# Start the microservice (port 8010)
-cd /home/hao/BioProtocol/OmniCellAgent
-python tools/omic_tools/omic_fetch_analysis_workflow_microservice_simple.py
+python tools/omic_tools/omic_fetch_analysis_workflow.py \
+  --disease "Alzheimer's Disease" --organ brain --cell-type astrocyte \
+  --sample-size 1000 --session-id alzheimer_demo
 ```
 
-Memory usage:
-- **Startup**: < 1 second, ~200MB RAM
-- **During query**: Only loads matrices for matching cells
-- **No memory explosion**: Uses numpy mmap (disk-backed arrays)
-
-### 4. Test the Service
-
 ```python
-from tools.omic_tools.omic_fetch_analysis_workflow_client import omic_fetch_analysis_workflow
+from tools.omic_tools.omic_fetch_analysis_workflow import omic_fetch_analysis_workflow
 
-# Simple query
-result = omic_fetch_analysis_workflow("pancreatic cancer genes", top_k=20)
-
+result = omic_fetch_analysis_workflow(
+    disease="pancreatic cancer", organ="pancreas", top_k=20,
+)
 if isinstance(result, dict):
-    print(f"Disease: {result['disease_name']}")
-    print(f"Top genes: {result['top_genes']}")
+    print(result["disease_name"], result["top_genes"])
 else:
     print(f"Error: {result}")
 ```
 
-Or test with curl:
-```bash
-curl -X POST http://localhost:8010/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"text": "diabetes genes", "top_k": 10}'
-```
+Query parameters are passed directly. The earlier free-text entry point relied
+on the NER tool, which has been removed; the LangGraph agent now does that
+extraction with the LLM and calls this function with explicit arguments.
+
+### 4. Check the Session Outputs
+
+Each run writes `available_diseases.txt` and `available_cell_types.txt` so you
+can confirm the requested values exist in the dataset vocabulary, plus
+`donor_sampling.json` for the per-group metacell and donor counts. See the two
+sections at the top of this file.
 
 ## Architecture
 
@@ -139,22 +134,28 @@ curl -X POST http://localhost:8010/analyze \
 
 The system uses **on-demand loading** instead of pre-loading all matrices:
 
-1. **NER**: Extract disease/cell type from text query
+1. **Query**: Take disease, cell type, organ and tissue as explicit arguments
 2. **Metadata Query**: Find matching cells in metadata (~100MB)
-3. **Matrix Loading**: Load ONLY expression data for matching cells using mmap
-4. **Analysis**: Differential expression & enrichment
+3. **Donor-aware sampling**: Select known-donor disease and control metacells
+4. **Matrix Loading**: Load ONLY expression data for matching cells using mmap
+5. **Analysis**: Differential expression & enrichment
 
 **Key insight**: You never need ALL 99 matrices (>1TB) loaded - only the tiny subset matching each specific query!
 
 ### Files
 
-- `download_omnicell_dataset.sh` - Download script for HuggingFace dataset
-- `omic_fetch_analysis_workflow_microservice_simple.py` - Memory-efficient microservice
-- `omic_fetch_analysis_workflow_client.py` - Python client
-- `ner_tool.py` - Named entity recognition
+- `omic_fetch_analysis_workflow.py` - Entry point for the metacell-level workflow
+- `omic_analysis_components.py` - Differential expression, volcano plots, enrichment
+- `donor_sampling.py` - Known-donor disease/control metacell selection
+- `celltosg_runtime_adapter.py` - HGNC protein-coding selection and a writable CellTOSG root
+- `query_value_lists.py` - Per-session disease and cell-type vocabularies
+- `cohort_diagnostics.py` - Donor-key cohort checks written before DE
 - `omic_fetch_tool.py` - Data fetching from metadata
-- `omic_analysis_tool.py` - Differential expression analysis
 - `subprocess_r.py` - R script execution for enrichment
+- `reference/` - Bundled HGNC protein-coding gene table
+- `tests/` - Focused tests for this workflow
+- `pseudobulk_pipeline/` - Separate donor-level DESeq2 pipeline, see its own README
+- `donor_sensitivity/` - Sensitivity audit of a finished pseudobulk run
 
 ### Data Loader
 
@@ -169,10 +170,8 @@ The system uses the **simple data loader** (`CellTOSG_Loader/data_loader.py`):
 
 If you experience memory issues:
 
-1. **Check you're using the simple microservice**:
-   ```bash
-   ps aux | grep omic_fetch_analysis_workflow_microservice_simple.py
-   ```
+1. **Lower the sample size**: `--sample-size` caps each group's metacells
+   (default 1000), which bounds the loaded matrix.
 
 2. **Verify dataset format**: Should have `.npy` files, not `.dat`+`.json`
    ```bash
@@ -193,17 +192,9 @@ The HuggingFace dataset uses `.npy` format which is optimal:
 
 If you have `.dat`+`.json` files, download the correct version from HuggingFace.
 
-### Port Already in Use
-
-```bash
-# Kill any process on port 8010
-lsof -ti:8010 | xargs kill -9
-```
-
 ## Performance
 
 Typical query performance:
-- **NER**: 0.1-0.5s
 - **Data fetch**: 2-10s (depends on query specificity)
 - **Differential expression**: 5-30s (depends on sample size)
 - **Enrichment analysis**: 5-15s (R KEGG analysis)
