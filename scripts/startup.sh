@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Conda environment name
-CONDA_ENV="langgraph-dev"
+CONDA_ENV="omnicellagent"
 
 # Resolve direct python interpreters (more reliable than `conda run` in
 # non-interactive shells where conda's PATH manipulation hasn't been

@@ -122,6 +122,8 @@ coverage.xml
 
 # Sphinx documentation
 docs/_build/
+docs/superpowers/*
+docs/deep-research/*
 
 
 # logs and results
@@ -157,6 +159,9 @@ node_modules/
 # Large CSV files
 tools/omic_tools/outputs/*.csv
 *.zip
+
+# Stray R graphics-device output (written when a script plots without a device)
+Rplots.pdf
 
 # Manuscript folder (LaTeX sources and figures live elsewhere; do not commit here)
 manuscript/
