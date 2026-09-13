@@ -1,0 +1,417 @@
+---
+title: "casestudy"
+output: html_document
+date: "2025-10-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+# =========================
+# Differential Expression from two CSVs (genes x samples)
+# Requires: limma, ggplot2, pheatmap, data.table
+# install.packages(c("limma", "ggplot2", "pheatmap", "data.table"))
+# =========================
+
+# --- user inputs ---
+healthy_csv <- "foranalysis_combined_female_df_pdac.csv"   # genes in rows, samples in columns
+disease_csv <- "foranalysis_combined_male_df_pdac.csv"   # genes in rows, samples in columns
+out_prefix  <- "DE_results"    # prefix for outputs
+
+suppressPackageStartupMessages({
+  library(limma)
+  library(ggplot2)
+  library(pheatmap)
+  library(data.table)
+})
+
+# ---- read & align ----
+read_expr <- function(path) {
+  # Accepts CSV with gene IDs either as first column or as row names
+  dt <- fread(path)
+  # If first column looks like gene IDs (non-numeric), make it rownames
+  if (!is.numeric(dt[[1]])) {
+    rn <- dt[[1]]
+    dt[, 1 := NULL]
+    mat <- as.matrix(dt)
+    rownames(mat) <- rn
+  } else {
+    mat <- as.matrix(dt)
+    # if no explicit gene column, assume rownames already present after fread? If not, make generic
+    if (is.null(rownames(mat))) rownames(mat) <- paste0("gene_", seq_len(nrow(mat)))
+  }
+  storage.mode(mat) <- "numeric"
+  mat
+}
+
+mat_healthy <- read_expr(healthy_csv)
+mat_disease <- read_expr(disease_csv)
+
+print(dim(mat_healthy))
+print(dim(mat_disease))
+
+# Intersect genes and bind
+common_genes <- intersect(rownames(mat_healthy), rownames(mat_disease))
+if (length(common_genes) < 10) stop("Too few overlapping genes between files.")
+mat_healthy <- mat_healthy[common_genes, , drop = FALSE]
+mat_disease <- mat_disease[common_genes, , drop = FALSE]
+
+expr <- cbind(mat_healthy, mat_disease)
+group <- factor(c(rep("Female", ncol(mat_healthy)), rep("Male", ncol(mat_disease))),
+                levels = c("Female", "Male"))
+colnames(expr) <- make.unique(colnames(expr), sep = "_")
+
+# Optional log2 transform if values look like raw counts/intense
+q99 <- as.numeric(quantile(expr, 0.99, na.rm = TRUE))
+if (q99 > 100) {
+  message("Applying log2(x+1) transform based on value magnitude...")
+  expr <- log2(expr + 1)
+}
+
+# Remove rows with too many NAs or zero variance
+expr <- expr[rowSums(is.finite(expr)) >= ncol(expr) * 0.8, , drop = FALSE]
+v <- apply(expr, 1, stats::var, na.rm = TRUE)
+expr <- expr[v > 0, , drop = FALSE]
+
+# ---- limma differential expression ----
+design <- model.matrix(~ 0 + group)                 # no intercept
+colnames(design) <- levels(group)                   # "Female","Male"
+
+fit <- lmFit(expr, design)
+cont <- makeContrasts(Male_vs_Female = Male - Female, levels = design)
+fit2 <- contrasts.fit(fit, cont)
+fit2 <- eBayes(fit2, robust = TRUE, trend = TRUE)
+
+res <- topTable(fit2, coef = "Male_vs_Female", number = Inf, sort.by = "P")
+res$Gene <- rownames(res)
+# Positive logFC => higher in Male; negative => higher in Female
+res <- res[, c("Gene","logFC","AveExpr","t","P.Value","adj.P.Val","B")]
+
+# Save results
+out_csv <- paste0(out_prefix, "_table_gender.csv")
+fwrite(res, out_csv)
+message("Results written to: ", out_csv)
+```
+
+```{r}
+# ---- Heatmap of top genes ----
+top_n <- 20
+top_genes <- head(res$Gene[order(res$adj.P.Val)], n = min(top_n, nrow(res)))
+ann <- data.frame(Group = group)
+rownames(ann) <- colnames(expr)
+hm <- pheatmap(expr[top_genes, , drop = FALSE],
+               scale = "row", clustering_method = "complete",
+               annotation_col = ann, show_rownames = TRUE, show_colnames = FALSE,
+               main = paste0("Top ", length(top_genes), " DE genes"))
+# Save heatmap as file too
+png(paste0(out_prefix, "_heatmap.png"), width = 900, height = 1100, res = 130)
+pheatmap(expr[top_genes, , drop = FALSE],
+         scale = "row", clustering_method = "complete",
+         annotation_col = ann, show_rownames = TRUE, show_colnames = FALSE,
+         main = paste0("Top ", length(top_genes), " DE genes"))
+dev.off()
+
+# ---- Quick summary to console ----
+sig_count <- sum(res$adj.P.Val < 0.05, na.rm = TRUE)
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+library(corrgram)
+
+top_n <- 20
+top_genes <- head(res$Gene[order(res$adj.P.Val)], n = min(top_n, nrow(res)))
+df_samples <- as.data.frame(t(expr[top_genes, , drop = FALSE]))
+
+png(paste0(out_prefix, "_corrgram_genes_gender.png"), width = 1000, height = 1000, res = 150)  # square device
+op <- par(pty = "s")   # square plotting region
+corrgram(
+  df_samples,
+  order = TRUE,
+  lower.panel = panel.shade,
+  upper.panel = panel.pie,
+  text.panel  = panel.txt,
+  main = paste0("Gene correlation (Top ", length(top_genes), " DE genes)")
+)
+par(op)
+dev.off()
+```
+
+```{r}
+# ---- Volcano plot (with colored thresholds, counts, and top-20 labels) ----
+suppressPackageStartupMessages(library(ggrepel))
+fc_thresh  <- 0.25
+fdr_thresh <- 0.05
+
+res$neglog10P <- -log10(res$P.Value)
+res$status <- "NS"
+res$status[res$adj.P.Val < fdr_thresh & res$logFC >=  fc_thresh] <- "Up"
+res$status[res$adj.P.Val < fdr_thresh & res$logFC <= -fc_thresh] <- "Down"
+res$status <- factor(res$status, levels = c("Down","NS","Up"))
+
+# shape mapping: TRUE = triangle, FALSE = circle
+res$is_sig <- with(res, adj.P.Val < fdr_thresh & abs(logFC) >= fc_thresh)
+
+up_n   <- sum(res$status == "Up", na.rm = TRUE)
+down_n <- sum(res$status == "Down", na.rm = TRUE)
+
+top_label_n <- min(20, nrow(res))
+lab_df <- res[order(res$adj.P.Val), ][seq_len(top_label_n), ]
+
+x_min <- min(res$logFC, na.rm = TRUE); x_max <- max(res$logFC, na.rm = TRUE)
+y_max <- max(res$neglog10P, na.rm = TRUE); x_span <- x_max - x_min
+
+volcano <- ggplot(res, aes(x = logFC, y = neglog10P)) +
+  geom_hline(yintercept = -log10(fdr_thresh), linetype = "dashed") +
+  geom_vline(xintercept = -fc_thresh, color = "steelblue3", linetype = "dashed") +
+  geom_vline(xintercept =  fc_thresh, color = "red3",       linetype = "dashed") +
+  geom_point(aes(color = status, shape = is_sig), alpha = 0.85, size = 2) +
+  scale_color_manual(values = c(Down = "steelblue3", NS = "grey70", Up = "red3")) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17), labels = c("Not sig", "Significant")) +
+  geom_text_repel(
+    data = lab_df, aes(label = Gene),
+    size = 3, max.overlaps = 200, min.segment.length = 0,
+    box.padding = 0.3, point.padding = 0.2
+  ) +
+  annotate("text",
+    x = x_min + 0.02 * x_span, y = y_max * 0.98,
+    label = paste0("Up (FC ≥ ", fc_thresh, ", FDR < ", fdr_thresh, "): ", up_n),
+    hjust = 0, vjust = 1, color = "red3", fontface = "bold"
+  ) +
+  annotate("text",
+    x = x_min + 0.02 * x_span, y = y_max * 0.92,
+    label = paste0("Down (FC ≤ -", fc_thresh, ", FDR < ", fdr_thresh, "): ", down_n),
+    hjust = 0, vjust = 1, color = "steelblue3", fontface = "bold"
+  ) +
+  labs(title = "Volcano plot: female vs male",
+       x = "log2 Fold Change",
+       y = expression(-log[10](P))) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "top",
+        aspect.ratio = 1) +                     # square panel
+  coord_cartesian(clip = "off")
+
+ggsave(paste0(out_prefix, "_volcano_gender.png"), volcano, width = 5.5, height = 5.5, dpi = 300)  # square file
+```
+
+```{r}
+# ---- PCA + boxplots + PERMANOVA (pipe-free) ----
+# Needs: ggplot2, ggrepel, patchwork, RColorBrewer, vegan, multcompView
+
+suppressPackageStartupMessages({
+  library(ggplot2); library(ggrepel); library(patchwork)
+  library(RColorBrewer); library(vegan); library(multcompView)
+})
+
+# 1) top 20 genes by FDR
+top_n <- 20
+top_genes <- head(res$Gene[order(res$adj.P.Val)], n = min(top_n, nrow(res)))
+
+# 2) PCA on samples using top genes
+pca <- prcomp(t(expr[top_genes, , drop = FALSE]), scale. = TRUE)
+pve <- (pca$sdev^2) / sum(pca$sdev^2)
+
+# 3) sample metadata
+pcoadata <- data.frame(
+  sample = colnames(expr),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2]
+)
+pcoadata$Subtype <- factor(as.character(group),
+                           levels = c("Female", "Male"),
+                           labels = c("Female", "Male"))
+
+# palette (2 groups)
+pal2 <- setNames(colorRampPalette(brewer.pal(12, "Paired"))(2),
+                 c("Female", "Male"))
+
+# ---- main PCA scatter ----
+plot <- ggplot(pcoadata, aes(PC1, PC2)) +
+  geom_point(aes(colour = Subtype, fill = Subtype), size = 4) +
+  scale_color_manual(values = pal2) +
+  labs(
+    x = paste0("(PC1: ", round(pve[1] * 100, 2), "%)"),
+    y = paste0("(PC2: ", round(pve[2] * 100, 2), "%)")
+  ) +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "white", colour = "black"),
+    axis.title.x = element_text(colour = "black", size = 12, margin = margin(t = 5), face = "bold"),
+    axis.title.y = element_text(colour = "black", size = 12, margin = margin(r = 5), face = "bold"),
+    axis.text = element_text(color = "black", face = "bold"),
+    plot.title = element_blank(),
+    legend.title = element_blank(),
+    legend.key = element_blank(),
+    legend.text = element_text(color = "black", size = 9, face = "bold"),
+    legend.spacing.x = unit(0.1, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    legend.key.height = unit(0.5, "cm"),
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour = "black"),
+    legend.position = c(0.001, 0.999),
+    legend.justification = c(0.0001, 1),
+    aspect.ratio = 1  # square panel
+  )
+
+# ---- CLD letters for PC1/PC2 ----
+fit1 <- aov(PC1 ~ Subtype, data = pcoadata)
+cld1 <- multcompLetters4(fit1, TukeyHSD(fit1))
+dt1 <- aggregate(PC1 ~ Subtype, data = pcoadata, FUN = max)
+names(dt1)[2] <- "value_max"
+dt1$sd <- aggregate(PC1 ~ Subtype, data = pcoadata, FUN = sd)$PC1
+text1 <- merge(
+  transform(as.data.frame.list(cld1$Subtype), Subtype = rownames(as.data.frame.list(cld1$Subtype))),
+  dt1, by = "Subtype", all.x = TRUE
+)
+
+fit2 <- aov(PC2 ~ Subtype, data = pcoadata)
+cld2 <- multcompLetters4(fit2, TukeyHSD(fit2))
+dt2 <- aggregate(PC2 ~ Subtype, data = pcoadata, FUN = max)
+names(dt2)[2] <- "value_max"
+text2 <- merge(
+  transform(as.data.frame.list(cld2$Subtype), Subtype = rownames(as.data.frame.list(cld2$Subtype))),
+  dt2, by = "Subtype", all.x = TRUE
+)
+
+# ---- Boxplots ----
+p2 <- ggplot(pcoadata, aes(Subtype, PC1, fill = Subtype)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5, color = "black", linetype = "dotted") +
+  stat_boxplot(aes(ymin = ..lower.., ymax = ..upper..), outlier.shape = NA, width = 0.5) +
+  stat_boxplot(geom = "errorbar", aes(ymin = ..ymax..), width = 0.2, size = 0.35) +
+  stat_boxplot(geom = "errorbar", aes(ymax = ..ymin..), width = 0.2, size = 0.35) +
+  geom_text(data = text1, aes(label = Letters, y = value_max + 0.0082),
+            angle = -90, color = "black", size = 4) +
+  scale_fill_manual(values = pal2) +
+  labs(x = NULL, y = NULL) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "white", colour = "black"),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_blank(),
+    legend.position = "none"
+  ) +
+  coord_flip()
+
+p3 <- ggplot(pcoadata, aes(Subtype, PC2, fill = Subtype)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5, color = "black", linetype = "dotted") +
+  stat_boxplot(aes(ymin = ..lower.., ymax = ..upper..), outlier.shape = NA, width = 0.5) +
+  stat_boxplot(geom = "errorbar", aes(ymin = ..ymax..), width = 0.2, size = 0.35) +
+  stat_boxplot(geom = "errorbar", aes(ymax = ..ymin..), width = 0.2, size = 0.35) +
+  geom_text(data = text2, aes(label = Letters, y = value_max + 0.0055),
+            angle = 0, color = "black", size = 4) +
+  scale_fill_manual(values = pal2) +
+  labs(x = NULL, y = NULL) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "white", colour = "black"),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.title = element_blank(),
+    legend.position = "none"
+  )
+
+# ---- PERMANOVA on top-20 genes (Bray) ----
+dist_mat <- vegdist(t(expr[top_genes, , drop = FALSE]), method = "bray")
+otu.adonis <- adonis2(dist_mat ~ Subtype, data = pcoadata)
+
+p4 <- ggplot() +
+  geom_text(
+    aes(
+      x = 0, y = 0.1,
+      label = paste(
+        "PERMANOVA:",
+        paste0("df = ", otu.adonis$Df[1]),
+        paste0("R2 = ", round(otu.adonis$R2[1], 5)),
+        paste0("p-value = ", signif(otu.adonis$`Pr(>F)`[1], 3)),
+        sep = "\n"
+      )
+    ),
+    size = 3.5, color = "black", fontface = "bold"
+  ) +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "white", colour = "black"),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    plot.title = element_blank(),
+    legend.position = "none"
+  )
+
+# ---- Assemble like your example ----
+final_plot <- p2 + p4 + plot + p3 +
+  plot_layout(heights = c(1, 4), widths = c(4, 1), ncol = 2, nrow = 2)
+
+# Optional save:
+ggsave(paste0(out_prefix, "_PCA_panel_gender.png"), final_plot, width = 6, height = 6, dpi = 300)
+
+```
+
+```{r}
+# Packages
+suppressPackageStartupMessages(library(ggpubr))
+
+# choose which PC to plot
+which_pc <- "PC1"  # or "PC2"
+
+# build data from existing objects
+rt <- data.frame(
+  id         = pcoadata$sample,
+  Type       = factor(pcoadata$Subtype, levels = c("Female","Male")),
+  Expression = pcoadata[[which_pc]]
+)
+
+# add pooled "All" to make 3 violins
+rt_all <- rt; rt_all$Type <- factor("All", levels = c("Female","Male","All"))
+rt3 <- rbind(
+  transform(rt,   Type = factor(as.character(Type), levels = c("Female","Male","All"))),
+  rt_all
+)
+
+# pairwise comparisons
+group <- levels(rt3$Type)
+comp  <- combn(group, 2)
+my_comparisons <- lapply(seq_len(ncol(comp)), function(i) comp[, i])
+
+# global test
+kw <- compare_means(Expression ~ Type, data = rt3, method = "kruskal.test")
+ylab_top <- max(rt3$Expression, na.rm = TRUE)
+
+# plot (note: add / add.params are INSIDE ggviolin())
+outFile <- paste0(out_prefix, "_violin_", which_pc, "_3groups_gender.pdf")
+pdf(file = outFile, width = 6, height = 4)
+p <- ggviolin(
+  rt3, x = "Type", y = "Expression",
+  fill = "Type",
+  xlab = "Type", ylab = which_pc,
+  legend.title = "Type",
+  trim = FALSE,
+  add = "boxplot", add.params = list(fill = "white", width = 0.15, color = "black")
+) +
+  stat_compare_means(comparisons = my_comparisons, method = "wilcox.test", label = "p.signif") +
+  annotate("text", x = 2, y = ylab_top,
+           label = paste0("Kruskal–Wallis p = ", formatC(kw$p, format = "e", digits = 2)),
+           fontface = "bold", vjust = -0.3) +
+  theme_bw() +
+  theme(axis.text = element_text(color = "black", face = "bold"),
+        legend.position = "top")
+print(p)
+dev.off()
+message("Saved: ", outFile)
+
+
+```

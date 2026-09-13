@@ -1,0 +1,803 @@
+---
+title: "OmniCellAgent case study: cell-level DE and panels A-D"
+output: html_document
+date: "`r Sys.Date()`"
+params:
+  session_dir: "/storage3/fs1/fuhai.li/Active/di.huang/Research/LLM/OmniCellAgent/webapp/sessions/alzheimer_test_910"
+  ref_csv: "foranalysis_combined_normal_df_Alzheimer's Disease.csv"
+  alt_csv: "foranalysis_combined_disease_df_Alzheimer's Disease.csv"
+  ref_label: "Healthy"
+  alt_label: "Diseased"
+  out_dir: null
+  out_prefix: "DE_results"
+  input_scale: "linear_cp10k"
+  fdr_thresh: 0.05
+  fc_thresh: 0.25
+  permutations: 999
+  n_corrgram: 20
+  n_pca: 100
+  which_pc: "PC1"
+  composite: true
+  do_pseudobulk: false
+  labels_csv: "labels.csv"
+---
+
+```{r setup, include=FALSE, dev="pdf"}
+# dev="pdf" on THIS chunk is required, not cosmetic: knitr opens a device before
+# evaluating a chunk, so the opts_chunk$set(dev=) below cannot apply to the
+# chunk it lives in. Without it, knitr falls back to svg here and dies with
+# "Cairo-based devices are not available for this platform". pdf() is the only
+# device compiled into this R build.
+#
+# The r/4.5.2 module on this cluster is built WITHOUT png, jpeg, cairo or X11:
+#   capabilities()[c("png","jpeg","cairo","X11")]  ->  FALSE FALSE FALSE FALSE
+# so base png() raises "X11 is not available" and knitr's default device fails
+# on every chunk, not just the plotting ones. ragg supplies PNG independently of
+# R's compiled-in devices, and pdf() works natively. Do not replace this with
+# png() without re-checking capabilities() on the machine you are running on.
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE, dev = "ragg_png")
+
+suppressPackageStartupMessages({
+  library(ragg)
+  library(ggplotify)
+  library(limma)
+  library(ggplot2)
+  library(ggrepel)
+  library(patchwork)
+  library(RColorBrewer)
+  library(data.table)
+  library(corrgram)
+  library(vegan)
+  library(multcompView)
+  library(ggpubr)
+  library(pheatmap)
+})
+
+out_dir <- if (is.null(params$out_dir)) params$session_dir else params$out_dir
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+out_stem <- file.path(out_dir, params$out_prefix)
+
+fdr_thresh <- params$fdr_thresh
+fc_thresh  <- params$fc_thresh
+
+if (!capabilities("png")) {
+  message("[device] R has no built-in png device; using ragg for all raster output.")
+}
+```
+
+## What this document does
+
+Reads the two `foranalysis_combined_*` matrices a session emits, runs limma on
+the **cell** axis, and writes panels A-D as separate image files. The four panels
+are assembled into a single figure outside R.
+
+Read the caveats in "Statistical scope" at the bottom before using any of this
+for an inferential claim.
+
+## 1. Load and align
+
+Each CSV is genes x cells: column 1 is `Name` (HGNC symbol), every other column
+is one **cell** (`ns_sample_i` / `ds_sample_i`). Despite the name, a column is
+not a biological sample.
+
+```{r load-data}
+read_expr <- function(path) {
+  stopifnot(file.exists(path))
+  dt <- fread(path)
+  if (!is.numeric(dt[[1]])) {
+    rn <- dt[[1]]
+    dt[, 1 := NULL]
+    mat <- as.matrix(dt)
+    rownames(mat) <- rn
+  } else {
+    mat <- as.matrix(dt)
+    if (is.null(rownames(mat))) rownames(mat) <- paste0("gene_", seq_len(nrow(mat)))
+  }
+  storage.mode(mat) <- "numeric"
+  mat
+}
+
+mat_ref <- read_expr(file.path(params$session_dir, params$ref_csv))
+mat_alt <- read_expr(file.path(params$session_dir, params$alt_csv))
+
+message(sprintf("%s: %d genes x %d cells", params$ref_label, nrow(mat_ref), ncol(mat_ref)))
+message(sprintf("%s: %d genes x %d cells", params$alt_label, nrow(mat_alt), ncol(mat_alt)))
+```
+
+## 2. Verify the input scale, then transform
+
+The `q99 > 100` heuristic the earlier version used is not a scale detector: a
+maximum around 5 is equally consistent with log-scale data and with low-valued
+linear normalised expression.
+
+These matrices come out of `normalize_cp10k()` in
+`omic_fetch_analysis_workflow.py`, which rescales every **cell** to sum to
+10,000 and does **not** apply `log1p`. That gives a structural signature rather
+than a magnitude guess: each column must sum to 1e4. `params$input_scale`
+declares the expected scale; this chunk asserts it and fails loudly on a
+mismatch instead of silently double-logging.
+
+```{r scale-check}
+describe_scale <- function(m, nm) {
+  cs <- colSums(m, na.rm = TRUE)
+  q  <- quantile(m, c(0.5, 0.9, 0.99), na.rm = TRUE)
+  message(sprintf(
+    "[scale] %-10s median colSum = %.1f | q50 = %.4g  q90 = %.4g  q99 = %.4g | max = %.4g",
+    nm, median(cs), q[[1]], q[[2]], q[[3]], max(m, na.rm = TRUE)))
+  median(cs)
+}
+
+med_ref <- describe_scale(mat_ref, params$ref_label)
+med_alt <- describe_scale(mat_alt, params$alt_label)
+
+if (identical(params$input_scale, "linear_cp10k")) {
+  tol <- 0.01
+  ok <- abs(med_ref - 1e4) / 1e4 < tol && abs(med_alt - 1e4) / 1e4 < tol
+  if (!ok) {
+    stop(sprintf(paste0(
+      "input_scale is declared 'linear_cp10k' but median column sums are ",
+      "%.1f / %.1f, not 10000. Either the matrices were already transformed, ",
+      "or the upstream normalisation changed. Fix params$input_scale rather ",
+      "than letting log2() run on the wrong scale."), med_ref, med_alt))
+  }
+  message("[scale] CP10K confirmed (columns sum to 1e4). Applying log2(x + 1).")
+  transform_applied <- TRUE
+} else if (identical(params$input_scale, "log2_already")) {
+  message("[scale] Caller declares data is already log2. No transform applied.")
+  transform_applied <- FALSE
+} else {
+  stop("params$input_scale must be 'linear_cp10k' or 'log2_already'.")
+}
+```
+
+`limma` assumes a log scale. Without the transform, `logFC` is a difference of
+linear CP10K means and cannot be called a log2 fold change.
+
+```{r combine}
+common_genes <- intersect(rownames(mat_ref), rownames(mat_alt))
+if (length(common_genes) < 10) stop("Too few overlapping genes between files.")
+mat_ref <- mat_ref[common_genes, , drop = FALSE]
+mat_alt <- mat_alt[common_genes, , drop = FALSE]
+
+expr <- cbind(mat_ref, mat_alt)
+group <- factor(
+  c(rep(params$ref_label, ncol(mat_ref)), rep(params$alt_label, ncol(mat_alt))),
+  levels = c(params$ref_label, params$alt_label)
+)
+colnames(expr) <- make.unique(colnames(expr), sep = "_")
+
+if (transform_applied) expr <- log2(expr + 1)
+
+# Drop mostly-missing and zero-variance genes
+expr <- expr[rowSums(is.finite(expr)) >= ncol(expr) * 0.8, , drop = FALSE]
+v <- apply(expr, 1, stats::var, na.rm = TRUE)
+expr <- expr[v > 0, , drop = FALSE]
+
+message(sprintf("Analysis matrix: %d genes x %d cells (%s n=%d, %s n=%d)",
+                nrow(expr), ncol(expr),
+                params$ref_label, sum(group == params$ref_label),
+                params$alt_label, sum(group == params$alt_label)))
+```
+
+## 3. Differential expression
+
+Means parameterisation (`~ 0 + group`) with an explicit contrast. Note that
+`~ 0 + group` **must** be paired with `makeContrasts()` / `contrasts.fit()`:
+its coefficients are the two group means, so testing `coef = "groupDiseased"`
+directly would test "mean expression differs from zero", which is true for
+essentially every expressed gene. The contrast below is the alt-minus-ref
+difference and is what `logFC` reports.
+
+```{r de}
+design <- model.matrix(~ 0 + group)
+colnames(design) <- make.names(levels(group))
+
+contrast_str <- paste(make.names(params$alt_label), "-", make.names(params$ref_label))
+cm <- makeContrasts(contrasts = contrast_str, levels = design)
+
+fit  <- lmFit(expr, design)
+fit2 <- contrasts.fit(fit, cm)
+fit2 <- eBayes(fit2, robust = TRUE, trend = TRUE)
+
+res <- topTable(fit2, coef = 1, number = Inf, sort.by = "P",
+                adjust.method = "BH")
+res$Gene <- rownames(res)
+res <- res[, c("Gene", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")]
+
+out_csv <- paste0(out_stem, "_table.csv")
+fwrite(res, out_csv)
+message("Contrast: ", contrast_str)
+message("Results written to: ", out_csv)
+
+sig_count <- sum(res$adj.P.Val < fdr_thresh, na.rm = TRUE)
+message("Genes with FDR < ", fdr_thresh, ": ", sig_count)
+if (sig_count > 0) {
+  message("Up in ", params$alt_label, ": ",
+          sum(res$adj.P.Val < fdr_thresh & res$logFC > 0, na.rm = TRUE),
+          " | Down: ",
+          sum(res$adj.P.Val < fdr_thresh & res$logFC < 0, na.rm = TRUE))
+}
+```
+
+## 4. PCA and PERMANOVA (calculations only)
+
+Split out so no plotting chunk silently creates data another plotting chunk
+needs. Panels C and D both consume `pcoadata` produced here.
+
+```{r pca-permanova}
+top_genes_pca <- head(res$Gene[order(res$adj.P.Val)], n = min(params$n_pca, nrow(res)))
+
+pca <- prcomp(t(expr[top_genes_pca, , drop = FALSE]), scale. = TRUE)
+pve <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pcoadata <- data.frame(
+  sample  = colnames(expr),
+  PC1     = pca$x[, 1],
+  PC2     = pca$x[, 2],
+  Subtype = group
+)
+
+pal2 <- setNames(colorRampPalette(brewer.pal(12, "Paired"))(2),
+                 c(params$ref_label, params$alt_label))
+
+# Bray-Curtis needs non-negative input; log2(CP10K + 1) satisfies that.
+dist_mat   <- vegdist(t(expr[top_genes_pca, , drop = FALSE]), method = "bray")
+otu.adonis <- adonis2(dist_mat ~ Subtype, data = pcoadata,
+                      permutations = params$permutations)
+
+# A permutation test cannot resolve p below 1/(permutations + 1). Report the
+# floor as an inequality rather than as a measured probability.
+perm_floor <- 1 / (params$permutations + 1)
+p_obs <- otu.adonis$`Pr(>F)`[1]
+perm_p_label <- if (!is.na(p_obs) && p_obs <= perm_floor + 1e-12) {
+  paste0("p <= ", format(perm_floor, scientific = FALSE))
+} else {
+  paste0("p = ", signif(p_obs, 3))
+}
+message("PERMANOVA (", params$permutations, " permutations): R2 = ",
+        round(otu.adonis$R2[1], 5), ", ", perm_p_label)
+```
+
+## 5. Panel A -- volcano
+
+The y-axis and point significance both use `adj.P.Val`, which `topTable()`
+calculates by applying the Benjamini--Hochberg correction to the moderated
+t-test p-values across all tested genes. Ties introduced by the adjustment can
+appear as horizontal bands. No horizontal significance line is drawn.
+
+```{r panel-a-volcano}
+res$neglog10AdjP <- -log10(pmax(res$adj.P.Val, .Machine$double.xmin))
+res$status <- "NS"
+res$status[res$adj.P.Val < fdr_thresh & res$logFC >=  fc_thresh] <- "Up"
+res$status[res$adj.P.Val < fdr_thresh & res$logFC <= -fc_thresh] <- "Down"
+res$status <- factor(res$status, levels = c("Down", "NS", "Up"))
+res$is_sig <- with(res, adj.P.Val < fdr_thresh & abs(logFC) >= fc_thresh)
+
+up_n   <- sum(res$status == "Up", na.rm = TRUE)
+down_n <- sum(res$status == "Down", na.rm = TRUE)
+
+lab_df <- res[order(res$adj.P.Val), ][seq_len(min(20, nrow(res))), ]
+x_min <- min(res$logFC, na.rm = TRUE); x_max <- max(res$logFC, na.rm = TRUE)
+y_max <- max(res$neglog10AdjP, na.rm = TRUE); x_span <- x_max - x_min
+
+fc_axis_lab <- if (transform_applied) {
+  paste0("log2 Fold Change (", params$alt_label, " / ", params$ref_label, ")")
+} else {
+  paste0("Mean difference, input scale (", params$alt_label, " - ", params$ref_label, ")")
+}
+
+volcano <- ggplot(res, aes(x = logFC, y = neglog10AdjP)) +
+  geom_vline(xintercept = -fc_thresh, color = "steelblue3", linetype = "dashed") +
+  geom_vline(xintercept =  fc_thresh, color = "red3",       linetype = "dashed") +
+  geom_point(aes(color = status, shape = is_sig), alpha = 0.85, size = 2) +
+  scale_color_manual(values = c(Down = "steelblue3", NS = "grey70", Up = "red3")) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17),
+                     labels = c("Not sig", "Significant")) +
+  # ylim keeps repelled labels out of the band the two count annotations occupy;
+  # without it they collide as soon as a top gene sits near the y maximum.
+  geom_text_repel(data = lab_df, aes(label = Gene), size = 3, max.overlaps = 200,
+                  min.segment.length = 0, box.padding = 0.3, point.padding = 0.2,
+                  ylim = c(NA, y_max * 0.88)) +
+  annotate("text", x = x_min + 0.02 * x_span, y = y_max * 0.98,
+           label = paste0("Up (FC >= ", fc_thresh, ", FDR < ", fdr_thresh, "): ", up_n),
+           hjust = 0, vjust = 1, color = "red3", fontface = "bold") +
+  annotate("text", x = x_min + 0.02 * x_span, y = y_max * 0.92,
+           label = paste0("Down (FC <= -", fc_thresh, ", FDR < ", fdr_thresh, "): ", down_n),
+           hjust = 0, vjust = 1, color = "steelblue3", fontface = "bold") +
+  labs(title = paste0("Volcano plot: ", params$alt_label, " vs ", params$ref_label),
+       x = fc_axis_lab, y = expression(-log[10]("BH-adjusted P"))) +
+  theme_bw() +
+  theme(plot.title = element_text(face = "bold"), legend.position = "top",
+        aspect.ratio = 1) +
+  coord_cartesian(clip = "off")
+
+ggsave(paste0(out_stem, "_volcano.png"), volcano, width = 5.5, height = 5.5, dpi = 300,
+       device = ragg::agg_png)
+ggsave(paste0(out_stem, "_volcano.pdf"), volcano, width = 5.5, height = 5.5)
+volcano
+```
+
+## 6. Panel B -- gene correlation
+
+Pairwise Pearson correlations are calculated across cells for the genes with
+the smallest BH-adjusted differential-expression p-values. The variables are
+placed in PCA-based angular order. Both triangles show the same correlations:
+the shaded squares encode signed `r`, while each circle's filled fraction
+encodes `abs(r)`. Diagonal labels are gene symbols.
+
+```{r panel-b-corrgram}
+top_genes_cg <- head(res$Gene[order(res$adj.P.Val)], n = min(params$n_corrgram, nrow(res)))
+df_cells <- as.data.frame(t(expr[top_genes_cg, , drop = FALSE]))
+
+# Reverse corrgram's default palette so negative correlations are blue and
+# positive correlations are red; white remains the midpoint at zero.
+corr_palette <- colorRampPalette(c("#2166AC", "#92C5DE", "#F7F7F7",
+                                   "#F4A582", "#B2182B"))
+
+draw_corrgram_key <- function() {
+  op <- par(no.readonly = TRUE)
+  on.exit(par(op), add = TRUE)
+
+  # This strip sits wholly inside the enlarged bottom outer margin. Keeping a
+  # white gutter between it and the matrix prevents the key from competing with
+  # the lowest row of cells or the diagonal gene labels.
+  par(fig = c(0.08, 0.92, 0.005, 0.115), mar = rep(0, 4),
+      new = TRUE, xpd = NA, pty = "m")
+  plot.new()
+  plot.window(xlim = c(-1, 1), ylim = c(0, 1), xaxs = "i", yaxs = "i")
+
+  key_breaks <- seq(-1, 1, length.out = 201)
+  rect(key_breaks[-length(key_breaks)], 0.44,
+       key_breaks[-1], 0.70,
+       col = corr_palette(length(key_breaks) - 1), border = NA)
+  rect(-1, 0.44, 1, 0.70, border = "grey35", lwd = 0.5)
+
+  key_ticks <- c(-1, -0.5, 0, 0.5, 1)
+  segments(key_ticks, 0.39, key_ticks, 0.44, col = "grey25", lwd = 0.5)
+  text(key_ticks, 0.30, labels = c("-1", "-0.5", "0", "0.5", "1"),
+       cex = 0.60)
+  text(0, 0.84, "Pearson correlation (r)", font = 2, cex = 0.68)
+  text(0, 0.12,
+       "Square: color/intensity = r   |   Circle: fill = |r|   |   Diagonal: gene symbol",
+       cex = 0.62)
+}
+
+# Wrapped in a function so section 9 can re-draw it into a captured device.
+# par(pty = "s") keeps the correlation grid square; on.exit restores it even if
+# corrgram errors partway through.
+draw_corrgram <- function() {
+  op <- par(no.readonly = TRUE)
+  on.exit(par(op), add = TRUE)
+  par(pty = "s")
+  corrgram(df_cells, order = TRUE,
+           lower.panel = panel.shade, upper.panel = panel.pie, text.panel = panel.txt,
+           col.regions = corr_palette,
+           cor.method = "pearson", label.srt = -45, cex.labels = 0.65,
+           oma = c(7.5, 4, 4.5, 4), cex.main = 1,
+           main = "Gene-expression correlations")
+  draw_corrgram_key()
+}
+
+ragg::agg_png(paste0(out_stem, "_corrgram_genes.png"), width = 1000, height = 1000, res = 150)
+draw_corrgram()
+dev.off()
+
+pdf(paste0(out_stem, "_corrgram_genes.pdf"), width = 6.7, height = 6.7)
+draw_corrgram()
+dev.off()
+
+draw_corrgram()
+```
+
+```{r panel-source-gene-csvs, include=FALSE}
+# Artifact-only export: read existing panel inputs, create new tables, and write
+# CSV files without modifying any plot object or source data.
+local({
+gene_full_names <- function(genes) {
+  if (!requireNamespace("AnnotationDbi", quietly = TRUE) ||
+      !requireNamespace("org.Hs.eg.db", quietly = TRUE)) {
+    return(rep(NA_character_, length(genes)))
+  }
+  mapped <- suppressMessages(AnnotationDbi::mapIds(
+    org.Hs.eg.db::org.Hs.eg.db, keys = unique(genes), keytype = "SYMBOL",
+    column = "GENENAME", multiVals = "first"
+  ))
+  unname(mapped[genes])
+}
+
+gene_source_rows <- function(genes) {
+  rows <- as.data.table(copy(res[match(genes, res$Gene), , drop = FALSE]))
+  data.table(
+    gene_symbol = genes,
+    gene_full_name = gene_full_names(genes),
+    logFC = rows$logFC,
+    AveExpr = rows$AveExpr,
+    P.Value = rows$P.Value,
+    adj.P.Val = rows$adj.P.Val,
+    status = as.character(rows$status),
+    is_significant = rows$is_sig
+  )
+}
+
+panel_a_genes <- gene_source_rows(lab_df$Gene)
+panel_a_genes[, label_rank := seq_len(.N)]
+setcolorder(panel_a_genes, c("label_rank", "gene_symbol", "gene_full_name"))
+fwrite(panel_a_genes, paste0(out_stem, "_panel_A_labeled_genes.csv"))
+
+corr_for_order <- cor(df_cells, use = "pairwise.complete.obs", method = "pearson")
+corr_eigen <- eigen(corr_for_order)$vectors[, 1:2, drop = FALSE]
+corr_angle <- ifelse(corr_eigen[, 1] > 0,
+                     atan(corr_eigen[, 2] / corr_eigen[, 1]),
+                     atan(corr_eigen[, 2] / corr_eigen[, 1]) + pi)
+corr_display_genes <- colnames(corr_for_order)[order(corr_angle)]
+
+panel_b_genes <- gene_source_rows(corr_display_genes)
+panel_b_genes[, `:=`(
+  display_order = seq_len(.N),
+  selection_rank = match(gene_symbol, top_genes_cg)
+)]
+setcolorder(panel_b_genes,
+            c("display_order", "selection_rank", "gene_symbol", "gene_full_name"))
+fwrite(panel_b_genes, paste0(out_stem, "_panel_B_corrgram_genes.csv"))
+})
+```
+
+## 7. Panel C -- PC violin
+
+Only the two disease-status groups are plotted. An `All` category would contain
+the same cells already present in Healthy and Diseased, so comparisons against
+it would violate the independence assumption. The Wilcoxon annotation below is
+explicitly cell-level and descriptive; donor-level inference requires a
+donor-aware analysis.
+
+```{r panel-c-violin}
+rt <- data.frame(
+  id         = pcoadata$sample,
+  Type       = factor(pcoadata$Subtype,
+                      levels = c(params$ref_label, params$alt_label)),
+  Expression = pcoadata[[params$which_pc]]
+)
+
+wilcox_fit <- wilcox.test(Expression ~ Type, data = rt, exact = FALSE)
+wilcox_p <- wilcox_fit$p.value
+wilcox_p_label <- if (is.finite(wilcox_p) && wilcox_p > 0) {
+  formatC(wilcox_p, format = "e", digits = 2)
+} else {
+  paste0("< ", formatC(.Machine$double.xmin, format = "e", digits = 2))
+}
+
+y_range <- range(rt$Expression, na.rm = TRUE)
+y_span <- diff(y_range)
+if (!is.finite(y_span) || y_span == 0) y_span <- max(abs(y_range), 1)
+
+comparison_df <- data.frame(
+  group1 = params$ref_label,
+  group2 = params$alt_label,
+  y.position = y_range[2] + 0.08 * y_span,
+  label = paste0("Cell-level Wilcoxon p = ", wilcox_p_label)
+)
+
+group_counts <- table(rt$Type)
+group_axis_labels <- setNames(
+  paste0(names(group_counts), "\n(n cells = ",
+         format(as.integer(group_counts), big.mark = ",", trim = TRUE), ")"),
+  names(group_counts)
+)
+
+violin <- ggviolin(rt, x = "Type", y = "Expression", fill = "Type",
+                   xlab = "Disease status", ylab = paste0(params$which_pc, " score"),
+                   trim = TRUE, add = "boxplot",
+                   add.params = list(fill = "white", width = 0.15, color = "black")) +
+  stat_pvalue_manual(comparison_df, label = "label", tip.length = 0.01,
+                     bracket.size = 0.5, size = 3.5) +
+  scale_fill_manual(values = pal2[levels(rt$Type)], drop = FALSE) +
+  scale_x_discrete(labels = group_axis_labels) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +
+  theme_bw() +
+  theme(axis.text = element_text(color = "black", face = "bold"),
+        legend.position = "none")
+
+out_violin <- paste0(out_stem, "_violin_", params$which_pc, "_2groups.pdf")
+ggsave(out_violin, violin, width = 6, height = 4)
+message("Saved: ", out_violin)
+violin
+```
+
+## 8. Panel D -- PCA composite
+
+```{r panel-d-pca}
+p_main <- ggplot(pcoadata, aes(PC1, PC2)) +
+  geom_point(aes(colour = Subtype, fill = Subtype), size = 4) +
+  scale_color_manual(values = pal2) +
+  labs(x = paste0("(PC1: ", round(pve[1] * 100, 2), "%)"),
+       y = paste0("(PC2: ", round(pve[2] * 100, 2), "%)")) +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  theme_bw() +
+  theme(
+    panel.background = element_rect(fill = "white", colour = "black"),
+    axis.title.x = element_text(colour = "black", size = 12, margin = margin(t = 5), face = "bold"),
+    axis.title.y = element_text(colour = "black", size = 12, margin = margin(r = 5), face = "bold"),
+    axis.text = element_text(color = "black", face = "bold"),
+    plot.title = element_blank(),
+    legend.title = element_blank(),
+    legend.key = element_blank(),
+    legend.text = element_text(color = "black", size = 9, face = "bold"),
+    legend.spacing.x = unit(0.1, "cm"),
+    legend.key.width = unit(0.5, "cm"),
+    legend.key.height = unit(0.5, "cm"),
+    legend.background = element_blank(),
+    legend.box.background = element_rect(colour = "black"),
+    legend.position = "inside",
+    legend.position.inside = c(0.001, 0.999),
+    legend.justification = c(0.0001, 1),
+    aspect.ratio = 1
+  )
+
+cld_table <- function(pc) {
+  f   <- aov(as.formula(paste(pc, "~ Subtype")), data = pcoadata)
+  cld <- multcompLetters4(f, TukeyHSD(f))
+  dt  <- aggregate(as.formula(paste(pc, "~ Subtype")), data = pcoadata, FUN = max)
+  names(dt)[2] <- "value_max"
+  letters_df <- as.data.frame.list(cld$Subtype)
+  letters_df$Subtype <- rownames(letters_df)
+  merge(letters_df, dt, by = "Subtype", all.x = TRUE)
+}
+text1 <- cld_table("PC1")
+text2 <- cld_table("PC2")
+
+box_theme <- theme_bw() +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        axis.text = element_blank(), axis.ticks = element_blank(),
+        plot.title = element_blank(), legend.position = "none")
+
+# after_stat() replaces the retired ..lower.. / ..ymin.. syntax; linewidth
+# replaces size for line-based geoms (both deprecated since ggplot2 3.4).
+p_top <- ggplot(pcoadata, aes(Subtype, PC1, fill = Subtype)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5, color = "black", linetype = "dotted") +
+  stat_boxplot(aes(ymin = after_stat(lower), ymax = after_stat(upper)),
+               outlier.shape = NA, width = 0.5) +
+  stat_boxplot(geom = "errorbar", aes(ymin = after_stat(ymax)), width = 0.2, linewidth = 0.35) +
+  stat_boxplot(geom = "errorbar", aes(ymax = after_stat(ymin)), width = 0.2, linewidth = 0.35) +
+  geom_text(data = text1, aes(label = Letters, y = value_max),
+            angle = -90, color = "black", size = 4, vjust = -0.4) +
+  scale_fill_manual(values = pal2) + labs(x = NULL, y = NULL) +
+  box_theme + coord_flip()
+
+p_right <- ggplot(pcoadata, aes(Subtype, PC2, fill = Subtype)) +
+  geom_boxplot(outlier.shape = NA, width = 0.5, color = "black", linetype = "dotted") +
+  stat_boxplot(aes(ymin = after_stat(lower), ymax = after_stat(upper)),
+               outlier.shape = NA, width = 0.5) +
+  stat_boxplot(geom = "errorbar", aes(ymin = after_stat(ymax)), width = 0.2, linewidth = 0.35) +
+  stat_boxplot(geom = "errorbar", aes(ymax = after_stat(ymin)), width = 0.2, linewidth = 0.35) +
+  geom_text(data = text2, aes(label = Letters, y = value_max),
+            angle = 0, color = "black", size = 4, vjust = -0.4) +
+  scale_fill_manual(values = pal2) + labs(x = NULL, y = NULL) +
+  box_theme
+
+p_stat <- ggplot() +
+  geom_text(aes(x = 0, y = 0.1,
+                label = paste("PERMANOVA",
+                              paste0("df = ", otu.adonis$Df[1]),
+                              paste0("R2 = ", round(otu.adonis$R2[1], 3)),
+                              perm_p_label,
+                              paste0("perms = ", params$permutations),
+                              sep = "\n")),
+            size = 3.5, color = "black", fontface = "bold") +
+  theme_bw() +
+  theme(panel.background = element_rect(fill = "white", colour = "black"),
+        axis.title = element_blank(), axis.ticks = element_blank(),
+        axis.text = element_blank(), plot.title = element_blank(),
+        legend.position = "none")
+
+final_plot <- p_top + p_stat + p_main + p_right +
+  plot_layout(heights = c(1, 4), widths = c(4, 1), ncol = 2, nrow = 2)
+
+ggsave(paste0(out_stem, "_PCA_panel.png"), final_plot, width = 6, height = 6, dpi = 300,
+       device = ragg::agg_png)
+ggsave(paste0(out_stem, "_PCA_panel.pdf"), final_plot, width = 6, height = 6)
+final_plot
+```
+
+## 9. Assembled A-B-C-D figure
+
+The four panels above are also written as separate files, because that is what
+you want when one panel needs re-running. This chunk additionally emits the
+single-row composite with A/B/C/D tags.
+
+Two things make this less trivial than `pA | pB | pC | pD`:
+
+* Panel B is **base graphics** (`corrgram` draws to the device and returns
+  nothing composable), so patchwork cannot take it as an operand. It must be
+  captured, which is why it is drawn through the `draw_corrgram()` closure
+  rather than inline. `wrap_elements(full = ~ draw_corrgram())` is the obvious
+  route and it **silently produces a near-empty panel** -- corrgram lays its
+  grid out with base `par(mfrow)`, and that state does not survive the
+  gridGraphics replay. `ggplotify::as.ggplot(function() ...)` captures it
+  correctly. Verified by output size: the `wrap_elements` route wrote 17 KB,
+  the `ggplotify` route 95 KB for the same figure.
+* Panel D is itself a patchwork of four sub-plots. Passing it directly would let
+  `tag_levels = "A"` recurse into its children and tag them A-G. Wrapping it
+  makes it opaque to tagging, so it stays a single "D".
+
+Everything is re-rendered into a quarter-width cell here, and two things do not
+survive that cleanly:
+
+* fixed-size text shrinks relative to its box -- the PERMANOVA block in panel D
+  clips its header and permutation count;
+* panel B's captured region stretches to the cell, so the `panel.pie` circles
+  become ellipses. `par(pty = "s")` does not prevent this, because the capture
+  device is created at the cell's aspect, not a square one.
+
+Neither affects the standalone files, which are correct. For a publication
+figure, assemble from the per-panel PDFs, where each panel keeps its own scale;
+this composite is for quick review of all four at once. Set `composite: false`
+to skip it -- it roughly triples total runtime, since the volcano's ~29k points
+are rasterised and vectorised a second time at 22 inches wide.
+
+```{r figure-abcd, eval = params$composite}
+panel_b <- ggplotify::as.ggplot(function() draw_corrgram())
+panel_d <- wrap_elements(final_plot)
+
+figure_abcd <- (volcano | panel_b | violin | panel_d) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = "bold", size = 18))
+
+ggsave(paste0(out_stem, "_figure_ABCD.png"), figure_abcd,
+       width = 22, height = 5.5, dpi = 300, limitsize = FALSE,
+       device = ragg::agg_png)
+ggsave(paste0(out_stem, "_figure_ABCD.pdf"), figure_abcd,
+       width = 22, height = 5.5, limitsize = FALSE)
+message("Composite written to: ", paste0(out_stem, "_figure_ABCD.{png,pdf}"))
+```
+
+## 10. Optional -- donor-level pseudobulk
+
+Off by default (`params$do_pseudobulk`). Everything above tests cells as if they
+were replicates. This chunk rebuilds the contrast with donors as the unit.
+
+Two hard constraints, both from the data rather than from this code:
+
+* The `foranalysis_*` CSVs carry no donor, batch, or dataset column. Provenance
+  lives only in `labels.csv`, joined by **positional convention**. That
+  convention breaks whenever `select_contrast()` in the Python workflow
+  populates `excluded`, because those cells appear in `labels.csv` and in
+  neither matrix. The guard below refuses to proceed rather than silently
+  misalign.
+* True pseudobulk sums **raw counts** per donor and normalises afterwards. Only
+  CP10K is exported, so this averages CP10K instead. That is a common
+  approximation but it is not count-based pseudobulk, and it cannot recover the
+  depth weighting. Fixing it properly requires exporting counts on the Python
+  side.
+
+```{r pseudobulk, eval = params$do_pseudobulk}
+lab <- fread(file.path(params$session_dir, params$labels_csv))
+
+n_alt <- ncol(mat_alt); n_ref <- ncol(mat_ref)
+if (nrow(lab) != n_alt + n_ref) {
+  stop(sprintf(paste0(
+    "labels.csv has %d rows but the two matrices hold %d cells. The positional ",
+    "join is invalid -- most likely select_contrast() excluded one or more ",
+    "classes. Re-export with the excluded cells, or add an explicit cell id."),
+    nrow(lab), n_alt + n_ref))
+}
+
+# Verify the assumed [alt block; ref block] ordering instead of trusting it.
+frac_norm <- function(v) mean(grepl("^(normal|healthy)$", tolower(trimws(v))))
+f_first <- frac_norm(head(lab$disease, n_alt))
+f_last  <- frac_norm(tail(lab$disease, n_ref))
+if (!(f_first < 0.05 && f_last > 0.95)) {
+  stop(sprintf(paste0(
+    "labels.csv row order does not match [%s block; %s block] ",
+    "(normal fraction: first block %.2f, second block %.2f). Refusing to join."),
+    params$alt_label, params$ref_label, f_first, f_last))
+}
+
+meta <- data.frame(
+  cell  = colnames(expr),
+  group = group,
+  donor = c(tail(lab$donor_id, n_ref), head(lab$donor_id, n_alt)),
+  stringsAsFactors = FALSE
+)
+# expr columns are [ref block; alt block]; lab rows are [alt block; ref block].
+
+keep <- !is.na(meta$donor) & tolower(trimws(meta$donor)) != "unknown"
+message(sprintf("Cells with a usable donor_id: %d of %d (%.0f%% dropped)",
+                sum(keep), nrow(meta), 100 * mean(!keep)))
+
+meta_k <- meta[keep, ]
+expr_k <- expr[, keep, drop = FALSE]
+
+donor_key <- paste(meta_k$group, meta_k$donor, sep = "|")
+pb <- sapply(split(seq_len(ncol(expr_k)), donor_key),
+             function(idx) rowMeans(expr_k[, idx, drop = FALSE]))
+
+pb_group <- factor(sub("\\|.*$", "", colnames(pb)),
+                   levels = c(params$ref_label, params$alt_label))
+message(sprintf("Pseudobulk units: %d (%s n=%d, %s n=%d)",
+                ncol(pb),
+                params$ref_label, sum(pb_group == params$ref_label),
+                params$alt_label, sum(pb_group == params$alt_label)))
+
+pb_design <- model.matrix(~ 0 + pb_group)
+colnames(pb_design) <- make.names(levels(pb_group))
+pb_cm  <- makeContrasts(contrasts = contrast_str, levels = pb_design)
+pb_fit <- eBayes(contrasts.fit(lmFit(pb, pb_design), pb_cm), robust = TRUE, trend = TRUE)
+pb_res <- topTable(pb_fit, coef = 1, number = Inf, sort.by = "P")
+pb_res$Gene <- rownames(pb_res)
+pb_res <- pb_res[, c("Gene", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")]
+
+fwrite(pb_res, paste0(out_stem, "_table_pseudobulk_donor.csv"))
+message("Donor-level FDR < ", fdr_thresh, ": ",
+        sum(pb_res$adj.P.Val < fdr_thresh, na.rm = TRUE),
+        "  (cell-level was ", sig_count, ")")
+```
+
+## 11. Optional -- heatmap (disabled)
+
+Not part of panels A-D. Kept for reference and disabled: `pheatmap` with
+`clustering_method = "complete"` on this many columns builds an
+n-cells x n-cells distance matrix, is slow, produces an illegible image at that
+width, and -- because a knitr error aborts the document by default -- would take
+panels A, B, C and D down with it.
+
+```{r heatmap, eval = FALSE}
+top_genes_hm <- head(res$Gene[order(res$adj.P.Val)], n = min(20, nrow(res)))
+ann <- data.frame(Group = group)
+rownames(ann) <- colnames(expr)
+
+ragg::agg_png(paste0(out_stem, "_heatmap.png"), width = 900, height = 1100, res = 130)
+pheatmap(expr[top_genes_hm, , drop = FALSE],
+         scale = "row", clustering_method = "complete",
+         annotation_col = ann, show_rownames = TRUE, show_colnames = FALSE,
+         main = paste0("Top ", length(top_genes_hm), " DE genes"))
+dev.off()
+```
+
+## Statistical scope
+
+**What the code above is now internally consistent about:** the fold-change
+scale, the significance threshold drawn on panel A, the contrast direction, the
+execution order, and the permutation p-value reporting.
+
+**What it does not fix.** Every column is a single cell. limma, the Wilcoxon
+comparisons in panel C, and the PERMANOVA in panel D all treat cells as
+independent replicates. They are not: cells from one donor are correlated, and
+the effective sample size is the number of donors, not the number of cells. This
+inflates significance by orders of magnitude and is why panel C reports
+`p = 1.93e-187`. For any inferential claim, use section 9 or a mixed-effects
+model with a donor random effect. The cell-level results are a ranking and a
+visualisation, not evidence of a population-level difference.
+
+**Rendering.** `pandoc` is not on this machine, so `rmarkdown::render()` runs
+every chunk and then fails at the HTML conversion step. Two options.
+
+With pandoc (`conda install -c conda-forge pandoc`):
+
+```
+module load r/4.5.2
+Rscript -e 'rmarkdown::render("casestudy_panels.Rmd", params = list(
+  session_dir = "/path/to/webapp/sessions/<id>",
+  ref_csv     = "foranalysis_combined_normal_df_<Disease>.csv",
+  alt_csv     = "foranalysis_combined_disease_df_<Disease>.csv"))'
+```
+
+Without pandoc, use `knitr::knit()` -- it honours `eval=` and produces a `.md`
+plus all the figure files. `params` must be defined first, because `knit()` does
+not build it from the YAML the way `render()` does:
+
+```
+module load r/4.5.2
+Rscript -e 'params <- list(session_dir = "/path/to/webapp/sessions/<id>",
+                           ref_csv = "...", alt_csv = "...", ref_label = "Healthy",
+                           alt_label = "Diseased", out_dir = NULL,
+                           out_prefix = "DE_results", input_scale = "linear_cp10k",
+                           fdr_thresh = 0.05, fc_thresh = 0.25, permutations = 999,
+                           n_corrgram = 20, n_pca = 100, which_pc = "PC1",
+                           do_pseudobulk = FALSE, labels_csv = "labels.csv")' \
+        -e 'knitr::knit("casestudy_panels.Rmd", output = "casestudy_panels.md")'
+```
+
+Do **not** use `knitr::purl()` here: it ignores `eval=FALSE` (so it would run the
+disabled heatmap chunk) and it errors on `eval = params$do_pseudobulk` because
+`params` does not exist at purl time.

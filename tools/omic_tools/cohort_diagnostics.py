@@ -24,6 +24,24 @@ def _usable_donor_mask(series: pd.Series) -> np.ndarray:
     return (~normalized.isin(UNUSABLE_DONOR_VALUES) & series.notna()).values
 
 
+def donor_key_columns(metadata: pd.DataFrame) -> list[str]:
+    """Scope donor labels to their source and study when those fields exist."""
+    return [column for column in ("source", "dataset_id", "donor_id")
+            if column in metadata.columns]
+
+
+def donor_keys(metadata: pd.DataFrame) -> pd.Series:
+    """Return tuple keys without merging reused labels across sources/studies.
+
+    These are metadata identities, not proof of distinct biological individuals
+    across studies. Callers must exclude unusable donor IDs before counting.
+    """
+    frame = metadata[donor_key_columns(metadata)].fillna("").astype(str)
+    frame = frame.apply(lambda column: column.str.strip())
+    return pd.Series(list(frame.itertuples(index=False, name=None)),
+                     index=metadata.index, dtype=object, name="donor_key")
+
+
 def compute_cohort_diagnostics(metadata, is_ref, is_alt, lib_sizes=None,
                                ref_name: str = "reference",
                                alt_name: str = "alternate") -> dict:
@@ -92,24 +110,34 @@ def compute_cohort_diagnostics(metadata, is_ref, is_alt, lib_sizes=None,
             "FAIL" if unusable_frac > DONOR_UNUSABLE_FAIL else "OK",
         )
 
-        counts, dominance = {}, 0.0
+        keys = donor_keys(metadata)
+        key_columns = donor_key_columns(metadata)
+        counts, raw_counts, dominance = {}, {}, 0.0
         for name, mask in ((ref_name, is_ref), (alt_name, is_alt)):
             sel = mask & usable
-            donors = metadata.loc[sel, "donor_id"]
+            donors = keys.loc[sel]
             counts[name] = int(donors.nunique())
+            raw_counts[name] = int(metadata.loc[sel, "donor_id"].astype(str).str.strip().nunique())
             if len(donors):
                 dominance = max(dominance, float(donors.value_counts().iloc[0] / len(donors)))
 
         min_donors = min(counts.values()) if counts else 0
         record(
             "donor_count", min_donors,
-            f"donors per group: " + ", ".join(f"{k}={v}" for k, v in counts.items())
-            + "; cells are tested as independent replicates",
+            f"donor keys per group ({' + '.join(key_columns)}): "
+            + ", ".join(f"{k}={v}" for k, v in counts.items())
+            + "; metacells are still tested as independent replicates",
             "FAIL" if min_donors < MIN_DONORS_FAIL else "OK",
         )
+        checks["donor_count"].update({
+            "counts": counts,
+            "unique_donor_id_counts": raw_counts,
+            "donor_key_columns": key_columns,
+        })
         record(
             "donor_dominance", dominance,
-            f"largest single donor contributes {dominance:.1%} of its group's cells",
+            f"largest donor key contributes {dominance:.1%} of its group's "
+            "metacells with usable donor IDs",
             "FAIL" if dominance > DONOR_DOMINANCE_FAIL else "OK",
         )
 

@@ -7,8 +7,9 @@ data drawn from the OmniCellTOSG database. The expression matrix is per-cell
 two cell populations selected by the chosen label column.
 
 This workflow performs:
-1. Named Entity Recognition (NER) to extract disease and cell type
-2. scRNA-seq data retrieval using CellTOSGDataLoader with soft matching
+1. Direct query construction from disease, cell type, organ, tissue, and gender
+2. scRNA-seq retrieval using CellTOSGDataLoader with soft matching and an
+   HGNC-approved protein-coding gene mapping
 3. Differential expression analysis between two groups defined by `label`
    (default: disease vs non-disease; alternative: gender, etc.)
 4. KEGG pathway enrichment analysis
@@ -23,9 +24,11 @@ When no exact match is found, provides suggestions using:
 Based on the working CellTOSGDataLoader example pattern.
 """
 
-from ner_tool import ner
 from omic_analysis_components import omic_analysis
 from cohort_diagnostics import compute_cohort_diagnostics, format_diagnostics_text
+from celltosg_runtime_adapter import writable_celltosg_root
+from donor_sampling import sample_known_donor_cohort
+from query_value_lists import save_query_value_lists
 from subprocess_r import run_r_script
 
 import sys
@@ -332,7 +335,7 @@ def select_contrast(Y, mapping: dict):
 
 
 def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease",
-                               suspension_type: str = None):
+                               suspension_type: str = None, sample_size: int = 1000):
     """
     Fetch single-cell RNA-seq data using the new CellTOSGDataLoader with soft matching.
 
@@ -348,11 +351,16 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
             valid choices include "gender" (female vs male) and "cell_type".
         suspension_type (str): Optional 'cell' or 'nucleus'. Default None keeps
             current behaviour (no protocol filter). When set, constrains both
-            the disease and matched-control arms to a single assay protocol.
+            the disease and control arms to a single assay protocol.
+        sample_size (int): Maximum metacells per disease/control group. Each
+            group maximizes donor coverage, then fills in rounds across donors;
+            use all known-donor metacells if fewer than the limit are available.
 
     Returns:
         tuple: (X, Y, metadata, similar_terms, retrieval_success)
     """
+    if sample_size < 1:
+        raise ValueError("sample_size must be a positive integer")
     data_root = get_path('external.omnicell_data_root', absolute=True)
 
     cell_type = fetch_dict.get("cell type", None)
@@ -380,7 +388,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         conditions["tissue_general"] = organ
     if tissue:
         conditions["tissue"] = tissue
-    # Only filter by gender if it's the NER-extracted condition AND we're not
+    # Only filter by gender if it's a query condition AND we're not
     # using gender as the label column (otherwise filtering by one gender would
     # leave only one group).
     if gender and label != "gender":
@@ -399,13 +407,17 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         conditions["suspension_type"] = suspension_type
 
     if not conditions:
-        print("[Omic Fetch] No valid conditions extracted from NER")
+        save_query_value_lists(
+            pd.read_parquet(os.path.join(data_root, "cell_metadata_with_mappings.parquet"),
+                            columns=["disease_BMG_name", "CMT_name"]),
+            output_dir, disease=disease_name, cell_type=cell_type,
+        )
+        print("[Omic Fetch] No valid query conditions provided")
         return None, None, None, {}, False, label, None, None
 
     # Resolve task and label_column from the user-supplied label argument.
-    # Default behavior (label="disease") matches the prior implementation:
-    # the loader's stratified balancing pulls matched normal samples so DE
-    # can compare disease vs non-disease.
+    # Disease comparisons select known-donor case and normal pools before
+    # extraction. Other label tasks retain the loader's existing sampling.
     label = (label or "disease").lower()
     valid_labels = {"disease", "gender", "cell_type"}
     if label not in valid_labels:
@@ -419,35 +431,56 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
     task = _LOADER_LABEL.get(label, label)
     label_column = task
 
-    # Stratified balancing only meaningful when the label naturally has a
-    # priority "normal" / control class (disease task).
-    use_stratified_balancing = (task == "disease")
-    
     try:
+        all_metadata = pd.read_parquet(os.path.join(data_root, "cell_metadata_with_mappings.parquet"))
+        save_query_value_lists(
+            all_metadata, output_dir, disease=disease_name, cell_type=cell_type,
+        )
+        sampled_metadata = None
+        loader_conditions = conditions
+        loader_sample_size = sample_size
+        if task == "disease":
+            sampled_metadata, sampling_summary = sample_known_donor_cohort(
+                all_metadata,
+                conditions,
+                CellTOSGSubsetBuilder.FIELD_ALIAS,
+                sample_size=sample_size,
+                random_state=42,
+            )
+            os.makedirs(output_dir, exist_ok=True)
+            with open(os.path.join(output_dir, "donor_sampling.json"), "w", encoding="utf-8") as handle:
+                json.dump(sampling_summary, handle, indent=2)
+            # The temporary metadata already contains precisely the selected
+            # case AND control rows. Do not filter it by disease or resample it.
+            loader_conditions = {}
+            loader_sample_size = None
+        del all_metadata
+
         print(f"[Omic Fetch] Creating CellTOSGDataLoader...")
         print(f"  root: {data_root}")
         print(f"  conditions: {conditions}")
         print(f"  task: {task}")
         print(f"  label_column: {label_column}")
-        print(f"  stratified_balancing: {use_stratified_balancing}")
+        print("  stratified_balancing: False")
         sys.stdout.flush()
         
-        dataset = CellTOSGDataLoader(
-            root=data_root,
-            conditions=conditions,
-            task=task,
-            label_column=label_column,
-            sample_ratio=None,
-            sample_size=int(1000),
-            shuffle=False,
-            stratified_balancing=use_stratified_balancing,
-            extract_mode="inference",
-            random_state=2025,
-            train_text=False,
-            train_bio=False,
-            correction_method=None,
-            output_dir=output_dir
-        )
+        with writable_celltosg_root(data_root, metadata=sampled_metadata) as loader_root:
+            dataset = CellTOSGDataLoader(
+                root=loader_root,
+                conditions=loader_conditions,
+                task=task,
+                label_column=label_column,
+                sample_ratio=None,
+                sample_size=loader_sample_size,
+                shuffle=False,
+                stratified_balancing=False,
+                extract_mode="inference",
+                random_state=42,
+                train_text=False,
+                train_bio=False,
+                correction_method=None,
+                output_dir=output_dir
+            )
         
         X = dataset.data
         Y = dataset.labels
@@ -614,6 +647,7 @@ def normalize_cp10k(X, target_sum: float = 1e4):
     scaled = values * (target_sum / np.maximum(sums, 1e-12))
     if is_frame:
         return pd.DataFrame(scaled, index=X.index, columns=X.columns)
+
     return scaled
 
 
@@ -635,82 +669,86 @@ def compute_top_genes(X, top_k=100):
 # Fixed number of top genes to return
 TOP_K_GENES = 20
 
-def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
-                                 organ=None, tissue=None, gender=None, session_dir=None,
+def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
+                                 tissue=None, gender=None, session_dir=None,
                                  enable_differential_expression=True, enable_plotting=True,
-                                 label="disease", suspension_type=None):
+                                 label="disease", suspension_type=None, sample_size=1000):
     """
     Perform the complete single-cell omic analysis workflow.
 
     NOTE: This pipeline analyzes a COHORT of single-cell RNA-seq (scRNA-seq)
     data from OmniCellTOSG. Samples are individual cells, not bulk libraries.
 
-    Supports two input modes:
-    1. Natural language: Provide text parameter for NER extraction
-    2. Direct parameters: Provide specific parameters (disease, cell_type, etc.)
+    Query the cohort with direct, keyword-only parameters (disease, cell_type,
+    etc.). Keyword-only input prevents retired free-text positional calls from
+    being silently reinterpreted as disease queries.
 
     Args:
-        text: Natural language query for NER extraction
         disease, cell_type, organ, tissue, gender: Direct query parameters
         session_dir: Directory to save all outputs (REQUIRED)
         enable_differential_expression: Run DE analysis (default True)
         enable_plotting: Run R plotting script (default True)
         label: Column used to define the two groups for differential expression.
-            Defaults to "disease" (disease vs non-disease via stratified
-            balancing). Set to "gender" to compare female vs male within the
+            Defaults to "disease" (known-donor disease vs normal pools).
+            Set to "gender" to compare female vs male within the
             queried subset, or "cell_type" for cell-type-stratified analyses.
         suspension_type: Optional 'cell' or 'nucleus'. Default None keeps current
             behaviour. Assay protocol is confounded with disease status in several
             cohorts (breast_cancer is 73% whole-cell in normal vs 81% nucleus in
             disease); setting this constrains both arms to one protocol.
+        sample_size: Maximum metacells per disease/control group (default 1000).
+            Maximize donor coverage, then fill in rounds. Use all known-donor
+            metacells in a group if fewer than the limit are available.
     """
     times = {}
     times['start'] = time.time()
-    
+    if sample_size < 1:
+        raise ValueError("sample_size must be a positive integer")
+
     if session_dir is None:
         raise ValueError("session_dir must be provided")
     os.makedirs(session_dir, exist_ok=True)
     print(f"\n[Session] Output directory: {session_dir}")
     
     # ===========================================================================
-    # STEP 1: Parse input (NER or direct parameters)
+    # STEP 1: Build query from direct parameters
     # ===========================================================================
-    if text is not None:
-        print(f"\n{'='*70}")
-        print(f"STEP 1: Named Entity Recognition (Text Mode)")
-        print(f"{'='*70}")
-        fetch_dict = ner(text)
-        print(f"[NER] Extracted entities: {fetch_dict}")
-        times['ner_end'] = time.time()
-    else:
-        print(f"\n{'='*70}")
-        print(f"STEP 1: Direct Parameter Input (Function Mode)")
-        print(f"{'='*70}")
-        fetch_dict = {}
-        if disease is not None:
-            fetch_dict["disease"] = disease
-        if cell_type is not None:
-            fetch_dict["cell type"] = cell_type
-        if organ is not None:
-            fetch_dict["organ"] = organ
-        if tissue is not None:
-            fetch_dict["tissue"] = tissue
-        if gender is not None:
-            fetch_dict["gender"] = gender
-        
-        if not fetch_dict:
-            print("[Input] No input provided.")
-            return {
-                "success": False,
-                "message": "No input provided.",
-                "similar_terms": {},
-                "extracted_entities": {},
-                "retrieval_success": False,
-                "timing": {"total": 0.0}
-            }
-        
-        print(f"[Input] Direct parameters: {fetch_dict}")
-        times['ner_end'] = time.time()
+    print(f"\n{'='*70}")
+    print(f"STEP 1: Direct Parameter Input")
+    print(f"{'='*70}")
+    fetch_dict = {}
+    if disease is not None:
+        fetch_dict["disease"] = disease
+    if cell_type is not None:
+        fetch_dict["cell type"] = cell_type
+    if organ is not None:
+        fetch_dict["organ"] = organ
+    if tissue is not None:
+        fetch_dict["tissue"] = tissue
+    if gender is not None:
+        fetch_dict["gender"] = gender
+
+    if not fetch_dict:
+        save_query_value_lists(
+            pd.read_parquet(
+                os.path.join(get_path('external.omnicell_data_root', absolute=True),
+                             "cell_metadata_with_mappings.parquet"),
+                columns=["disease_BMG_name", "CMT_name"],
+            ),
+            session_dir,
+        )
+        print("[Input] No input provided.")
+        return {
+            "success": False,
+            "message": "No input provided.",
+            "similar_terms": {},
+            "extracted_entities": {},
+            "retrieval_success": False,
+            "timing": {"total": 0.0}
+        }
+
+    print(f"[Input] Direct parameters: {fetch_dict}")
+    times['input_end'] = time.time()
     
     # ===========================================================================
     # STEP 2: Data Retrieval
@@ -721,9 +759,11 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     
     (X, Y, metadata, similar_terms, retrieval_success,
      actual_label, label_fallback_message, label_mapping) = omic_fetch_with_new_loader(
-        fetch_dict, session_dir, label=label, suspension_type=suspension_type
+        fetch_dict, session_dir, label=label, suspension_type=suspension_type,
+        sample_size=sample_size,
     )
-    # The loader returns a DataFrame whose columns are HGNC gene symbols.
+    # The temporary loader root filters the BMG mapping to HGNC-approved
+    # protein-coding symbols before extraction, including the saved raw matrix.
     # Capture them now: np.nan_to_num() downstream returns a bare ndarray and
     # destroys column labels.
     gene_names = list(X.columns) if hasattr(X, "columns") else None
@@ -777,8 +817,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
             "retrieval_success": False,
             "suggestions": suggestions_message,
             "timing": {
-                "ner": times['ner_end'] - times['start'],
-                "fetch": times['fetch_end'] - times['ner_end'],
+                "input": times['input_end'] - times['start'],
+                "fetch": times['fetch_end'] - times['input_end'],
                 "total": times['fetch_end'] - times['start']
             }
         }
@@ -786,8 +826,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     # ===========================================================================
     # STEP 3: Abundance QC — most-expressed genes
     # ===========================================================================
-    # This is a data-quality check, NOT a discovery step. The top of this list is
-    # dominated by MALAT1, mitochondrial pseudogenes and housekeeping genes.
+    # This is a data-quality check, NOT a discovery step. The list contains
+    # only retained protein-coding genes, often including housekeeping genes.
     # Tissue markers appearing here (SFTPB/SFTPC in lung, SPP1/CD74 in microglia)
     # confirm the intended cell population was retrieved.
     print(f"\n{'='*70}")
@@ -1032,8 +1072,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
     print(f"\n{'='*70}")
     print(f"WORKFLOW TIMING SUMMARY")
     print(f"{'='*70}")
-    print(f"Step 1 - NER/Input:        {times['ner_end'] - times['start']:.2f}s")
-    print(f"Step 2 - Data Fetch:       {times['fetch_end'] - times['ner_end']:.2f}s")
+    print(f"Step 1 - Direct Input:     {times['input_end'] - times['start']:.2f}s")
+    print(f"Step 2 - Data Fetch:       {times['fetch_end'] - times['input_end']:.2f}s")
     print(f"Step 3 - Gene Analysis:    {times['gene_end'] - times['fetch_end']:.2f}s")
     print(f"Step 4 - DE Analysis:      {times['de_end'] - times['gene_end']:.2f}s")
     print(f"Step 5 - KEGG Plotting:    {times['kegg_end'] - times['de_end']:.2f}s")
@@ -1167,8 +1207,8 @@ def omic_fetch_analysis_workflow(text=None, disease=None, cell_type=None,
         "plots_for_report": plots_for_report,  # Categorized plots with relative paths for embedding
         "message": success_message,
         "timing": {
-            "ner": times['ner_end'] - times['start'],
-            "fetch": times['fetch_end'] - times['ner_end'],
+            "input": times['input_end'] - times['start'],
+            "fetch": times['fetch_end'] - times['input_end'],
             "gene_analysis": times['gene_end'] - times['fetch_end'],
             "de_analysis": times['de_end'] - times['gene_end'],
             "kegg_plotting": times['kegg_end'] - times['de_end'],
@@ -1193,13 +1233,13 @@ Examples:
   python omic_fetch_analysis_workflow.py --disease "lung adenocarcinoma" --organ "lung" --session-id "lung_cancer_test"
   
   # Analyze Alzheimer's disease
-  python omic_fetch_analysis_workflow.py --disease "Alzheimer's Disease" --organ "brain" --session-id "alzheimer_test"
+  python /storage3/fs1/fuhai.li/Active/di.huang/Research/LLM/OmniCellAgent/tools/omic_tools/omic_fetch_analysis_workflow.py --disease "Alzheimer's Disease" --organ "brain" --cell-type "astrocyte" --session-id "alzheimer_test"
   
   # Analyze specific cell type
   python omic_fetch_analysis_workflow.py --cell-type "microglial cell" --organ "brain" --session-id "microglia_test"
   
   # Combination query
-  python omic_fetch_analysis_workflow.py --disease "pancreatic ductal adenocarcinoma" --cell-type "acinar cell" --session-id "pdac_acinar"
+  python omic_fetch_analysis_workflow.py --disease "pancreatic ductal adenocarcinoma" --organ "pancreas" --cell-type "acinar cell" --session-id "pdac_acinar"
   
   # Run full test suite
   python omic_fetch_analysis_workflow.py --run-tests
@@ -1213,16 +1253,19 @@ Examples:
              "(e.g. 'microglial cell', 'CD4-positive, alpha-beta T cell').")
     parser.add_argument("--organ", type=str, help="Organ filter for memory efficiency (e.g., 'lung', 'brain')")
     parser.add_argument("--tissue", type=str, help="Specific tissue filter")
-    parser.add_argument("--text", type=str, help="Free-form text query (uses NER extraction)")
     parser.add_argument("--label", type=str, default="disease",
                         choices=["disease", "gender", "cell_type"],
                         help="Label column used for the DE comparison (default: 'disease' for disease-vs-normal)")
     parser.add_argument("--session-id", type=str, default="test_session", help="Session ID for output directory")
+    parser.add_argument("--sample-size", type=int, default=1000,
+                        help="Maximum metacells per disease/control group; maximize donor coverage, then fill in rounds; use all if fewer are available (default: 1000)")
     parser.add_argument("--no-de", action="store_true", help="Skip differential expression analysis")
     parser.add_argument("--no-plot", action="store_true", help="Skip plotting")
     parser.add_argument("--run-tests", action="store_true", help="Run the full test suite")
     
     args = parser.parse_args()
+    if args.sample_size < 1:
+        parser.error("--sample-size must be a positive integer")
     
     # Get sessions base directory
     sessions_base = get_path('sessions.base', absolute=True, create=True)
@@ -1270,6 +1313,7 @@ Examples:
                     session_dir=test_output_dir,
                     enable_differential_expression=True,
                     enable_plotting=True,
+                    sample_size=args.sample_size,
                     **test
                 )
                 
@@ -1321,9 +1365,9 @@ Examples:
         # =====================================================================
         # SINGLE RUN MODE
         # =====================================================================
-        if not args.disease and not args.cell_type and not args.text:
+        if not args.disease and not args.cell_type:
             parser.print_help()
-            print("\nError: Provide at least --disease, --cell-type, or --text")
+            print("\nError: Provide at least --disease or --cell-type")
             sys.exit(1)
         
         # Create session directory
@@ -1339,7 +1383,6 @@ Examples:
         print(f"Cell Type: {args.cell_type}")
         print(f"Organ: {args.organ}")
         print(f"Tissue: {args.tissue}")
-        print(f"Text Query: {args.text}")
         print(f"DE Analysis: {not args.no_de}")
         print(f"Plotting: {not args.no_plot}")
         print("="*80 + "\n")
@@ -1350,6 +1393,7 @@ Examples:
             "enable_differential_expression": not args.no_de,
             "enable_plotting": not args.no_plot,
             "label": args.label,
+            "sample_size": args.sample_size,
         }
         
         if args.disease:
@@ -1360,9 +1404,7 @@ Examples:
             params["organ"] = args.organ
         if args.tissue:
             params["tissue"] = args.tissue
-        if args.text:
-            params["text"] = args.text
-        
+
         # Run the workflow
         result = omic_fetch_analysis_workflow(**params)
         

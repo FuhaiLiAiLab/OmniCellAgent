@@ -7,6 +7,14 @@
 #   Rscript kegg_simple.R /path/to/enrichment/results /path/to/output
 #
 
+# Load required libraries (no Bioconductor)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(forcats)
+library(plotly)
+library(htmlwidgets)
+
 # Parse command line arguments
 args <- commandArgs(trailingOnly = TRUE)
 
@@ -42,14 +50,6 @@ KEGG_DOTPLOT_FILE <- file.path(OUTPUT_DIR, "kegg_dotplot.png")
 KEGG_DOTPLOT_HTML <- file.path(OUTPUT_DIR, "kegg_dotplot.html")
 COMBINED_PLOT_FILE <- file.path(OUTPUT_DIR, "pathway_combined_plot.png")
 COMBINED_PLOT_HTML <- file.path(OUTPUT_DIR, "pathway_combined_plot.html")
-
-# Load required libraries (no Bioconductor)
-library(ggplot2)
-library(dplyr)
-library(stringr)
-library(forcats)
-library(plotly)
-library(htmlwidgets)
 
 # Set options for headless server
 options(browser = FALSE)

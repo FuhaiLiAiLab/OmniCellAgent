@@ -102,10 +102,10 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     n_features = combined_disease_matrix.shape[1]
     gene_names = _resolve_gene_names(gene_names, n_features, session_dir)
 
-    # The loader already collapsed transcripts to one representative per gene
-    # (CellTOSG_Loader/data_loader.py: bmg_matrix_to_gene_matrix), so the feature
-    # axis is 41,149 HGNC symbols. Do not re-derive it from the BioMedGraphica
-    # entity tables — those describe a 533,458-row axis this data no longer uses.
+    # The workflow supplies an HGNC protein-coding mapping to CellTOSG, which
+    # selects one representative column per retained symbol. With the bundled
+    # reference and current BMG mapping this is 19,109 genes; use the supplied
+    # names rather than assuming a fixed width or rebuilding the entity axis.
     print("Creating disease DataFrame...")
     combined_disease_df = pd.DataFrame(
         combined_disease_matrix.T,
@@ -162,9 +162,9 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     significant_genes, result_df = perform_unpaired_differential_expression(
         disease_df=combined_disease_df, 
         normal_df=combined_normal_df, 
-        p_value_threshold=0.01,
+        p_value_threshold=0.05,
         log2fc_threshold=1.5,
-        sig_top_n=1000,  # change to 1000
+        sig_top_n=5000,  # change to 5000
         disease=disease_name,
         de_output_dir=de_output_dir,
         n_jobs=-1,  # Use all available cores for maximum speed
@@ -189,7 +189,7 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
             'highlight_top_n': 10
         }
     ]
-    
+
     # Run volcano plots, enrichment analysis, and optionally plotting sequentially
     # (parallel matplotlib causes 'main thread is not in main loop' errors)
     def create_volcano_plots():

@@ -12,8 +12,9 @@ import pandas as pd
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-sys.path.insert(0, HERE)
+OMIC_DIR = os.path.abspath(os.path.join(HERE, ".."))
+REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+sys.path.insert(0, OMIC_DIR)
 sys.path.insert(0, REPO_ROOT)
 
 FIXTURE_DIR = os.path.join(

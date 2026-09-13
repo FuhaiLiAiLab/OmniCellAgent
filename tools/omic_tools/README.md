@@ -2,6 +2,62 @@
 
 This directory contains tools for analyzing single-cell omics data using the OmniCellTOSG dataset.
 
+## Exact query value lists
+
+Each session receives `available_diseases.txt` and `available_cell_types.txt`.
+These are sorted, unique, nonempty values from the full dataset's
+`disease_BMG_name` and `CMT_name` columns, respectively. Source spelling is
+preserved. Each file starts with the requested value's match in that list:
+
+```text
+Matched disease in list: "Alzheimer's Disease"
+```
+
+The remaining lines contain one available value each. The header explicitly
+reports `NONE` when the requested value is absent or no filter was requested.
+Matching is exact and case-insensitive, as in the query path. A vocabulary match
+does not guarantee that the combined query has eligible samples. Both lists
+are written before sampling, including when retrieval finds no matching cohort.
+
+## Disease/control sampling
+
+The direct `omic_fetch_analysis_workflow.py` pipeline samples disease and normal
+metacells independently from rows with usable donor IDs. It first applies the
+disease, cell type, organ, tissue and optional sex/protocol query constraints,
+excludes unknown donors, and removes repeated matrix pointers. Each group
+contributes at most `--sample-size` metacells (default 1000), without replacement
+and with random seed 42. Sampling takes one metacell per donor first, then fills
+remaining slots in rounds across donors with unused rows. This maximizes donor
+coverage to `min(sample limit, available donors)` and balances contributions
+where donor pools permit. If fewer metacells than the limit are available, all
+are retained. A group with zero eligible metacells stops retrieval; unknown
+donors are not used as fallback.
+
+For AD astrocytes in brain, the current dataset has 671 eligible disease rows
+and 4,044 eligible controls. The default therefore returns 671 disease rows and
+1,000 controls, covering all 54 AD and 244 control donor keys. Donor identity
+uses `(source, dataset_id, donor_id)` so reused labels from different studies
+are not merged. These keys do not establish whether the same biological donor
+appears in multiple studies. Diagnostics use the same definition and also
+report counts of the raw donor labels.
+
+The previous age/sex balancing is bypassed, so groups may differ in size and
+covariate composition. The existing cohort diagnostics still assess the cohort.
+Maximizing donor coverage does not make the downstream metacell-level DE test
+donor-aware; a donor-level pseudobulk or suitable mixed model is a separate step.
+
+Metacell and available/selected donor counts are printed for both groups and
+saved to `donor_sampling.json` in the
+session directory. The loader receives only the selected metadata, ensuring
+that saved labels and expression matrices refer to the same cohort. The shared
+dataset remains unchanged. Other label tasks retain their existing sampling.
+
+```bash
+python tools/omic_tools/omic_fetch_analysis_workflow.py \
+  --disease "Alzheimer's Disease" --organ brain --cell-type astrocyte \
+  --sample-size 1000 --session-id alzheimer_known_donors
+```
+
 ## Quick Start
 
 ### 1. Download the OmniCellTOSG Dataset
