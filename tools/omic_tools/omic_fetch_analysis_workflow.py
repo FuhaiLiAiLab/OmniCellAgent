@@ -611,9 +611,9 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
                 print(f"[Label Fallback] {fallback_message}")
 
         # Immediately compress and remove expression_matrix.npy (large file ~4GB)
-        expression_matrix_path = os.path.join(output_dir, "expression_matrix.npy")
-        if os.path.exists(expression_matrix_path):
-            compress_expression_matrix(expression_matrix_path)
+        # expression_matrix_path = os.path.join(output_dir, "expression_matrix.npy")
+        # if os.path.exists(expression_matrix_path):
+        #     compress_expression_matrix(expression_matrix_path)
 
         return X, Y, metadata, similar_terms, True, actual_label, fallback_message, label_mapping
 
@@ -1164,16 +1164,16 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     # ===========================================================================
     # Compress and cleanup large .npy files in background (don't block workflow)
     # ===========================================================================
-    import threading
+    # import threading
     
-    def background_cleanup():
-        print(f"\n[Cleanup] Background thread: Compressing .npy files in {session_dir}...")
-        cleanup_result = compress_and_cleanup_npy_files(session_dir, remove_after_zip=True)
-        print(f"[Cleanup] Background thread: Completed - {cleanup_result.get('files_processed', 0)} files processed")
+    # def background_cleanup():
+    #     print(f"\n[Cleanup] Background thread: Compressing .npy files in {session_dir}...")
+    #     cleanup_result = compress_and_cleanup_npy_files(session_dir, remove_after_zip=True)
+    #     print(f"[Cleanup] Background thread: Completed - {cleanup_result.get('files_processed', 0)} files processed")
     
-    cleanup_thread = threading.Thread(target=background_cleanup, daemon=True)
-    cleanup_thread.start()
-    print(f"[Cleanup] Started background compression thread (not blocking workflow)")
+    # cleanup_thread = threading.Thread(target=background_cleanup, daemon=True)
+    # cleanup_thread.start()
+    # print(f"[Cleanup] Started background compression thread (not blocking workflow)")
     
     gc.collect()
     success_message = f"Successfully retrieved {metadata.shape[0] if metadata is not None else 0} cells (scRNA-seq)"
@@ -1233,7 +1233,7 @@ Examples:
   python omic_fetch_analysis_workflow.py --disease "lung adenocarcinoma" --organ "lung" --session-id "lung_cancer_test"
   
   # Analyze Alzheimer's disease
-  python /storage3/fs1/fuhai.li/Active/di.huang/Research/LLM/OmniCellAgent/tools/omic_tools/omic_fetch_analysis_workflow.py --disease "Alzheimer's Disease" --organ "brain" --cell-type "astrocyte" --session-id "alzheimer_test"
+  python omic_fetch_analysis_workflow.py --disease "Alzheimer's Disease" --organ "brain" --cell-type "astrocyte" --session-id "alzheimer_test"
   
   # Analyze specific cell type
   python omic_fetch_analysis_workflow.py --cell-type "microglial cell" --organ "brain" --session-id "microglia_test"

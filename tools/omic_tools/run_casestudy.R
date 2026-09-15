@@ -65,7 +65,7 @@ params <- list(
   out_prefix    = "DE_results",
   input_scale   = "linear_cp10k",
   fdr_thresh    = 0.05,
-  fc_thresh     = 0.25,
+  fc_thresh     = 1,
   permutations  = env_num("PERMUTATIONS", 999),
   n_corrgram    = 20,
   n_pca         = 100,
