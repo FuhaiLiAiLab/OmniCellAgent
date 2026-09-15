@@ -37,14 +37,16 @@ def cohort():
 
 
 @requires_fixture
-def test_omic_analysis_accepts_gene_names_and_completes(cohort, tmp_path):
+def test_omic_analysis_accepts_gene_names_and_completes(cohort, tmp_path, monkeypatch):
     from omic_analysis_components import omic_analysis
+    from omic_fetch_analysis_workflow import normalize_cp10k
+    monkeypatch.setattr("omic_analysis_components.enrichr_analysis", lambda *a, **k: {})
 
     X, Y, _ = cohort
     gene_names = list(X.columns)
     data_dict = {
-        "normal_omic_feature": X[Y == 0].values,
-        "disease_omic_feature": X[Y == 1].values,
+        "normal_omic_feature": normalize_cp10k(X[Y == 0].values),
+        "disease_omic_feature": normalize_cp10k(X[Y == 1].values),
         "omic_label": Y,
     }
     result = omic_analysis(
@@ -59,8 +61,9 @@ def test_omic_analysis_accepts_gene_names_and_completes(cohort, tmp_path):
     table = pd.read_csv(
         os.path.join(de_dir, "unpaired_differential_expression_results.csv")
     )
-    assert len(table) == 41149
-    assert table["Name"].iloc[0] == "ARF5"
+    native = pd.read_csv(tmp_path / "casestudy_R" / "DE_results_table.csv")
+    assert set(table["Name"]) == set(native["Gene"])
+    assert set(table["Name"]).issubset(gene_names)
     assert table["Name"].notna().all()
 
 
@@ -334,10 +337,8 @@ def test_format_diagnostics_text_lists_failures():
     assert "anti-conservative" in text
 
 
-def test_save_dataframe_stamps_diagnostics_header_under_joblib(tmp_path):
-    """save_dataframe runs inside joblib.Parallel(n_jobs=-1); a closure over
-    diagnostics_text must still pickle to worker processes, and the CSVs it
-    writes must be re-readable with pd.read_csv(path, comment="#")."""
+def test_save_dataframe_stamps_diagnostics_header_through_r(tmp_path):
+    """The R writer preserves diagnostic comments and pandas-readable CSVs."""
     from omic_analysis_components import perform_unpaired_differential_expression
 
     rng = np.random.default_rng(0)
@@ -352,6 +353,10 @@ def test_save_dataframe_stamps_diagnostics_header_under_joblib(tmp_path):
         columns=[f"ns_sample_{i}" for i in range(n_control)],
     )
     control_df.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
+
+    for frame in (disease_df, control_df):
+        values = frame.iloc[:, 1:]
+        frame.iloc[:, 1:] = values * (10000 / values.sum(axis=0))
 
     diagnostics_text = (
         "COHORT DIAGNOSTICS: UNRELIABLE\n"
@@ -385,85 +390,30 @@ def test_save_dataframe_stamps_diagnostics_header_under_joblib(tmp_path):
 
 
 def test_save_dataframe_survives_non_utf8_locale_default(monkeypatch, tmp_path):
-    """Fix 3: save_dataframe's `open(filepath, "w")` omitted `encoding`, so it
-    inherited whatever codec the process locale defaulted to. Under a
-    non-UTF-8 locale, a non-ASCII character in diagnostics_text (or a gene
-    name) raised UnicodeEncodeError inside the joblib worker running
-    save_dataframe and killed the DE table writes -- silently, since that
-    worker's exception surfaces far from any cohort-diagnostics code.
-
-    save_dataframe runs inside Parallel(n_jobs=-1), which defaults to
-    process-based (loky) workers that re-import this module fresh, so a
-    monkeypatch on `open` made from this test process would not be visible
-    there. Forcing the threading backend keeps save_dataframe in-process
-    (loky vs threading changes only where the closure runs, not what
-    arguments it passes to open()) so the patch is actually exercised. The
-    patch itself simulates "no explicit encoding -> locale default" by
-    defaulting this module's `open` to ascii exactly when the caller (as the
-    pre-fix code did) omits `encoding=`; passing `encoding="utf-8"`, as the
-    fixed code does, must sail through unpatched.
-
-    This is a real execution of the current save_dataframe closure: reverting
-    Fix 3 makes this test raise UnicodeEncodeError, not just fail an
-    assertion.
-    """
-    import builtins
-    import inspect
-
-    import joblib
+    """R's UTF-8 diagnostic export survives a C-locale child process."""
     import omic_analysis_components as oac
 
-    real_open = builtins.open
-
-    def ascii_when_unspecified(file, mode="r", *args, **kwargs):
-        if "b" not in mode and "encoding" not in kwargs:
-            kwargs = dict(kwargs)
-            kwargs["encoding"] = "ascii"
-        return real_open(file, mode, *args, **kwargs)
-
-    monkeypatch.setattr(oac, "open", ascii_when_unspecified, raising=False)
-
+    monkeypatch.setenv("LC_ALL", "C")
     rng = np.random.default_rng(2)
     n_genes, n = 20, 4
-    disease_df = pd.DataFrame(
-        rng.poisson(5, size=(n_genes, n)).astype(float),
-        columns=[f"ds_sample_{i}" for i in range(n)],
-    )
-    disease_df.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
-    control_df = pd.DataFrame(
-        rng.poisson(5, size=(n_genes, n)).astype(float),
-        columns=[f"ns_sample_{i}" for i in range(n)],
-    )
-    control_df.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
-
-    # En dash: non-ASCII, the same family of character format_diagnostics_text
-    # emits in its caveat lines.
+    frames = []
+    for prefix in ("ds", "ns"):
+        matrix = rng.poisson(5, size=(n_genes, n)).astype(float)
+        matrix *= 10000 / matrix.sum(axis=0)
+        frame = pd.DataFrame(matrix, columns=[f"{prefix}_sample_{i}" for i in range(n)])
+        frame.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
+        frames.append(frame)
     diagnostics_text = "COHORT DIAGNOSTICS: CAUTION\n  dataset_overlap: 2 of 5 – shared"
-
-    with joblib.parallel_backend("threading"):
-        oac.perform_unpaired_differential_expression(
-            disease_df=disease_df,
-            normal_df=control_df,
-            p_value_threshold=0.5,
-            log2fc_threshold=0.0,
-            sig_top_n=n_genes,
-            n_jobs=-1,
-            disease="test",
-            de_output_dir=str(tmp_path),
-            diagnostics_text=diagnostics_text,
-        )
-
-    out_path = os.path.join(str(tmp_path), "unpaired_differential_expression_results.csv")
-    with open(out_path, encoding="utf-8") as handle:
-        content = handle.read()
-    assert "–" in content
-
-    # newline="" is the other half of Fix 3. Its effect (a stray \r from
-    # double newline-translation) isn't independently observable through
-    # Python's own csv writer on this platform's os.linesep, so guard it
-    # structurally alongside the executing check above.
-    save_source = inspect.getsource(oac.perform_unpaired_differential_expression)
-    assert 'newline=""' in save_source
+    oac.perform_unpaired_differential_expression(
+        disease_df=frames[0], normal_df=frames[1], p_value_threshold=0.5,
+        sig_top_n=n_genes, disease="test", de_output_dir=str(tmp_path),
+        diagnostics_text=diagnostics_text,
+    )
+    raw = (tmp_path / "unpaired_differential_expression_results.csv").read_bytes()
+    assert "#   dataset_overlap: 2 of 5 – shared" in raw.decode("utf-8")
+    assert b"\r\r\n" not in raw
+    table = oac.read_de_results(tmp_path / "unpaired_differential_expression_results.csv")
+    assert len(table) == n_genes
 
 
 def test_diagnostics_failure_does_not_block_de():
@@ -522,7 +472,7 @@ def test_diagnostics_failure_does_not_block_de():
     assert "diagnostics_text" in fallback_names, "handler must reset diagnostics_text"
 
 
-def test_cohort_diagnostics_write_failure_does_not_block_de(tmp_path):
+def test_cohort_diagnostics_write_failure_does_not_block_de(tmp_path, monkeypatch):
     """Fix 2: the COHORT_DIAGNOSTICS.txt write inside omic_analysis's body
     (omic_analysis_components.py) sat unguarded. A read-only directory or a
     full disk there would raise straight out of omic_analysis with no DE
@@ -536,6 +486,7 @@ def test_cohort_diagnostics_write_failure_does_not_block_de(tmp_path):
     confirms omic_analysis still completes and the real DE table still gets
     written."""
     from omic_analysis_components import omic_analysis
+    monkeypatch.setattr("omic_analysis_components.enrichr_analysis", lambda *a, **k: {})
 
     rng = np.random.default_rng(3)
     n_genes, n = 30, 5
@@ -545,6 +496,9 @@ def test_cohort_diagnostics_write_failure_does_not_block_de(tmp_path):
         "disease_omic_feature": rng.poisson(5, size=(n, n_genes)).astype(float),
         "omic_label": np.array([0] * n + [1] * n),
     }
+    for key in ("normal_omic_feature", "disease_omic_feature"):
+        matrix = data_dict[key]
+        data_dict[key] = matrix * (10000 / matrix.sum(axis=1, keepdims=True))
 
     conflict_path = os.path.join(
         str(tmp_path), "differential_expression", "COHORT_DIAGNOSTICS.txt"

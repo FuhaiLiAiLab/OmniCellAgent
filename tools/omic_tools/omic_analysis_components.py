@@ -1,6 +1,8 @@
 import os
 import sys
 import gc
+from pathlib import Path
+import tempfile
 import numpy as np
 import pandas as pd
 
@@ -14,10 +16,6 @@ import seaborn as sns
 import requests
 import json
 import time
-import scipy
-import scipy.stats
-from scipy import stats
-from statsmodels.stats.multitest import multipletests
 from joblib import Parallel, delayed
 from concurrent.futures import ThreadPoolExecutor
 import warnings
@@ -28,6 +26,16 @@ warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 # Add project root to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 from utils.path_config import get_path
+if __package__:
+    from .subprocess_r import run_r_script
+    from .de_results_io import DE_RESULT_DTYPES, read_de_results
+    from .enrichr_client import (EnrichrError, fetch_enrichment, read_enrichment_results,
+                                 write_status, record_enrichment_failure, archive_enrichment_plots)
+else:
+    from subprocess_r import run_r_script
+    from de_results_io import DE_RESULT_DTYPES, read_de_results
+    from enrichr_client import (EnrichrError, fetch_enrichment, read_enrichment_results,
+                                write_status, record_enrichment_failure, archive_enrichment_plots)
 
 BMG_DIR = get_path('external.biomedgraphica_dir', absolute=True)
 # Use relative path but resolve it once at module load time to avoid issues with parallel processes
@@ -35,12 +43,9 @@ OUTPUT_DIR = get_path('data.dataset_outputs', absolute=True, create=True)
 
 
 def create_directories_parallel(directories):
-    """Create multiple directories in parallel."""
-    def create_dir(directory):
+    """Create output directories without spawning processes for filesystem I/O."""
+    for directory in directories:
         os.makedirs(directory, exist_ok=True)
-        return directory
-    
-    Parallel(n_jobs=-1)(delayed(create_dir)(directory) for directory in directories)
 
 
 def _resolve_gene_names(gene_names, n_features: int, session_dir: str = None) -> list:
@@ -76,15 +81,22 @@ def _resolve_gene_names(gene_names, n_features: int, session_dir: str = None) ->
     )
 
 
-def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = True, session_dir: str = None, gene_names: list = None, diagnostics_text: str = "") -> dict:
+def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = True, session_dir: str = None, gene_names: list = None, diagnostics_text: str = "", *,
+                  ref_label="Healthy", alt_label="Diseased", input_scale="linear_cp10k", r_timeout=3600,
+                  enrichment_timeout=60, enrichment_databases=None) -> dict:
     """
     Perform omic analysis on the input data dictionary.
 
     Args:
         disease_name (str): The name of the disease for which the analysis is performed.
         data_dict (dict): A dictionary containing omic data.
-        enable_plotting (bool): Whether to enable enrichment plotting (default: True).
+        enable_plotting (bool): Whether to enable plots (default: True).
         session_dir (str): Optional session directory path to save results. If None, uses OUTPUT_DIR.
+        ref_label, alt_label: Actual group names; the R contrast is alternate minus reference.
+        input_scale: Explicit expression scale supplied to R; default linear CP10K.
+        r_timeout: Maximum R subprocess duration in seconds.
+        enrichment_timeout: Timeout in seconds for each real Enrichr HTTP request.
+        enrichment_databases: Optional library subset; None preserves existing defaults.
 
     Returns:
         dict: A dictionary containing the results of the omic analysis.
@@ -138,10 +150,7 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         print(f"Using default output directory for analysis results: {OUTPUT_DIR}")
     os.makedirs(base_dir, exist_ok=True)
 
-    # Save the foranalysis matrices into the same session/output directory
-    combined_disease_df.to_csv(os.path.join(base_dir, f"foranalysis_combined_disease_df_{disease_name}.csv"), index=False)
-    combined_normal_df.to_csv(os.path.join(base_dir, f"foranalysis_combined_normal_df_{disease_name}.csv"), index=False)
-    print(f"foranalysis matrices saved to {base_dir}")
+    # The R adapter below exports these matrices once, in this same session.
 
     de_output_dir = os.path.join(base_dir, "differential_expression")
     volcano_dir = os.path.join(base_dir, "volcano_plots")
@@ -167,8 +176,13 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         sig_top_n=1000,  # change to 1000
         disease=disease_name,
         de_output_dir=de_output_dir,
-        n_jobs=-1,  # Use all available cores for maximum speed
+        n_jobs=-1,  # Retained legacy argument; DE execution now belongs to R.
         diagnostics_text=diagnostics_text,
+        session_dir=base_dir,
+        ref_label=ref_label,
+        alt_label=alt_label,
+        input_scale=input_scale,
+        r_timeout=r_timeout,
     )
 
     # Create volcano plots with different thresholds in parallel
@@ -211,7 +225,10 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
             significant_genes=significant_genes, 
             disease_name=disease_name, 
             enrich_output_dir=enrich_output_dir,
-            fast_mode=False  # Disable fast mode by default
+            fast_mode=False,
+            pathway_dbs=enrichment_databases,
+            disease_dbs=[] if enrichment_databases is not None else None,
+            request_timeout=enrichment_timeout,
         )
     
     def run_enrichment_plotting():
@@ -234,15 +251,17 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     print("Running analysis tasks sequentially...")
     
     # Execute volcano plots first
-    volcano_result = create_volcano_plots()
-    print(f"  - Volcano plots: {volcano_result}")
+    if enable_plotting:
+        volcano_result = create_volcano_plots()
+        print(f"  - Volcano plots: {volcano_result}")
     
     # Execute enrichment analysis
     enrichment_results = run_enrichment_analysis()
-    print(f"  - Enrichment analysis: completed")
+    enrichment_status = json.loads((Path(enrich_output_dir) / "enrichment_status.json").read_text(encoding="utf-8"))["status"]
+    print(f"  - Enrichment analysis: {enrichment_status}")
     
     # Execute enrichment plotting if enabled
-    if enable_plotting:
+    if enable_plotting and enrichment_status == "success":
         plotting_result = run_enrichment_plotting()
         print(f"  - Enrichment plotting: {plotting_result}")
     
@@ -258,7 +277,9 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         "differential_expression_dir": de_output_dir,
         "volcano_plots_dir": volcano_dir,
         "enrichment_results_dir": enrich_output_dir,
-        "enrichment_plots_dir": plot_enrich_dir
+        "enrichment_plots_dir": plot_enrich_dir,
+        "enrichment_status": enrichment_status,
+        "enrichment_success": enrichment_status in ("success", "empty"),
     }
 
     return data_and_analysis_dict
@@ -267,299 +288,83 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
 def perform_unpaired_differential_expression(disease_df, normal_df,
                                     p_value_threshold=0.05, log2fc_threshold=1.5,
                                     sig_top_n=100, n_jobs=16, disease="Disease",
-                                    de_output_dir=None, diagnostics_text: str = "") -> tuple[dict, pd.DataFrame]:
+                                    de_output_dir=None, diagnostics_text: str = "", *,
+                                    session_dir=None, ref_label="Healthy", alt_label="Diseased",
+                                    input_scale="linear_cp10k", r_timeout=3600) -> tuple[dict, pd.DataFrame]:
+    """Delegate metacell-level DE to the existing R/limma implementation.
+
+    Preserve the historical function name, positional arguments, five CSVs and
+    (all/up/down subsets, full table) return structure. n_jobs and the former
+    log2fc_threshold argument are retained for callers; neither alters limma.
+    Input matrices must be on the explicitly declared scale.
     """
-    Perform unpaired non-parametric differential expression analysis using Mann–Whitney U test.
+    if de_output_dir is None:
+        de_output_dir = Path(session_dir or OUTPUT_DIR) / "differential_expression"
+    de_dir = Path(de_output_dir).resolve()
+    base_dir = Path(session_dir).resolve() if session_dir else de_dir / "inputs"
+    analysis_dir = (Path(session_dir).resolve() if session_dir else de_dir) / "casestudy_R"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    de_dir.mkdir(parents=True, exist_ok=True)
+    ref_csv = base_dir / f"foranalysis_combined_normal_df_{disease}.csv"
+    alt_csv = base_dir / f"foranalysis_combined_disease_df_{disease}.csv"
+    normal_df.to_csv(ref_csv, index=False, encoding="utf-8")
+    disease_df.to_csv(alt_csv, index=False, encoding="utf-8")
 
-    Args:
-        disease_df (pd.DataFrame): Disease group, rows = genes, columns = samples, 'Name' column for gene names.
-        normal_df (pd.DataFrame): Control group, same structure as disease_df.
-        p_value_threshold (float): Adjusted p-value threshold for significance.
-        log2fc_threshold (float): Log2 fold change threshold for biological significance.
-        sig_top_n (int): Number of top significant genes to return.
-        n_jobs (int): Number of parallel jobs. -1 uses all cores.
-        disease (str): Name of the disease for plot titles.
-        de_output_dir (str): Directory to save differential expression results.
+    try:
+        r_script = get_path("analysis.r_script", absolute=True)
+    except KeyError:
+        # Existing local configs need not be rewritten merely to use this checkout.
+        r_script = str(Path(__file__).with_name("run_casestudy.R"))
 
-    Returns:
-        Tuple[dict, pd.DataFrame]: Dictionary with significant genes and a DataFrame of unpaired DE results.
-    """
-    # Extract gene names and expression matrices
-    gene_names = disease_df['Name'].tolist()
-    assert gene_names == normal_df['Name'].tolist(), "Gene order mismatch between disease and control."
-
-    disease_matrix = disease_df.drop(columns=['Name']).values
-    control_matrix = normal_df.drop(columns=['Name']).values
-
-    # Check the min and max values in the matrices
-    print(f"Disease matrix shape: {disease_matrix.shape}, min: {np.min(disease_matrix)}, max: {np.max(disease_matrix)}")
-    print(f"Control matrix shape: {control_matrix.shape}, min: {np.min(control_matrix)}, max: {np.max(control_matrix)}")
-    # import pdb; pdb.set_trace()  # Debugging breakpoint to inspect matrices
-    
-    # Pre-filter genes to reduce computational load
-    print("Pre-filtering genes to reduce computational load...")
-    
-    # Calculate basic statistics for filtering
-    disease_mean = np.mean(disease_matrix, axis=1)
-    control_mean = np.mean(control_matrix, axis=1)
-    disease_std = np.std(disease_matrix, axis=1)
-    control_std = np.std(control_matrix, axis=1)
-    
-    # Filter criteria:
-    # 1. Remove genes with very low expression in both groups
-    min_expression_threshold = 0.1
-    # 2. Remove genes with no variance (constant expression)
-    min_variance_threshold = 1e-6
-    # 3. Keep genes with some difference between groups
-    
-    keep_mask = (
-        ((disease_mean > min_expression_threshold) | (control_mean > min_expression_threshold)) &
-        ((disease_std > min_variance_threshold) | (control_std > min_variance_threshold))
+    filenames = (
+        "unpaired_differential_expression_results.csv",
+        "significant_genes_by_fdr.csv",
+        "significant_genes_by_fc.csv",
+        "significant_upregulated_genes.csv",
+        "significant_downregulated_genes.csv",
     )
-    
-    # Apply filtering
-    filtered_gene_names = np.array(gene_names)[keep_mask]
-    filtered_disease_matrix = disease_matrix[keep_mask, :]
-    filtered_control_matrix = control_matrix[keep_mask, :]
-    
-    genes_before = len(gene_names)
-    genes_after = len(filtered_gene_names)
-    print(f"Filtered from {genes_before} to {genes_after} genes ({genes_before - genes_after} removed, {genes_after/genes_before*100:.1f}% retained)")
-    
-    # Use parallel processing to calculate p-values on filtered data
-    print(f"Calculating differential expression using {n_jobs} parallel jobs...")
-    p_values_filtered = parallel_mannwhitney_optimized(filtered_disease_matrix, filtered_control_matrix, n_jobs)
-    
-    # Create full p-values array (filtered genes get their calculated p-value, others get 1.0)
-    p_values = np.ones(len(gene_names))
-    p_values[keep_mask] = p_values_filtered
-    
-    # FDR correction
-    print("Applying FDR correction...")
-    fdr = multipletests(p_values, method='fdr_bh')[1]
+    # Read only this invocation's outputs. A failed or empty R invocation cannot
+    # accidentally succeed by reading CSVs left by an earlier session run.
+    with tempfile.TemporaryDirectory(prefix=".r-de-", dir=base_dir) as temporary:
+        staging = Path(temporary)
+        staged_de = staging / "differential_expression"
+        staged_analysis = staging / "casestudy_R"
+        args = [
+            "--stage", "de", str(base_dir), str(staged_analysis),
+            "--ref-csv", str(ref_csv), "--alt-csv", str(alt_csv),
+            "--ref-label", ref_label, "--alt-label", alt_label,
+            "--input-scale", input_scale, "--de-dir", str(staged_de),
+            "--final-out-dir", str(analysis_dir), "--final-de-dir", str(de_dir),
+            "--de-fdr", str(p_value_threshold), "--top-n", str(sig_top_n),
+        ]
+        if diagnostics_text:
+            diagnostic_path = staging / "diagnostics.txt"
+            diagnostic_path.write_text(diagnostics_text + "\n", encoding="utf-8")
+            args.extend(["--diagnostics-file", str(diagnostic_path)])
+        run_r_script(r_script, args, timeout=r_timeout)
+        tables = {name: read_de_results(staged_de / name) for name in filenames}
+        if tables[filenames[0]].empty:
+            raise ValueError("R produced an empty main DE table")
+        for name, table in tables.items():
+            if table.columns.tolist() != list(DE_RESULT_DTYPES):
+                raise ValueError(f"Invalid DE output columns: {name}")
+            numeric = table[["log2_fold_change", "effect_size", "p_value", "FDR", "abs_log2_fc"]]
+            if table["Name"].isna().any() or not table["Name"].is_unique or not np.isfinite(numeric.to_numpy()).all():
+                raise ValueError(f"Invalid gene names or statistics in DE output: {name}")
+        required_native = [staged_analysis / "DE_results_table.csv", staged_analysis / "analysis_state.rds"]
+        for path in required_native:
+            if not path.is_file() or path.stat().st_size == 0:
+                raise FileNotFoundError(f"R did not produce required output: {path}")
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        for name in filenames:
+            os.replace(staged_de / name, de_dir / name)
+        for path in required_native:
+            os.replace(path, analysis_dir / path.name)
 
-    # Calculate fold changes and effect sizes (vectorized)
-    print("Calculating fold changes and effect sizes...")
-    disease_mean = np.mean(disease_matrix, axis=1)
-    control_mean = np.mean(control_matrix, axis=1)
-    
-    # Add small constant to avoid division by zero
-    epsilon = 1e-8
-    fold_changes = np.log2((disease_mean + epsilon) / (control_mean + epsilon))
-    
-    # Vectorized Cohen's d calculation for effect size
-    disease_var = np.var(disease_matrix, axis=1, ddof=1)
-    control_var = np.var(control_matrix, axis=1, ddof=1)
-    n_disease = disease_matrix.shape[1]
-    n_control = control_matrix.shape[1]
-    
-    # Pooled standard deviation
-    pooled_std = np.sqrt(((n_disease - 1) * disease_var + (n_control - 1) * control_var) / 
-                        (n_disease + n_control - 2))
-    
-    # Cohen's d effect size
-    effect_sizes = (disease_mean - control_mean) / (pooled_std + epsilon)
+    result_df = tables[filenames[0]]
+    return {"all": tables[filenames[1]], "up": tables[filenames[3]],
+            "down": tables[filenames[4]]}, result_df
 
-    # Result table
-    result_df = pd.DataFrame({
-        'Name': gene_names,
-        'log2_fold_change': fold_changes,
-        'effect_size': effect_sizes,
-        'p_value': p_values,
-        'FDR': fdr
-    })
-    result_df['is_significant'] = result_df['FDR'] < p_value_threshold
-    result_df['abs_log2_fc'] = np.abs(result_df['log2_fold_change'])
-
-    # Debugging for genes with NaN fold change
-    nan_genes = result_df[result_df['log2_fold_change'].isna()]
-    if len(nan_genes) > 0:
-        print(f"Found {len(nan_genes)} genes with NaN fold change values")
-        for idx, row in nan_genes.head(5).iterrows():
-            gene_name = row['Name']
-            gene_idx = gene_names.index(gene_name)
-            d_values = disease_matrix[gene_idx, :]
-            c_values = control_matrix[gene_idx, :]
-            print(f"Gene {gene_name}: Disease median={np.median(d_values)}, Control median={np.median(c_values)}")
-            print(f"  Disease values: min={np.min(d_values)}, max={np.max(d_values)}")
-            print(f"  Control values: min={np.min(c_values)}, max={np.max(c_values)}")
-
-    # Add this before your debugging code
-    zero_fc_genes = result_df[(result_df['log2_fold_change'] == 0.0) & (result_df['p_value'] < 1e-10)]
-    if len(zero_fc_genes) > 0:
-        print(f"Found {len(zero_fc_genes)} genes with zero fold change but very low p-values")
-        for idx, row in zero_fc_genes.head(5).iterrows():
-            gene_name = row['Name']
-            gene_idx = gene_names.index(gene_name)
-            d_values = disease_matrix[gene_idx, :]
-            c_values = control_matrix[gene_idx, :]
-            print(f"Gene {gene_name}:")
-            print(f"  Disease values: {d_values[:5]}... (mean={np.mean(d_values)}, median={np.median(d_values)})")
-            print(f"  Control values: {c_values[:5]}... (mean={np.mean(c_values)}, median={np.median(c_values)})")
-            # Count zeros in each group
-            d_zeros = np.sum(d_values == 0)
-            c_zeros = np.sum(c_values == 0)
-            print(f"  Disease zeros: {d_zeros}/{len(d_values)} ({d_zeros/len(d_values)*100:.1f}%)")
-            print(f"  Control zeros: {c_zeros}/{len(c_values)} ({c_zeros/len(c_values)*100:.1f}%)")
-
-    # Filter significant genes
-    sig_genes = result_df[result_df['is_significant']]
-
-    # Sort by different criteria
-    sig_by_fdr = sig_genes.sort_values('FDR').head(sig_top_n)
-    sig_by_fc = sig_genes.sort_values('abs_log2_fc', ascending=False).head(sig_top_n)
-
-    # Separate upregulated and downregulated genes
-    sig_up = sig_genes[sig_genes['log2_fold_change'] > 0].sort_values('p_value').head(sig_top_n)
-    sig_down = sig_genes[sig_genes['log2_fold_change'] < 0].sort_values('p_value').head(sig_top_n)
-
-    # Save all result files in parallel
-    save_tasks = [
-        (result_df, os.path.join(de_output_dir, "unpaired_differential_expression_results.csv")),
-        (sig_by_fdr, os.path.join(de_output_dir, "significant_genes_by_fdr.csv")),
-        (sig_by_fc, os.path.join(de_output_dir, "significant_genes_by_fc.csv")),
-        (sig_up, os.path.join(de_output_dir, "significant_upregulated_genes.csv")),
-        (sig_down, os.path.join(de_output_dir, "significant_downregulated_genes.csv"))
-    ]
-    
-    def save_dataframe(df, filepath):
-        with open(filepath, "w", encoding="utf-8", newline="") as handle:
-            for line in (diagnostics_text or "").splitlines():
-                handle.write(f"# {line}\n")
-            df.to_csv(handle, index=False)
-        return f"Saved {filepath}"
-    
-    print("Saving differential expression results in parallel...")
-    Parallel(n_jobs=-1)(
-        delayed(save_dataframe)(df, filepath) for df, filepath in save_tasks
-    )
-    
-    # Return both up and down-regulated gene dataframes
-    return {"all": sig_by_fdr, "up": sig_up, "down": sig_down}, result_df
-
-
-def parallel_mannwhitney(disease_matrix, control_matrix, n_jobs=-1):
-    """
-    Optimized parallel Mann-Whitney U test with batch processing
-    """
-    n_genes = disease_matrix.shape[0]
-    n_disease = disease_matrix.shape[1]
-    n_control = control_matrix.shape[1]
-    
-    if n_jobs == -1:
-        n_cores = os.cpu_count()
-    else:
-        n_cores = min(n_jobs, os.cpu_count())
-    
-    # Calculate optimal batch size for better load balancing
-    batch_size = max(1, n_genes // (n_cores * 4))  # 4 batches per core
-    
-    print(f"Processing {n_genes} genes in batches of {batch_size} using {n_cores} cores...")
-    
-    def compute_batch_mannwhitney(batch_indices):
-        """Compute Mann-Whitney U test for a batch of genes"""
-        batch_p_values = []
-        
-        for i in batch_indices:
-            disease_values = disease_matrix[i, :]
-            control_values = control_matrix[i, :]
-            
-            # Skip if identical distributions (early termination)
-            if np.array_equal(disease_values, control_values):
-                batch_p_values.append(1.0)
-                continue
-            
-            try:
-                # Use asymptotic method for large samples (faster)
-                if len(disease_values) > 20 and len(control_values) > 20:
-                    _, p_value = stats.ranksums(disease_values, control_values)
-                else:
-                    _, p_value = stats.mannwhitneyu(disease_values, control_values, alternative='two-sided')
-                batch_p_values.append(p_value)
-            except Exception:
-                # Fallback for edge cases
-                batch_p_values.append(1.0)
-        
-        return batch_p_values
-    
-    # Create batches
-    gene_indices = np.arange(n_genes)
-    batches = [gene_indices[i:i+batch_size] for i in range(0, n_genes, batch_size)]
-    
-    # Run parallel computation with reduced verbosity
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        batch_results = Parallel(n_jobs=n_cores, verbose=0)(
-            delayed(compute_batch_mannwhitney)(batch) for batch in batches
-        )
-    
-    # Flatten results
-    p_values = [p for batch in batch_results for p in batch]
-    
-    return np.array(p_values)
-
-def fast_mannwhitney_vectorized(x, y):
-    """
-    Fast vectorized Mann-Whitney U test for multiple genes
-    Uses ranking approach optimized with numpy for speed
-    """
-    n_genes, n_x = x.shape
-    n_y = y.shape[1]
-    n_total = n_x + n_y
-    
-    # Combine samples for ranking
-    combined = np.concatenate([x, y], axis=1)
-    
-    # Get ranks for each gene across all samples
-    ranks = np.empty_like(combined)
-    for i in range(n_genes):
-        ranks[i] = scipy.stats.rankdata(combined[i])
-    
-    # Sum ranks for x group
-    rank_sum_x = np.sum(ranks[:, :n_x], axis=1)
-    
-    # Calculate U statistic
-    U1 = rank_sum_x - n_x * (n_x + 1) / 2
-    U2 = n_x * n_y - U1
-    U = np.minimum(U1, U2)
-    
-    # Normal approximation for p-values (faster than exact)
-    mu = n_x * n_y / 2
-    sigma = np.sqrt(n_x * n_y * (n_x + n_y + 1) / 12)
-    
-    # Continuity correction
-    z = (U - mu + 0.5) / sigma
-    p_values = 2 * scipy.stats.norm.cdf(z)
-    
-    return p_values
-
-def parallel_mannwhitney_optimized(disease_matrix, control_matrix, n_jobs=-1):
-    """
-    Optimized parallel Mann-Whitney U test with choice of algorithms
-    """
-    n_genes = disease_matrix.shape[0]
-    n_disease = disease_matrix.shape[1]
-    n_control = control_matrix.shape[1]
-    
-    print(f"Running optimized Mann-Whitney tests on {n_genes} genes...")
-    
-    # Choose algorithm based on data size
-    if n_genes < 5000:
-        # For smaller datasets, use the exact method
-        print("Using exact Mann-Whitney method for high precision...")
-        return parallel_mannwhitney(disease_matrix, control_matrix, n_jobs)
-    
-    # For larger datasets, try vectorized approach first
-    if n_genes > 20000 and (n_disease + n_control) < 100:
-        print("Using vectorized Mann-Whitney method for speed...")
-        try:
-            return fast_mannwhitney_vectorized(disease_matrix, control_matrix)
-        except Exception as e:
-            print(f"Vectorized method failed ({e}), falling back to parallel method...")
-    
-    # Default to the batch processing method
-    print("Using batch-processed Mann-Whitney method...")
-    return parallel_mannwhitney(disease_matrix, control_matrix, n_jobs)
 
 def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5,
                          save_path=None, plot_title=None, highlight_top_n=50,
@@ -798,7 +603,23 @@ def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5
 def perform_enrichment_analysis(significant_genes, disease_name="Disease", 
                                pathway_dbs=None, disease_dbs=None, 
                                visualize=True, enrich_top_n=10,
-                               enrich_output_dir=None, fast_mode=True):
+                               enrich_output_dir=None, fast_mode=True, request_timeout=60):
+    """Keep any enrichment-stage failure distinct from DE failure or emptiness."""
+    try:
+        return _perform_enrichment_analysis(significant_genes, disease_name, pathway_dbs, disease_dbs,
+                                            visualize, enrich_top_n, enrich_output_dir, fast_mode, request_timeout)
+    except Exception as error:
+        if enrich_output_dir is not None:
+            record_enrichment_failure(enrich_output_dir, error)
+        if isinstance(error, EnrichrError):
+            raise
+        raise EnrichrError(f"Enrichment stage failed: {type(error).__name__}: {error}") from error
+
+
+def _perform_enrichment_analysis(significant_genes, disease_name="Disease",
+                                pathway_dbs=None, disease_dbs=None,
+                                visualize=True, enrich_top_n=10,
+                                enrich_output_dir=None, fast_mode=True, request_timeout=60):
     """
     Performs enrichment analysis on significant genes from differential expression analysis
     with flexible database selection.
@@ -859,13 +680,14 @@ def perform_enrichment_analysis(significant_genes, disease_name="Disease",
     all_dbs = pathway_dbs + disease_dbs
     
     results = {}
+    status_path = Path(enrich_output_dir) / "enrichment_status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    run_status = {"status": "running", "groups": {}}
+    write_status(status_path, run_status)
+    archive_enrichment_plots(status_path.parent / "enrichment_plots")
     
     # Process each set of genes (all, up, down) in parallel
     def process_gene_set(set_name, gene_df):
-        if gene_df.empty:
-            print(f"No genes in the {set_name} regulated set to analyze")
-            return set_name, None
-            
         gene_list = gene_df['Name'].tolist()
         print(f"\nPerforming enrichment analysis on {len(gene_list)} {set_name}-regulated genes...")
         
@@ -876,7 +698,20 @@ def perform_enrichment_analysis(significant_genes, disease_name="Disease",
         set_results = {"disease": disease_name, "gene_count": len(gene_list)}
         
         # Run enrichment analysis on this gene set with specified databases
-        enrichr_results = enrichr_analysis(gene_list, sample_id, enrich_output_dir, databases=all_dbs)
+        try:
+            enrichr_results = enrichr_analysis(gene_list, sample_id, enrich_output_dir,
+                                              databases=all_dbs, request_timeout=request_timeout)
+        except EnrichrError as error:
+            run_status["groups"][set_name] = {"status": "failed", "gene_count": len(gene_list), "error": str(error)}
+            run_status["status"] = "failed"
+            write_status(status_path, run_status)
+            raise
+        returned = sum(len(payload[db]) for db, payload in enrichr_results.items())
+        run_status["groups"][set_name] = {
+            "status": "skipped" if not gene_list else "success" if returned else "empty",
+            "gene_count": len(gene_list), "returned_rows": returned,
+        }
+        write_status(status_path, run_status)
         
         # Combine enrichr results with metadata
         if enrichr_results:
@@ -896,138 +731,25 @@ def perform_enrichment_analysis(significant_genes, disease_name="Disease",
         if set_results is not None:
             results[set_name] = set_results
     
+    states = [value["status"] for value in run_status["groups"].values()]
+    run_status["status"] = "success" if "success" in states else "empty" if "empty" in states else "skipped"
+    write_status(status_path, run_status)
     return results
 
-def enrichr_analysis(gene_list, sample_id, enrich_output_dir=None, databases=None):
-    """
-    Performs enrichment analysis using the Enrichr API with flexible database selection.
-    
-    Args:
-        gene_list (list): A list of gene symbols
-        sample_id (str): Sample identifier used for naming the output directory
-        enrich_output_dir (str): Base directory to save results
-        databases (list): List of databases to query (if None, uses all available)
-        
-    Returns:
-        dict: Dictionary with enrichment results
-    """
-    # Create sample-specific directory
-    sample_dir = os.path.join(enrich_output_dir, sample_id)
-    os.makedirs(sample_dir, exist_ok=True)
-    
-    # Default databases if none provided
-    if databases is None:
-        databases = [
-            # Pathway databases
-            'GO_Biological_Process_2021',
-            'GO_Molecular_Function_2021',
-            'GO_Cellular_Component_2021',
-            'KEGG_2021_Human',
-            'Reactome_2022',
-            'WikiPathways_2019_Human',
-            'MSigDB_Hallmark_2020',
-            
-            # Disease-related databases
-            'DisGeNET',
-            'OMIM_Disease',
-            'OMIM_Expanded',
-            'Human_Phenotype_Ontology',
-            'Jensen_DISEASES',
-            'GTEx_Tissue_Expression_Down',
-            'GTEx_Tissue_Expression_Up',
-        ]
-    
-    # Step 1: Submit gene list to Enrichr
-    genes_str = '\n'.join(gene_list)
-    upload_url = 'https://maayanlab.cloud/Enrichr/addList'
-    
-    print(f"Submitting {len(gene_list)} genes to Enrichr API...")
+def enrichr_analysis(gene_list, sample_id, enrich_output_dir=None, databases=None, *, request_timeout=60):
+    """Call the real Enrichr endpoints; errors raise instead of becoming None."""
     try:
-        response = requests.post(upload_url, files={'list': (None, genes_str)}, 
-                               data={'description': f'DEA gene set - {sample_id}'})
-        
-        if not response.ok:
-            print(f"Error submitting gene list: {response.status_code}")
-            return None
-        
-        user_list_id = response.json().get('userListId')
-        print(f"Gene list submitted successfully with ID: {user_list_id}")
-        
-    except Exception as e:
-        print(f"Error connecting to Enrichr API: {e}")
-        print("Saving gene list locally for manual analysis")
-        gene_list_path = os.path.join(sample_dir, "gene_list.txt")
-        with open(gene_list_path, 'w') as f:
-            f.write(genes_str)
-        print(f"Gene list saved to {gene_list_path}")
-        return None
-    
-    # Step 2: Retrieve enrichment results for specified databases in parallel
-    def query_database(database):
-        print(f"Retrieving results for {database}...")
-        
-        query_url = f'https://maayanlab.cloud/Enrichr/enrich?userListId={user_list_id}&backgroundType={database}'
-        try:
-            # Reduce delay further to speed up API calls
-            time.sleep(0.1)  # Reduced from 0.2 seconds to 0.1 seconds
-            response = requests.get(query_url)
-            
-            if not response.ok:
-                print(f"Error retrieving results for {database}: {response.status_code}")
-                return database, None
-                
-            results = response.json()
-            
-            # Save individual database results as CSV
-            if results and database in results:
-                # Convert to DataFrame
-                df = pd.DataFrame(results[database])
-                
-                if not df.empty:
-                    # Rename columns for clarity
-                    if len(df.columns) >= 9:  # Enrichr typically returns 9+ columns
-                        df.columns = [
-                            'Rank', 'Term', 'P-value', 'Odds Ratio', 'Combined Score',
-                            'Genes', 'Adjusted P-value', 'Old P-value', 'Old Adjusted P-value'
-                        ]
-                    
-                    # Sort by adjusted p-value
-                    if 'Adjusted P-value' in df.columns:
-                        df = df.sort_values('Adjusted P-value')
-                    
-                    # Save top 50 results
-                    safe_db_name = database.replace('/', '_')
-                    output_file = f"{sample_dir}/{safe_db_name}_results.csv"
-                    df.head(50).to_csv(output_file, index=False)
-                    print(f"  ✓ Saved top results to {output_file}")
-            
-            return database, results
-                
-        except Exception as e:
-            print(f"Error processing {database}: {e}")
-            return database, None
-    
-    # Process databases sequentially with threading to avoid nested parallelism segfaults
-    print("Querying enrichment databases...")
-    parallel_db_results = []
-    for database in databases:
-        result = query_database(database)
-        parallel_db_results.append(result)
-    
-    # Collect results
-    all_results = {}
-    for database, results in parallel_db_results:
-        if results is not None:
-            all_results[database] = results
-    
-    # Save all results as JSON
-    with open(f"{sample_dir}/all_enrichment_results.json", 'w') as f:
-        json.dump(all_results, f, indent=2)
-    
-    # Create summary files
-    create_enrichment_summary(gene_list, all_results, sample_id, sample_dir, databases)
-    
-    return all_results
+        results = fetch_enrichment(gene_list, sample_id, enrich_output_dir, databases, request_timeout)
+        libraries = list(results)
+        create_enrichment_summary(gene_list, results, sample_id,
+                                  str(Path(enrich_output_dir) / sample_id), libraries)
+        return results
+    except Exception as error:
+        if enrich_output_dir is not None and Path(sample_id).name == sample_id:
+            record_enrichment_failure(Path(enrich_output_dir) / sample_id, error)
+        if isinstance(error, EnrichrError):
+            raise
+        raise EnrichrError(f"Enrichr output failed for {sample_id}: {type(error).__name__}: {error}") from error
 
 def create_enrichment_summary(gene_list, enrichr_results, sample_id, sample_dir, databases):
     """
@@ -1048,7 +770,7 @@ def create_enrichment_summary(gene_list, enrichr_results, sample_id, sample_dir,
     
     # Create a comprehensive summary file
     summary_file = f"{sample_dir}/summary.txt"
-    with open(summary_file, 'w') as f:
+    with open(summary_file, 'w', encoding='utf-8') as f:
         f.write(f"ENRICHMENT ANALYSIS SUMMARY FOR {sample_id}\n")
         f.write(f"Number of genes analyzed: {len(gene_list)}\n\n")
         
@@ -1060,6 +782,8 @@ def create_enrichment_summary(gene_list, enrichr_results, sample_id, sample_dir,
         for database in pathway_dbs:
             if database in enrichr_results and database in enrichr_results[database]:
                 results = enrichr_results[database][database]
+                if not results:
+                    f.write(f"\n{database}: No returned terms.\n")
                 if results:
                     top_terms = results[:5]
                     
@@ -1067,7 +791,7 @@ def create_enrichment_summary(gene_list, enrichr_results, sample_id, sample_dir,
                     
                     for term in top_terms:
                         term_name = term[1]
-                        p_value = term[2]
+                        p_value = float(term[2])
                         adj_p = term[6] if len(term) > 6 else "N/A"
                         genes = term[5] if len(term) > 5 else "N/A"
                         
@@ -1082,6 +806,8 @@ def create_enrichment_summary(gene_list, enrichr_results, sample_id, sample_dir,
         for database in disease_dbs:
             if database in enrichr_results and database in enrichr_results[database]:
                 results = enrichr_results[database][database]
+                if not results:
+                    f.write(f"\n{database}: No returned terms.\n")
                 if results:
                     top_terms = results[:5]
                     
@@ -1089,7 +815,7 @@ def create_enrichment_summary(gene_list, enrichr_results, sample_id, sample_dir,
                     
                     for term in top_terms:
                         term_name = term[1]
-                        p_value = term[2]
+                        p_value = float(term[2])
                         adj_p = term[6] if len(term) > 6 else "N/A"
                         genes = term[5] if len(term) > 5 else "N/A"
                         
@@ -1169,7 +895,7 @@ def plot_selected_enrichment(disease_name, regulation_type="all",
         
         try:
             # Load the CSV file
-            results_df = pd.read_csv(csv_file)
+            results_df = read_enrichment_results(csv_file)
             
             # Check if we have results
             if len(results_df) == 0:

@@ -34,6 +34,9 @@ data:
   enrichment_plots: "dataset_outputs/enrichment_results/enrichment_plots"
   plot: "dataset_outputs/plot"
 
+analysis:
+  r_script: "tools/omic_tools/run_casestudy.R"
+
 # External data sources (UPDATE THESE PATHS FOR YOUR SYSTEM)
 external:
   # Neo4j home directory - update this path for your system

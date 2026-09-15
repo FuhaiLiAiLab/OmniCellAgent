@@ -24,12 +24,13 @@ When no exact match is found, provides suggestions using:
 Based on the working CellTOSGDataLoader example pattern.
 """
 
-from omic_analysis_components import omic_analysis
+from omic_analysis_components import omic_analysis, EnrichrError
 from cohort_diagnostics import compute_cohort_diagnostics, format_diagnostics_text
 from celltosg_runtime_adapter import writable_celltosg_root
 from donor_sampling import sample_known_donor_cohort
 from query_value_lists import save_query_value_lists
 from subprocess_r import run_r_script
+from de_results_io import read_de_results
 
 import sys
 import os
@@ -37,6 +38,8 @@ import time
 import gc
 import json
 import zipfile
+import tempfile
+from pathlib import Path
 from difflib import get_close_matches
 import numpy as np
 import pandas as pd
@@ -672,7 +675,8 @@ TOP_K_GENES = 20
 def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                                  tissue=None, gender=None, session_dir=None,
                                  enable_differential_expression=True, enable_plotting=True,
-                                 label="disease", suspension_type=None, sample_size=1000):
+                                 label="disease", suspension_type=None, sample_size=1000,
+                                 r_timeout=3600, enrichment_timeout=60, enrichment_databases=None):
     """
     Perform the complete single-cell omic analysis workflow.
 
@@ -688,6 +692,9 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         session_dir: Directory to save all outputs (REQUIRED)
         enable_differential_expression: Run DE analysis (default True)
         enable_plotting: Run R plotting script (default True)
+        r_timeout: Maximum duration in seconds for each R invocation.
+        enrichment_timeout: Timeout for each Enrichr HTTP request.
+        enrichment_databases: Optional library subset; None retains existing defaults.
         label: Column used to define the two groups for differential expression.
             Defaults to "disease" (known-donor disease vs normal pools).
             Set to "gender" to compare female vs male within the
@@ -862,6 +869,10 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     # ===========================================================================
     disease_name = fetch_dict.get("disease", None)
     analysis_success = False
+    de_success = False
+    enrichment_success = False
+    enrichment_status = "not_run"
+    enrichment_error = None
     analysis_paths = None
     top_genes_by_fdr = []
     cohort_diagnostics = None
@@ -954,8 +965,17 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                         session_dir=session_dir,
                         gene_names=gene_names,
                         diagnostics_text=diagnostics_text,
+                        ref_label=contrast["ref_name"],
+                        alt_label=contrast["alt_name"],
+                        input_scale="linear_cp10k",
+                        r_timeout=r_timeout,
+                        enrichment_timeout=enrichment_timeout,
+                        enrichment_databases=enrichment_databases,
                     )
                     analysis_success = True
+                    de_success = True
+                    enrichment_success = data_and_analysis_dict["enrichment_success"]
+                    enrichment_status = data_and_analysis_dict["enrichment_status"]
                     analysis_paths = {
                         "differential_expression_dir": data_and_analysis_dict.get('differential_expression_dir'),
                         "enrichment_results_dir": data_and_analysis_dict.get('enrichment_results_dir'),
@@ -967,7 +987,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                         "significant_genes_by_fdr.csv"
                     )
                     if os.path.exists(gene_file):
-                        gene_df = pd.read_csv(gene_file, comment="#")
+                        gene_df = read_de_results(gene_file)
                         # Store full statistics for top genes
                         top_genes_by_fdr = []
                         for idx, row in gene_df.head(TOP_K_GENES).iterrows():
@@ -983,7 +1003,18 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                     
                     del data_and_analysis_dict
                     
+                except EnrichrError as e:
+                    analysis_success = False
+                    de_success = True
+                    enrichment_success = False
+                    enrichment_status = "failed"
+                    enrichment_error = str(e)
+                    analysis_paths = {"differential_expression_dir": os.path.join(session_dir, "differential_expression"),
+                                      "enrichment_results_dir": os.path.join(session_dir, "enrichment_results")}
+                    print(f"[Enrichment] Analysis failed: {e}")
                 except Exception as e:
+                    analysis_success = False
+                    analysis_paths = None
                     print(f"[DE] Analysis failed: {str(e)}")
                     import traceback
                     traceback.print_exc()
@@ -1016,8 +1047,9 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     # STEP 5: KEGG Enrichment Plotting (via R script)
     # ===========================================================================
     kegg_success = False
+    current_kegg_files = []
     
-    if enable_plotting and analysis_success and analysis_paths:
+    if enable_plotting and analysis_success and enrichment_status == "success" and analysis_paths:
         print(f"\n{'='*70}")
         print(f"STEP 5: KEGG Pathway Enrichment Plotting")
         print(f"{'='*70}")
@@ -1034,7 +1066,15 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
             
             if os.path.exists(enrichment_all_regulated):
                 print(f"[KEGG] Running R script on: {enrichment_all_regulated}")
-                r_result = run_r_script(kegg_script_path, [enrichment_all_regulated, plot_dir])
+                with tempfile.TemporaryDirectory(prefix=".kegg-", dir=session_dir) as staging:
+                    r_result = run_r_script(kegg_script_path, [enrichment_all_regulated, staging], timeout=r_timeout)
+                    expected = [Path(staging) / name for name in ("kegg_dotplot.png", "pathway_combined_plot.png")]
+                    if not any(path.is_file() and path.stat().st_size > 0 for path in expected):
+                        raise FileNotFoundError("R exited without producing a KEGG/pathway PNG")
+                    for artifact in Path(staging).iterdir():
+                        if artifact.is_file():
+                            os.replace(artifact, Path(plot_dir) / artifact.name)
+                            current_kegg_files.append(artifact.name)
                 print(f"[KEGG] R script completed: {r_result}")
                 kegg_success = True
             else:
@@ -1095,7 +1135,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     
     # Collect volcano plots
     volcano_dir = os.path.join(session_dir, "volcano_plots")
-    if os.path.exists(volcano_dir):
+    if enable_plotting and de_success and os.path.exists(volcano_dir):
         for f in sorted(os.listdir(volcano_dir)):
             abs_path = os.path.join(volcano_dir, f)
             rel_path = os.path.join("volcano_plots", f)
@@ -1114,7 +1154,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     
     # Collect enrichment bar plots from enrichment_results/enrichment_plots
     enrichment_plots_dir = os.path.join(session_dir, "enrichment_results", "enrichment_plots")
-    if os.path.exists(enrichment_plots_dir):
+    if enable_plotting and enrichment_status == "success" and os.path.exists(enrichment_plots_dir):
         for f in sorted(os.listdir(enrichment_plots_dir)):
             abs_path = os.path.join(enrichment_plots_dir, f)
             rel_path = os.path.join("enrichment_results", "enrichment_plots", f)
@@ -1135,8 +1175,8 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     
     # Collect KEGG pathway plots (dotplot, lollipop, combined)
     kegg_plot_dir = os.path.join(session_dir, "plots")
-    if os.path.exists(kegg_plot_dir):
-        for f in sorted(os.listdir(kegg_plot_dir)):
+    if enable_plotting and kegg_success and os.path.exists(kegg_plot_dir):
+        for f in sorted(current_kegg_files):
             abs_path = os.path.join(kegg_plot_dir, f)
             rel_path = os.path.join("plots", f)
             if f.endswith('.html'):
@@ -1180,7 +1220,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     if label_fallback_message:
         success_message = f"{success_message}. NOTE: {label_fallback_message}"
     return {
-        "success": True,
+        "success": analysis_success if de_gated else True,
         "session_dir": session_dir,
         "data_type": "single-cell RNA-seq (scRNA-seq) cohort",
         "label_column": actual_label,
@@ -1199,6 +1239,10 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         "extracted_entities": fetch_dict,
         "retrieval_success": True,
         "analysis_success": analysis_success,
+        "de_success": de_success,
+        "enrichment_success": enrichment_success,
+        "enrichment_status": enrichment_status,
+        "enrichment_error": enrichment_error,
         "cohort_diagnostics": cohort_diagnostics,
         "cohort_verdict": (cohort_diagnostics or {}).get("verdict"),
         "kegg_success": kegg_success,
