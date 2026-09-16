@@ -332,7 +332,11 @@ res$is_sig <- with(res, adj.P.Val < fdr_thresh & abs(logFC) >= fc_thresh)
 up_n   <- sum(res$status == "Up", na.rm = TRUE)
 down_n <- sum(res$status == "Down", na.rm = TRUE)
 
-lab_df <- res[order(res$adj.P.Val), ][seq_len(min(20, nrow(res))), ]
+# Label only colored genes: top 10 upregulated by FDR and all downregulated
+# genes (five in the current AD case study). Keep the corrgram selection separate.
+ranked_labels <- res[order(res$adj.P.Val), , drop = FALSE]
+lab_df <- rbind(head(ranked_labels[ranked_labels$status == "Up", , drop = FALSE], 10),
+                ranked_labels[ranked_labels$status == "Down", , drop = FALSE])
 x_min <- min(res$logFC, na.rm = TRUE); x_max <- max(res$logFC, na.rm = TRUE)
 y_max <- max(res$neglog10AdjP, na.rm = TRUE); x_span <- x_max - x_min
 
@@ -355,10 +359,10 @@ volcano <- ggplot(res, aes(x = logFC, y = neglog10AdjP)) +
                   min.segment.length = 0, box.padding = 0.3, point.padding = 0.2,
                   ylim = c(NA, y_max * 0.88)) +
   annotate("text", x = x_min + 0.02 * x_span, y = y_max * 0.98,
-           label = paste0("Up (FC >= ", fc_thresh, ", FDR < ", fdr_thresh, "): ", up_n),
+           label = paste0("Up (logFC >= ", fc_thresh, ", FDR < ", fdr_thresh, "): ", up_n),
            hjust = 0, vjust = 1, color = "red3", fontface = "bold") +
   annotate("text", x = x_min + 0.02 * x_span, y = y_max * 0.92,
-           label = paste0("Down (FC <= -", fc_thresh, ", FDR < ", fdr_thresh, "): ", down_n),
+           label = paste0("Down (logFC <= -", fc_thresh, ", FDR < ", fdr_thresh, "): ", down_n),
            hjust = 0, vjust = 1, color = "steelblue3", fontface = "bold") +
   labs(title = paste0("Volcano plot: ", params$alt_label, " vs ", params$ref_label),
        x = fc_axis_lab, y = expression(-log[10]("BH-adjusted P"))) +
@@ -540,8 +544,12 @@ message("Saved: ", out_violin)
 violin
 
   # panel-d-pca
-p_main <- ggplot(pcoadata, aes(PC1, PC2)) +
-  geom_point(aes(colour = Subtype, fill = Subtype), size = 4) +
+# Shuffle only drawing order so one group is not always painted last.
+# with_seed restores RNG state; PCA coordinates and statistical inputs are unchanged.
+pca_draw_data <- withr::with_seed(42L,
+  pcoadata[sample.int(nrow(pcoadata)), , drop = FALSE])
+p_main <- ggplot(pca_draw_data, aes(PC1, PC2)) +
+  geom_point(aes(colour = Subtype, fill = Subtype), size = 1.7, alpha = 0.25) +
   scale_color_manual(values = pal2) +
   labs(x = paste0("(PC1: ", round(pve[1] * 100, 2), "%)"),
        y = paste0("(PC2: ", round(pve[2] * 100, 2), "%)")) +
