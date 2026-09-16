@@ -30,6 +30,13 @@ if (length(args) > 0) {
 }
 
 # Output directory
+group_name <- basename(sub("/+$", "", BASE_PATH))
+direction_label <- if (grepl("_up_regulated$", group_name)) "Upregulated" else
+  if (grepl("_down_regulated$", group_name)) "Downregulated" else ""
+plot_title <- function(title) {
+  if (nzchar(direction_label)) paste(title, direction_label, sep = " - ") else title
+}
+
 if (length(args) > 1) {
   OUTPUT_DIR <- args[2]
 } else {
@@ -201,7 +208,7 @@ if (!is.null(kegg_df) && nrow(kegg_df) > 0) {
     scale_color_gradient(low = "blue", high = "red", name = "-log10(p.adjust)") +
     scale_size(range = c(3, 8)) +
     labs(
-      title = "KEGG Enrichment Dotplot",
+      title = plot_title("KEGG Enrichment Dotplot"),
       x = "Gene Count",
       y = "KEGG Pathway"
     ) +
@@ -244,7 +251,7 @@ if (!is.null(kegg_df) && nrow(kegg_df) > 0) {
       width = 1000
     ) %>%
     layout(
-      title = list(text = "KEGG Enrichment Dotplot (Interactive)", x = 0.5),
+      title = list(text = plot_title("KEGG Enrichment Dotplot (Interactive)"), x = 0.5),
       xaxis = list(title = "Gene Count"),
       yaxis = list(title = "KEGG Pathway", categoryorder = "array", categoryarray = plot_df_plotly$Description_char),
       showlegend = TRUE
@@ -306,7 +313,7 @@ if (length(all_data) > 0) {
     geom_text(aes(x = 0.1, label = Description), hjust = 0, size = 3.5) +
     scale_fill_manual(name = 'Category', values = pal) +
     labs(
-      title = "Combined Pathway Enrichment",
+      title = plot_title("Combined Pathway Enrichment"),
       x = "-log10(Adjusted P-value)",
       y = NULL
     ) +
@@ -342,7 +349,7 @@ if (length(all_data) > 0) {
       width = 1200
     ) %>%
     layout(
-      title = list(text = "Combined Pathway Enrichment (Interactive)", x = 0.5),
+      title = list(text = plot_title("Combined Pathway Enrichment (Interactive)"), x = 0.5),
       xaxis = list(title = "-log10(Adjusted P-value)"),
       yaxis = list(title = "Pathway", tickfont = list(size = 10)),
       showlegend = TRUE,
