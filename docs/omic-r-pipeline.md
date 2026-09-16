@@ -168,6 +168,11 @@ differential_expression/significant_downregulated_genes.csv
 
 ## 最终产物与状态
 
+当前显示规则：火山图只标满足原着色阈值（FDR<0.05、|logFC|>=1）的基因，
+上调按FDR取前10个，下调全部标注（test5为5个）；计数文字使用logFC。
+PCA点为size=1.7、alpha=0.25，绘制顺序用固定种子42打散，避免固定组别总被画在最上层；
+样本坐标及分组保持不变。corrgram仍从全部受检验基因按FDR选前20个，未随火山图标注改变。
+
 | 目录 | 产物 |
 |---|---|
 | casestudy_R | volcano、corrgram_genes、PCA_panel、figure_ABCD，各 PNG/PDF |
@@ -212,11 +217,21 @@ R 非零退出、超时或缺产物都会报错。`de_success`、`enrichment_sta
   `test_existing_enrichment_uses_0/plots`、`plots/up`、`plots/down`。
   PNG 仅指定白色保存背景，避免透明背景在查看器中呈黑色，未改原图形配色/排序。
 
-限制须保留：没有在最后版本重新执行“真实取数→DE→在线 Enrichr→全部图”的单次端到端运行。
-各阶段已有实测，但不等于最后版本单次完整链路验收。没有逐份 PDF 的打开/渲染验收，
+- 用户随后授权完整重跑，`52d6955` 已于 2026-09-16 经真实 CLI 主入口完成
+  取数→R DE→在线 Enrichr→全部图→报告收集，没有 mock。
+  新 session：`webapp/sessions/ad_astrocyte_e2e_20260916T215810Z`。
+  normal=1000、AD=671；tested=18621、significant=13467；三组各1000基因，
+  45次 HTTP200；最终10张PNG、6个HTML，workflow耗时365.24秒。
+  证据位于该 session 的 `e2e_audit/`：调用参数/源码哈希、R环境、完整日志、返回值与验收JSON。
+  曾记录的“最终整链未执行”缺口对这组实际参数已补齐，不代表所有查询场景都已验收。
+
+限制须保留：此次有3条 Plotly `line.width does not currently support multiple values` 提示，
+绘图进程仍完成；没有逐份 PDF 的打开/渲染验收，
 也没有所有 HTML 的浏览器交互验收；已检查相关文件非空、HTML 本地资源存在，并抽查 PNG。
 独立提琴图 PNG、C/D 基因 CSV 不在原计划的具体产物清单内，当前未生成。
 性别专用图及完整性别分析验收未执行。
+该 cohort 的原有诊断为 caution（26个数据集中仅4个同时出现于两组；归一化前测序深度比约0.6605），
+完整流程运行成功不代表上述研究设计限制已解决。
 
 ### 只重画回归命令
 
