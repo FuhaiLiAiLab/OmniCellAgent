@@ -115,18 +115,19 @@ srun --jobid="$OMIC_JOB_ID" --overlap --ntasks=1 --cpus-per-task=2 \
 
 ### 3. 独立富集重画（读取 CSV，不请求 Enrichr）
 
-`OMIC_ENRICHMENT` 指向已有 enrichment_results。`comparison-name` 必须与组目录名称对应，
-空格会转为下划线。每次执行前重新查询并选择作业：
+`OMIC_ENRICHMENT` 指向已有 enrichment_results。直接使用原脚本的两个位置参数，
+分别对 all/up/down 调用；每次执行前重新查询并选择作业。例如 up：
 
 ```bash
 srun --jobid="$OMIC_JOB_ID" --overlap --ntasks=1 --cpus-per-task=2 \
   Rscript enrichment/kegg_simple.R \
-  "$OMIC_ENRICHMENT/Alzheimer's_Disease_all_regulated" "$OMIC_REDRAW/plots" \
-  --enrichment-root "$OMIC_ENRICHMENT" --comparison-name "Alzheimer's Disease" \
-  --bar-output-dir "$OMIC_REDRAW/enrichment_results/enrichment_plots"
+  "$OMIC_ENRICHMENT/Alzheimer's_Disease_up_regulated" "$OMIC_REDRAW/plots/up"
 ```
 
-旧的两个位置参数用法仍有效，但不生成扩展的 all/up/down 柱状图。
+down 输入改为对应 down_regulated 目录，输出改为 plots/down；all 输出为 plots。
+Python 也是按此方式调度三次；保留原脚本 KEGG 点图 top20 与综合柱图每类 top5。
+综合图包含 GO BP/CC/MF、KEGG、DisGeNET，不含 Reactome。已删除自行新增的
+Reactome/KEGG 单库 top10 柱图代码及其额外 CLI 参数；所有富集 CSV 保留。
 
 ## 输入与 DE CSV 接口
 
@@ -162,8 +163,8 @@ differential_expression/significant_downregulated_genes.csv
 
 上层保留独立截断规则：all 按 FDR 取最多 1000；up/down 在显著基因中按
 正/负 logFC 分组，各按 p_value 取最多 1000。all 不是 up/down 的拼接。
-富集 CSV 默认每库保存前 50 条，完整响应在 raw 中；绘图展示前 10 条，
-**不代表全部通过 FDR<0.05**。柱图 Count 为该条目的命中基因数。
+富集 CSV 默认每库保存前 50 条，完整响应在 raw 中；原绘图按前述 top20/top5 规则展示，
+**不代表全部通过 FDR<0.05**。图中 Count 为该条目的命中基因数。
 
 ## 最终产物与状态
 
@@ -172,12 +173,13 @@ differential_expression/significant_downregulated_genes.csv
 | casestudy_R | volcano、corrgram_genes、PCA_panel、figure_ABCD，各 PNG/PDF |
 | casestudy_R | violin_PC1_2groups.pdf（或 PC2）；没有独立提琴图 PNG |
 | casestudy_R | panel_A_labeled_genes.csv、panel_B_corrgram_genes.csv；没有独立 C/D 基因 CSV |
-| enrichment_results/enrichment_plots | Reactome_2022 / KEGG_2021_Human × all/up/down × PNG/PDF，共 12 份 |
-| plots | kegg_dotplot、pathway_combined_plot，各 PNG/HTML；HTML 依赖目录必须随文件保留 |
+| plots | all 的 kegg_dotplot、pathway_combined_plot，各 PNG/HTML |
+| plots/up、plots/down | 各组的同名 KEGG 点图、综合柱状图，各 PNG/HTML；依赖目录随 HTML 保留 |
 
 case-study 文件名前缀为 `DE_results_`。有充分数据且 COMPOSITE=true 时，报告收集
-12 张 PNG、2 个 HTML；`plot_paths` 为 HTML，`plots_for_report` 为 PNG 分类。
-旧 `volcano_plots` 分类保留为空，不再收集旧图。PDF/CSV 保留在 manifest 中，不在 PNG 分类内。
+10 张 PNG（case-study 4 + 富集 6）、6 个 HTML；`plot_paths` 为 HTML，`plots_for_report` 为 PNG 分类。
+旧 `volcano_plots`、`enrichment_bar_plots` 分类保留为空，不再收集已取消的图。
+case-study 的 PDF/CSV 保留在 manifest 中，不在 PNG 分类内。原富集脚本不输出 PDF。
 
 R 非零退出、超时或缺产物都会报错。`de_success`、`enrichment_status`、
 `de_plots_status`、`enrichment_plot_status` 分别表示各阶段，不只看 `kegg_success`
@@ -198,12 +200,17 @@ R 非零退出、超时或缺产物都会报错。`de_success`、`enrichment_sta
 - 2026-09-16 绘图回归：`2026-09-16-panel-audit/regression.log`，19 passed，231.60 秒。
   真实 A/B 检查观察实际火山图标注层及 corrgram 标签；比较基因身份、顺序、输入表达矩阵、
   DE 数值和此前交付 CSV。证据在该目录 `regression/test_saved_ad_results_render_c0/`。
-- 后续发现并修正富集柱图方向，明确 `orientation="y"`，注释改为 FDR；
+- 历史记录：曾修正自行新增的富集柱图方向，明确 `orientation="y"`，注释改为 FDR；
   `2026-09-16-enrichment-display/pytest.log` 为 11 passed，17.69 秒。
-  当前可读富集图在该目录 `bars/`；早期图因方向错误不再推荐使用。
-- Task 4 最终整套绘图回归日志：`2026-09-16-panel-audit/task4-final.log`。
+  用户随后要求仅复用原 R 绘图，该新增实现及其修复现已撤回，bars/ 不作为当前交付图。
+- 切换为原 R 绘图之前的 Task 4 回归日志：`2026-09-16-panel-audit/task4-final.log`。
   最终输出 `19 passed in 230.84s`，0 failed、0 skipped，无 warning 汇总；
   已包含柱图方向修复和 A/B 内容核对。该套件不运行取数、在线请求或 DE 重算。
+- 当前原 R 绘图三组调度验证：`2026-09-16-panel-audit/original-kegg-final.log`，
+  `24 passed in 32.85s`，无失败、跳过或 warning 汇总。45 个富集输入文件内容及修改时间未变。
+  原绘图逻辑复用于 all/up/down，分组输出放在同名产物目录的
+  `test_existing_enrichment_uses_0/plots`、`plots/up`、`plots/down`。
+  PNG 仅指定白色保存背景，避免透明背景在查看器中呈黑色，未改原图形配色/排序。
 
 限制须保留：没有在最后版本重新执行“真实取数→DE→在线 Enrichr→全部图”的单次端到端运行。
 各阶段已有实测，但不等于最后版本单次完整链路验收。没有逐份 PDF 的打开/渲染验收，

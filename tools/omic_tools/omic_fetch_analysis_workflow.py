@@ -31,7 +31,7 @@ from donor_sampling import sample_known_donor_cohort
 from query_value_lists import save_query_value_lists
 from subprocess_r import run_r_script
 from de_results_io import read_de_results
-from r_plotting import read_plot_manifest, publish_plot_files, collect_plot_outputs
+from r_plotting import render_enrichment_plots, collect_plot_outputs
 
 import sys
 import os
@@ -39,7 +39,6 @@ import time
 import gc
 import json
 import zipfile
-import tempfile
 from pathlib import Path
 from difflib import get_close_matches
 import numpy as np
@@ -1067,37 +1066,12 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         
         try:
             enrichment_dir = analysis_paths.get('enrichment_results_dir', '')
-            # Sanitize comparison name (spaces to underscores) to match enrichment directory naming
-            sanitized_comparison = comparison_name.replace(' ', '_')
-            enrichment_all_regulated = os.path.join(enrichment_dir, f"{sanitized_comparison}_all_regulated")
-            plot_dir = os.path.join(session_dir, "plots")
-            os.makedirs(plot_dir, exist_ok=True)
-            
-            kegg_script_path = get_path('enrichment.kegg_script', absolute=True)
-            
-            if os.path.exists(enrichment_all_regulated):
-                print(f"[KEGG] Running R script on: {enrichment_all_regulated}")
-                final_manifest = Path(plot_dir) / "plot_manifest.json"
-                final_manifest.unlink(missing_ok=True)
-                with tempfile.TemporaryDirectory(prefix=".kegg-", dir=session_dir) as staging:
-                    staged_plots = Path(staging) / "plots"
-                    staged_bars = Path(staging) / "enrichment_plots"
-                    r_result = run_r_script(kegg_script_path, [enrichment_all_regulated, str(staged_plots),
-                        "--enrichment-root", enrichment_dir, "--comparison-name", comparison_name,
-                        "--bar-output-dir", str(staged_bars)], timeout=r_timeout)
-                    manifest = read_plot_manifest(staged_plots / "plot_manifest.json",
-                                                  [staged_plots, staged_bars], allow_empty=True)
-                    current_enrichment_plot_files = publish_plot_files(manifest["files"], {
-                        staged_plots: Path(plot_dir),
-                        staged_bars: Path(enrichment_dir) / "enrichment_plots",
-                    })
-                    manifest["files"] = current_enrichment_plot_files
-                    final_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-                    enrichment_plot_status = manifest["status"]
-                print(f"[KEGG] R script completed: {r_result}")
-                kegg_success = enrichment_plot_status == "success"
-            else:
-                raise FileNotFoundError(f"Enrichment directory not found: {enrichment_all_regulated}")
+            manifest = render_enrichment_plots(
+                get_path('enrichment.kegg_script', absolute=True), session_dir,
+                enrichment_dir, comparison_name, timeout=r_timeout, runner=run_r_script)
+            current_enrichment_plot_files = manifest["files"]
+            enrichment_plot_status = manifest["status"]
+            kegg_success = enrichment_plot_status == "success"
         except Exception as e:
             enrichment_plot_status = "failed"
             enrichment_plot_error = f"{type(e).__name__}: {e}"

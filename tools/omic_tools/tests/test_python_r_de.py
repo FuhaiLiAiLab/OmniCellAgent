@@ -222,6 +222,6 @@ def test_workflow_routes_real_r_and_reports_analysis_status(frames, tmp_path, mo
         report = result["plots_for_report"]
         assert report["volcano_plots"] == []
         assert len(report["case_study_plots"]) >= 3
-        assert len(report["enrichment_bar_plots"]) == 6
-        assert len(report["kegg_pathway_plots"]) == 2
+        assert report["enrichment_bar_plots"] == []
+        assert len(report["kegg_pathway_plots"]) == 6
         assert all((tmp_path / p).is_file() for p in report["all_plots"])

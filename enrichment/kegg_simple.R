@@ -7,7 +7,6 @@
 #   Rscript kegg_simple.R /path/to/enrichment/results /path/to/output
 #
 
-# Optional: --enrichment-root PATH --comparison-name TEXT --bar-output-dir PATH
 # Only reads existing enrichment results; never performs enrichment or DE.
 # Load required libraries (no Bioconductor)
 library(ggplot2)
@@ -21,20 +20,6 @@ library(ragg)
 
 # Parse command line arguments
 args <- commandArgs(trailingOnly = TRUE)
-extra <- list()
-positional <- character()
-while (length(args)) {
-  if (startsWith(args[1], "--")) {
-    if (!args[1] %in% c("--enrichment-root", "--comparison-name", "--bar-output-dir") || length(args) < 2)
-      stop("Unknown option or missing option value: ", args[1])
-    extra[[substring(args[1], 3)]] <- args[2]
-    args <- args[-c(1, 2)]
-  } else {
-    positional <- c(positional, args[1])
-    args <- args[-1]
-  }
-}
-args <- positional
 if (length(args) > 2) stop("Expected at most two positional paths")
 
 # Configuration - File paths
@@ -66,14 +51,12 @@ options(error = function() {
   write_manifest("failed", geterrmessage())
   quit(save = "no", status = 1, runLast = FALSE)
 })
-if (length(extra) && !all(c("enrichment-root", "comparison-name", "bar-output-dir") %in% names(extra)))
-  stop("Supply all three optional enrichment bar plot arguments")
 record_file <- function(path) {
   generated_files <<- unique(c(generated_files, normalizePath(path, mustWork = TRUE)))
 }
 save_png <- function(path, plot, width = 12, height = 10) {
   ggsave(path, plot = plot, device = ragg::agg_png, width = width, height = height,
-         units = "in", dpi = 300)
+         units = "in", dpi = 300, bg = "white")
   record_file(path)
 }
 save_widget <- function(widget, path) {
@@ -99,13 +82,9 @@ read_status <- function(directory) {
   }
   status
 }
-# Validate every participating group before rendering any output.
-root_status <- read_status(if (length(extra)) extra[["enrichment-root"]] else dirname(BASE_PATH))
+# Each invocation renders the original plots for one input group.
+root_status <- read_status(dirname(BASE_PATH))
 read_status(BASE_PATH)
-if (length(extra)) for (direction in c("all", "up", "down")) {
-  read_status(file.path(extra[["enrichment-root"]], paste0(
-    gsub(" ", "_", extra[["comparison-name"]], fixed = TRUE), "_", direction, "_regulated")))
-}
 
 cat("Using enrichment results path:", BASE_PATH, "\n")
 cat("Using output directory:", OUTPUT_DIR, "\n")
@@ -382,35 +361,5 @@ if (length(all_data) > 0) {
   cat("No data available for combined plot\n")
 }
 
-if (length(extra)) {
-  bar_dir <- extra[["bar-output-dir"]]
-  dir.create(bar_dir, recursive = TRUE, showWarnings = FALSE)
-  database_names <- c(Reactome_2022 = "Reactome Pathways", KEGG_2021_Human = "KEGG Pathways")
-  direction_names <- c(all = "All", up = "Upregulated", down = "Downregulated")
-  for (direction in names(direction_names)) for (database in names(database_names)) {
-    input <- file.path(extra[["enrichment-root"]], paste0(
-      gsub(" ", "_", extra[["comparison-name"]], fixed = TRUE), "_", direction, "_regulated"),
-      paste0(database, "_results.csv"))
-    df <- convert_enrichment_file(input)
-    if (is.null(df)) next
-    df <- df %>% arrange(p_adjust) %>% head(10) %>% mutate(
-      score = safe_logp(p_adjust), row = rev(seq_len(n())))
-    labels <- ifelse(nchar(df$Term) > 60, paste0(substr(df$Term, 1, 57), "..."), df$Term)
-    plot <- ggplot(df, aes(x = score, y = row)) +
-      geom_col(width = 0.65, orientation = "y", fill = "#9e9ac8", colour = "#6a51a3", alpha = 0.7) +
-      geom_text(aes(x = score / 2, label = paste("Count:", Count)), colour = "#3f007d", fontface = "bold") +
-      geom_text(aes(x = score * 1.05, label = sprintf("FDR=%.2e", p_adjust)), hjust = 0, colour = "#4a4a4a") +
-      scale_y_continuous(breaks = df$row, labels = labels) +
-      scale_x_continuous(expand = expansion(mult = c(0, 0.25))) +
-      labs(title = paste0("Top 10 Enriched ", database_names[[database]], " Terms\n",
-                          direction_names[[direction]], " Genes - ", extra[["comparison-name"]]),
-           x = "-log10(Adjusted P-Value)", y = "Pathway") + theme_classic()
-    stem <- file.path(bar_dir, paste0(database, "_", direction, "_regulated"))
-    height <- min(12, 2 + 0.4 * nrow(df))
-    save_png(paste0(stem, ".png"), plot, height = height)
-    ggsave(paste0(stem, ".pdf"), plot, device = grDevices::pdf, width = 12, height = height)
-    record_file(paste0(stem, ".pdf"))
-  }
-}
 write_manifest(if (length(generated_files)) "success" else "empty")
 cat("\n=== KEGG visualization complete ===\n")

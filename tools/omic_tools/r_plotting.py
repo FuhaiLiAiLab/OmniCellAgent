@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import shutil
+import tempfile
 
 if __package__:
     from .subprocess_r import run_r_script
@@ -71,6 +72,36 @@ def render_analysis_plots(r_script, session_dir, *, ref_label, alt_label,
     return read_plot_manifest(manifest, [out, volcano])
 
 
+def render_enrichment_plots(r_script, session_dir, enrichment_dir, comparison_name,
+                            *, timeout=3600, runner=None):
+    """Run the existing two-argument R script for all/up/down separately."""
+    runner = run_r_script if runner is None else runner
+    session = Path(session_dir).resolve()
+    output = session / "plots"
+    output.mkdir(parents=True, exist_ok=True)
+    final_manifest = output / "plot_manifest.json"
+    final_manifest.unlink(missing_ok=True)
+    root = Path(enrichment_dir).resolve()
+    prefix = comparison_name.replace(" ", "_")
+    inputs = {group: root / f"{prefix}_{group}_regulated" for group in ("all", "up", "down")}
+    for path in inputs.values():
+        if not path.is_dir():
+            raise FileNotFoundError(f"Enrichment input directory not found: {path}")
+    with tempfile.TemporaryDirectory(prefix=".kegg-", dir=session) as staging:
+        staged = Path(staging) / "plots"
+        files, groups = [], {}
+        for group, source in inputs.items():
+            destination = staged if group == "all" else staged / group
+            runner(str(r_script), [str(source), str(destination)], timeout=timeout)
+            manifest = read_plot_manifest(destination / "plot_manifest.json", [destination], allow_empty=True)
+            groups[group] = manifest["status"]
+            files.extend(manifest["files"])
+        published = publish_plot_files(files, {staged: output})
+    manifest = {"status": "success" if published else "empty", "files": published, "groups": groups}
+    final_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest
+
+
 def collect_plot_outputs(session_dir, de_files, enrichment_files):
     """Collect only declared figures, excluding widget assets and old files."""
     root = Path(session_dir).resolve()
@@ -83,16 +114,18 @@ def collect_plot_outputs(session_dir, de_files, enrichment_files):
         parts = relative.parts
         if len(parts) == 2 and parts[0] == "casestudy_R":
             category, kind = "case_study_plots", "case_study"
-        elif len(parts) == 3 and parts[:2] == ("enrichment_results", "enrichment_plots"):
-            category, kind = "enrichment_bar_plots", "enrichment_bar"
-        elif len(parts) == 2 and parts[0] == "plots":
+        elif (parts[0] == "plots" and
+              (len(parts) == 2 or (len(parts) == 3 and parts[1] in ("up", "down"))) and
+              path.stem in ("kegg_dotplot", "pathway_combined_plot")):
             category, kind = "kegg_pathway_plots", "kegg_pathway"
         else:
             continue
         if path.suffix == ".html":
             html_paths.append(str(path))
         if path.suffix == ".png":
-            report[category].append({"name": path.stem.replace("_", " ").title(),
+            group = parts[1] if parts[0] == "plots" and len(parts) == 3 else "all"
+            name = path.stem.replace("_", " ").title()
+            report[category].append({"name": f"{group}: {name}" if parts[0] == "plots" else name,
                 "filename": path.name, "relative_path": relative.as_posix(),
                 "absolute_path": str(path), "type": kind, "format": "png"})
             report["all_plots"].append(relative.as_posix())
