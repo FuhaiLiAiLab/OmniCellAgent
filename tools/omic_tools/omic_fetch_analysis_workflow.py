@@ -31,6 +31,7 @@ from donor_sampling import sample_known_donor_cohort
 from query_value_lists import save_query_value_lists
 from subprocess_r import run_r_script
 from de_results_io import read_de_results
+from r_plotting import read_plot_manifest, publish_plot_files, collect_plot_outputs
 
 import sys
 import os
@@ -873,6 +874,9 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     enrichment_success = False
     enrichment_status = "not_run"
     enrichment_error = None
+    de_plots_status = "not_run" if enable_plotting else "skipped"
+    de_plots_error = None
+    de_plot_files = []
     analysis_paths = None
     top_genes_by_fdr = []
     cohort_diagnostics = None
@@ -976,6 +980,9 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                     de_success = True
                     enrichment_success = data_and_analysis_dict["enrichment_success"]
                     enrichment_status = data_and_analysis_dict["enrichment_status"]
+                    de_plots_status = data_and_analysis_dict["de_plots_status"]
+                    de_plots_error = data_and_analysis_dict["de_plots_error"]
+                    de_plot_files = data_and_analysis_dict["de_plot_files"]
                     analysis_paths = {
                         "differential_expression_dir": data_and_analysis_dict.get('differential_expression_dir'),
                         "enrichment_results_dir": data_and_analysis_dict.get('enrichment_results_dir'),
@@ -1047,7 +1054,11 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     # STEP 5: KEGG Enrichment Plotting (via R script)
     # ===========================================================================
     kegg_success = False
-    current_kegg_files = []
+    enrichment_plot_status = "not_run" if enable_plotting else "skipped"
+    enrichment_plot_error = None
+    current_enrichment_plot_files = []
+    if enable_plotting and enrichment_status in ("empty", "skipped"):
+        enrichment_plot_status = "empty"
     
     if enable_plotting and analysis_success and enrichment_status == "success" and analysis_paths:
         print(f"\n{'='*70}")
@@ -1066,20 +1077,31 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
             
             if os.path.exists(enrichment_all_regulated):
                 print(f"[KEGG] Running R script on: {enrichment_all_regulated}")
+                final_manifest = Path(plot_dir) / "plot_manifest.json"
+                final_manifest.unlink(missing_ok=True)
                 with tempfile.TemporaryDirectory(prefix=".kegg-", dir=session_dir) as staging:
-                    r_result = run_r_script(kegg_script_path, [enrichment_all_regulated, staging], timeout=r_timeout)
-                    expected = [Path(staging) / name for name in ("kegg_dotplot.png", "pathway_combined_plot.png")]
-                    if not any(path.is_file() and path.stat().st_size > 0 for path in expected):
-                        raise FileNotFoundError("R exited without producing a KEGG/pathway PNG")
-                    for artifact in Path(staging).iterdir():
-                        if artifact.is_file():
-                            os.replace(artifact, Path(plot_dir) / artifact.name)
-                            current_kegg_files.append(artifact.name)
+                    staged_plots = Path(staging) / "plots"
+                    staged_bars = Path(staging) / "enrichment_plots"
+                    r_result = run_r_script(kegg_script_path, [enrichment_all_regulated, str(staged_plots),
+                        "--enrichment-root", enrichment_dir, "--comparison-name", comparison_name,
+                        "--bar-output-dir", str(staged_bars)], timeout=r_timeout)
+                    manifest = read_plot_manifest(staged_plots / "plot_manifest.json",
+                                                  [staged_plots, staged_bars], allow_empty=True)
+                    current_enrichment_plot_files = publish_plot_files(manifest["files"], {
+                        staged_plots: Path(plot_dir),
+                        staged_bars: Path(enrichment_dir) / "enrichment_plots",
+                    })
+                    manifest["files"] = current_enrichment_plot_files
+                    final_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+                    enrichment_plot_status = manifest["status"]
                 print(f"[KEGG] R script completed: {r_result}")
-                kegg_success = True
+                kegg_success = enrichment_plot_status == "success"
             else:
-                print(f"[KEGG] Enrichment directory not found: {enrichment_all_regulated}")
+                raise FileNotFoundError(f"Enrichment directory not found: {enrichment_all_regulated}")
         except Exception as e:
+            enrichment_plot_status = "failed"
+            enrichment_plot_error = f"{type(e).__name__}: {e}"
+            current_enrichment_plot_files = []
             print(f"[KEGG] Plotting failed: {str(e)}")
     else:
         print(f"\n{'='*70}")
@@ -1087,8 +1109,10 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         print(f"{'='*70}")
         if not enable_plotting:
             print("  Reason: disabled by parameter")
-        elif not analysis_success:
+        elif not de_success:
             print("  Reason: differential expression analysis did not complete")
+        elif enrichment_status != "success":
+            print(f"  Reason: enrichment status is {enrichment_status}")
     
     times['kegg_end'] = time.time()
     
@@ -1125,73 +1149,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     # Collect all plot paths for UI display and report embedding
     # Returns both absolute paths and relative paths for markdown embedding
     # ===========================================================================
-    plot_paths = []  # Absolute paths for backward compatibility
-    plots_for_report = {
-        "volcano_plots": [],
-        "enrichment_bar_plots": [],
-        "kegg_pathway_plots": [],
-        "all_plots": []
-    }
-    
-    # Collect volcano plots
-    volcano_dir = os.path.join(session_dir, "volcano_plots")
-    if enable_plotting and de_success and os.path.exists(volcano_dir):
-        for f in sorted(os.listdir(volcano_dir)):
-            abs_path = os.path.join(volcano_dir, f)
-            rel_path = os.path.join("volcano_plots", f)
-            if f.endswith('.html'):
-                plot_paths.append(abs_path)
-            if f.endswith('.png'):
-                plots_for_report["volcano_plots"].append({
-                    "name": f.replace('.png', '').replace('_', ' ').title(),
-                    "filename": f,
-                    "relative_path": rel_path,
-                    "absolute_path": abs_path,
-                    "type": "volcano",
-                    "format": "png"
-                })
-                plots_for_report["all_plots"].append(rel_path)
-    
-    # Collect enrichment bar plots from enrichment_results/enrichment_plots
-    enrichment_plots_dir = os.path.join(session_dir, "enrichment_results", "enrichment_plots")
-    if enable_plotting and enrichment_status == "success" and os.path.exists(enrichment_plots_dir):
-        for f in sorted(os.listdir(enrichment_plots_dir)):
-            abs_path = os.path.join(enrichment_plots_dir, f)
-            rel_path = os.path.join("enrichment_results", "enrichment_plots", f)
-            if f.endswith('.html'):
-                plot_paths.append(abs_path)
-            if f.endswith('.png'):
-                # Parse plot type from filename (e.g., KEGG_2021_Human_all_regulated.png)
-                plot_name = f.replace('.png', '').replace('_', ' ')
-                plots_for_report["enrichment_bar_plots"].append({
-                    "name": plot_name,
-                    "filename": f,
-                    "relative_path": rel_path,
-                    "absolute_path": abs_path,
-                    "type": "enrichment_bar",
-                    "format": "png"
-                })
-                plots_for_report["all_plots"].append(rel_path)
-    
-    # Collect KEGG pathway plots (dotplot, lollipop, combined)
-    kegg_plot_dir = os.path.join(session_dir, "plots")
-    if enable_plotting and kegg_success and os.path.exists(kegg_plot_dir):
-        for f in sorted(current_kegg_files):
-            abs_path = os.path.join(kegg_plot_dir, f)
-            rel_path = os.path.join("plots", f)
-            if f.endswith('.html'):
-                plot_paths.append(abs_path)
-            if f.endswith('.png'):
-                plot_name = f.replace('.png', '').replace('_', ' ').title()
-                plots_for_report["kegg_pathway_plots"].append({
-                    "name": plot_name,
-                    "filename": f,
-                    "relative_path": rel_path,
-                    "absolute_path": abs_path,
-                    "type": "kegg_pathway",
-                    "format": "png"
-                })
-                plots_for_report["all_plots"].append(rel_path)
+    plot_paths, plots_for_report = collect_plot_outputs(session_dir, de_plot_files, current_enrichment_plot_files)
     
     # Print summary
     print(f"[Plots] Collected plots for report:")
@@ -1220,7 +1178,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     if label_fallback_message:
         success_message = f"{success_message}. NOTE: {label_fallback_message}"
     return {
-        "success": analysis_success if de_gated else True,
+        "success": (analysis_success and de_plots_status != "failed" and enrichment_plot_status != "failed") if de_gated else True,
         "session_dir": session_dir,
         "data_type": "single-cell RNA-seq (scRNA-seq) cohort",
         "label_column": actual_label,
@@ -1246,6 +1204,11 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         "cohort_diagnostics": cohort_diagnostics,
         "cohort_verdict": (cohort_diagnostics or {}).get("verdict"),
         "kegg_success": kegg_success,
+        "plot_success": (de_plots_status == "success" and enrichment_plot_status in ("success", "empty")) if enable_plotting and de_gated else None,
+        "de_plots_status": de_plots_status,
+        "de_plots_error": de_plots_error,
+        "enrichment_plot_status": enrichment_plot_status,
+        "enrichment_plot_error": enrichment_plot_error,
         "analysis_paths": analysis_paths,
         "plot_paths": plot_paths,  # HTML paths for backward compatibility
         "plots_for_report": plots_for_report,  # Categorized plots with relative paths for embedding

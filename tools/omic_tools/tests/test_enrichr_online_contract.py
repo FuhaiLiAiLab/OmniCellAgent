@@ -161,7 +161,7 @@ def test_empty_current_enrichment_does_not_return_historical_plots(frames, tmp_p
                         (x.copy(), y.copy(), meta.copy(), {}, True, "disease", "", {"normal": 0, "AD": 1}))
     monkeypatch.setattr(requests, "post", lambda *a, **k: response({"userListId": 123}))
     monkeypatch.setattr(requests, "get", lambda *a, **k: response({LIBRARY: []}))
-    monkeypatch.setattr(analysis, "create_volcano_plot", lambda *a, **k: None)
+    monkeypatch.setattr(analysis, "render_analysis_plots", lambda *a, **k: {"status": "success", "files": []})
     monkeypatch.setattr(workflow, "run_r_script", lambda *a, **k: "")
     old = tmp_path / "enrichment_results/enrichment_plots/KEGG_2021_Human_all_regulated.png"
     old.parent.mkdir(parents=True)

@@ -6,22 +6,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-# Set matplotlib to use non-interactive backend BEFORE importing pyplot
-# This prevents 'main thread is not in main loop' errors in agent context
-import matplotlib
-matplotlib.use('Agg')
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-import requests
 import json
-import time
-from joblib import Parallel, delayed
-from concurrent.futures import ThreadPoolExecutor
-import warnings
-
-# Suppress matplotlib threading warnings for parallel plotting
-warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
 
 # Add project root to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -29,17 +14,26 @@ from utils.path_config import get_path
 if __package__:
     from .subprocess_r import run_r_script
     from .de_results_io import DE_RESULT_DTYPES, read_de_results
+    from .r_plotting import render_analysis_plots
     from .enrichr_client import (EnrichrError, fetch_enrichment, read_enrichment_results,
                                  write_status, record_enrichment_failure, archive_enrichment_plots)
 else:
     from subprocess_r import run_r_script
     from de_results_io import DE_RESULT_DTYPES, read_de_results
+    from r_plotting import render_analysis_plots
     from enrichr_client import (EnrichrError, fetch_enrichment, read_enrichment_results,
                                 write_status, record_enrichment_failure, archive_enrichment_plots)
 
 BMG_DIR = get_path('external.biomedgraphica_dir', absolute=True)
 # Use relative path but resolve it once at module load time to avoid issues with parallel processes
 OUTPUT_DIR = get_path('data.dataset_outputs', absolute=True, create=True)
+
+
+def _analysis_r_script():
+    try:
+        return get_path("analysis.r_script", absolute=True)
+    except KeyError:
+        return str(Path(__file__).with_name("run_casestudy.R"))
 
 
 def create_directories_parallel(directories):
@@ -185,87 +179,26 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         r_timeout=r_timeout,
     )
 
-    # Create volcano plots with different thresholds in parallel
-    # Define volcano plot parameters
-    volcano_configs = [
-        {
-            'save_path': os.path.join(volcano_dir, "volcano_plot.png"),
-            'p_value_threshold': 0.001,
-            'log2fc_threshold': 1.5,
-            'plot_title': "Differential Expression: Disease vs Control",
-            'highlight_top_n': 10
-        },
-        {
-            'save_path': os.path.join(volcano_dir, "volcano_plot_permissive.png"),
-            'p_value_threshold': 0.025,
-            'log2fc_threshold': 0.75,
-            'plot_title': "Differential Expression: Disease vs Control (Permissive)",
-            'highlight_top_n': 10
-        }
-    ]
-
-    # Run volcano plots, enrichment analysis, and optionally plotting sequentially
-    # (parallel matplotlib causes 'main thread is not in main loop' errors)
-    def create_volcano_plots():
-        print("Creating volcano plots...")
-        for config in volcano_configs:
-            create_volcano_plot(
-                result_df,
-                config['p_value_threshold'],
-                config['log2fc_threshold'],
-                config['save_path'],
-                config['plot_title'],
-                config['highlight_top_n'],
-                diagnostics_text=diagnostics_text,
-            )
-        return "Volcano plots completed"
-    
-    def run_enrichment_analysis():
-        return perform_enrichment_analysis(
-            significant_genes=significant_genes, 
-            disease_name=disease_name, 
-            enrich_output_dir=enrich_output_dir,
-            fast_mode=False,
-            pathway_dbs=enrichment_databases,
-            disease_dbs=[] if enrichment_databases is not None else None,
-            request_timeout=enrichment_timeout,
-        )
-    
-    def run_enrichment_plotting():
-        if enable_plotting:
-            # Small delay to ensure enrichment analysis starts first
-            time.sleep(1)  # Reduced from 2 seconds
-            return plot_selected_enrichment(
-                disease_name=disease_name, 
-                regulation_type=["all", "up", "down"], 
-                databases=["Reactome_2022", "KEGG_2021_Human"],
-                enrich_top_n=10,
-                plot_enrich_dir=plot_enrich_dir,
-                enrich_results_dir=enrich_output_dir  # Pass the enrichment results directory
-            )
-        else:
-            return "Enrichment plotting skipped for speed"
-    
-    # Run tasks sequentially to avoid matplotlib threading issues
-    # (nested parallelism with matplotlib causes 'main thread is not in main loop' errors)
-    print("Running analysis tasks sequentially...")
-    
-    # Execute volcano plots first
-    if enable_plotting:
-        volcano_result = create_volcano_plots()
-        print(f"  - Volcano plots: {volcano_result}")
-    
-    # Execute enrichment analysis
-    enrichment_results = run_enrichment_analysis()
+    enrichment_results = perform_enrichment_analysis(
+        significant_genes=significant_genes, disease_name=disease_name,
+        enrich_output_dir=enrich_output_dir, fast_mode=False,
+        pathway_dbs=enrichment_databases,
+        disease_dbs=[] if enrichment_databases is not None else None,
+        request_timeout=enrichment_timeout,
+    )
     enrichment_status = json.loads((Path(enrich_output_dir) / "enrichment_status.json").read_text(encoding="utf-8"))["status"]
     print(f"  - Enrichment analysis: {enrichment_status}")
-    
-    # Execute enrichment plotting if enabled
-    if enable_plotting and enrichment_status == "success":
-        plotting_result = run_enrichment_plotting()
-        print(f"  - Enrichment plotting: {plotting_result}")
-    
-    print(f"\nAll analysis tasks completed successfully!")
+    de_plots = {"status": "skipped", "files": [], "error": None}
+    if enable_plotting:
+        try:
+            de_plots = render_analysis_plots(_analysis_r_script(), base_dir,
+                                             ref_csv=Path(base_dir).resolve() / f"foranalysis_combined_normal_df_{disease_name}.csv",
+                                             alt_csv=Path(base_dir).resolve() / f"foranalysis_combined_disease_df_{disease_name}.csv",
+                                             input_scale=input_scale,
+                                             ref_label=ref_label, alt_label=alt_label, timeout=r_timeout)
+        except Exception as error:
+            de_plots = {"status": "failed", "files": [], "error": f"{type(error).__name__}: {error}"}
+            print(f"[DE plots] Failed; DE and enrichment results are preserved: {error}")
     
     # Clean up large DataFrames that are no longer needed
     del combined_disease_df, combined_normal_df, significant_genes, result_df
@@ -280,6 +213,9 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         "enrichment_plots_dir": plot_enrich_dir,
         "enrichment_status": enrichment_status,
         "enrichment_success": enrichment_status in ("success", "empty"),
+        "de_plots_status": de_plots["status"],
+        "de_plot_files": de_plots["files"],
+        "de_plots_error": de_plots.get("error"),
     }
 
     return data_and_analysis_dict
@@ -310,11 +246,7 @@ def perform_unpaired_differential_expression(disease_df, normal_df,
     normal_df.to_csv(ref_csv, index=False, encoding="utf-8")
     disease_df.to_csv(alt_csv, index=False, encoding="utf-8")
 
-    try:
-        r_script = get_path("analysis.r_script", absolute=True)
-    except KeyError:
-        # Existing local configs need not be rewritten merely to use this checkout.
-        r_script = str(Path(__file__).with_name("run_casestudy.R"))
+    r_script = _analysis_r_script()
 
     filenames = (
         "unpaired_differential_expression_results.csv",
@@ -366,238 +298,6 @@ def perform_unpaired_differential_expression(disease_df, normal_df,
             "down": tables[filenames[4]]}, result_df
 
 
-def create_volcano_plot(result_df, p_value_threshold=0.025, log2fc_threshold=1.5,
-                         save_path=None, plot_title=None, highlight_top_n=50,
-                         diagnostics_text: str = ""):
-    """
-    Create a volcano plot from differential expression results.
-    Saves both static PNG and interactive HTML (plotly) versions.
-    
-    Args:
-        result_df (pd.DataFrame): DataFrame with differential expression results.
-        p_value_threshold (float): FDR threshold for significance.
-        log2fc_threshold (float): Log2 fold change threshold for biological significance.
-        save_path (str): Path to save the plot (PNG). HTML will be saved alongside.
-        plot_title (str): Title for the plot.
-        highlight_top_n (int): Number of top genes to highlight by name.
-        
-    Returns:
-        None
-    """
-    # Make a copy to avoid modifying original
-    plot_df = result_df.copy()
-    
-    # Transform p-values to -log10 scale
-    plot_df['neg_log10_fdr'] = -np.log10(plot_df['FDR'])
-    
-    # Add a column to categorize genes
-    plot_df['de_category'] = 'Not Significant'
-    
-    # Upregulated genes (log2FC > threshold and FDR < p_value_threshold)
-    plot_df.loc[(plot_df['log2_fold_change'] > log2fc_threshold) & 
-                  (plot_df['FDR'] < p_value_threshold), 'de_category'] = 'Upregulated'
-    
-    # Downregulated genes (log2FC < -threshold and FDR < p_value_threshold)
-    plot_df.loc[(plot_df['log2_fold_change'] < -log2fc_threshold) & 
-                  (plot_df['FDR'] < p_value_threshold), 'de_category'] = 'Downregulated'
-    
-    # Count the number of genes in each category for the title
-    n_up = sum(plot_df['de_category'] == 'Upregulated')
-    n_down = sum(plot_df['de_category'] == 'Downregulated')
-    
-    # =========================================================================
-    # STATIC MATPLOTLIB PLOT (PNG)
-    # =========================================================================
-    # Set up the figure with better aspect ratio for volcano plots
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
-    # Create a color map for the categories
-    color_map = {'Upregulated': 'red', 'Downregulated': 'blue', 'Not Significant': 'grey'}
-    
-    # Create a scatter plot
-    sns.scatterplot(
-        data=plot_df,
-        x='log2_fold_change',
-        y='neg_log10_fdr',
-        hue='de_category',
-        palette=color_map,
-        alpha=0.6,
-        s=50,
-        edgecolor=None,
-        linewidth=0,
-        ax=ax
-    )
-    
-    # Add threshold lines
-    ax.axhline(y=-np.log10(p_value_threshold), linestyle='--', color='black', alpha=0.3)
-    ax.axvline(x=log2fc_threshold, linestyle='--', color='black', alpha=0.3)
-    ax.axvline(x=-log2fc_threshold, linestyle='--', color='black', alpha=0.3)
-    
-    # Identify top significant genes to label
-    sig_genes = plot_df[plot_df['FDR'] < p_value_threshold].copy()
-    sig_genes['importance'] = sig_genes['neg_log10_fdr'] * abs(sig_genes['log2_fold_change'])
-    
-    # Get top genes to label (limit to fewer for cleaner plot)
-    n_labels = min(highlight_top_n, 12)  # Limit labels to avoid crowding
-    top_genes = sig_genes.sort_values('importance', ascending=False).head(n_labels)
-    
-    # Calculate axis limits first (needed for label constraints)
-    max_y = min(np.nanmax(plot_df['neg_log10_fdr']), 50)
-    x_max = min(np.nanmax(abs(plot_df['log2_fold_change'])), 10)
-    
-    # Set axis limits early so adjustText respects them
-    ax.set_xlim(-x_max * 1.1, x_max * 1.1)
-    ax.set_ylim(0, max_y * 1.1)
-    
-    # Simple annotation approach - more reliable than adjustText for this use case
-    # Place labels with slight offset and white background for readability
-    for i, (_, gene) in enumerate(top_genes.iterrows()):
-        x_pos = gene['log2_fold_change']
-        y_pos = gene['neg_log10_fdr']
-        
-        # Determine text alignment based on position
-        if x_pos > 0:
-            ha = 'left'
-            x_offset = 0.15
-        else:
-            ha = 'right'
-            x_offset = -0.15
-        
-        # Stagger y offset slightly to reduce overlap
-        y_offset = 0.3 + (i % 3) * 0.2
-        
-        ax.annotate(
-            gene['Name'],
-            xy=(x_pos, y_pos),
-            xytext=(x_pos + x_offset, y_pos + y_offset),
-            fontsize=7,
-            ha=ha,
-            va='bottom',
-            fontweight='normal',
-            bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', boxstyle='round,pad=0.15'),
-            arrowprops=dict(arrowstyle='-', color='gray', alpha=0.5, lw=0.5,
-                          connectionstyle='arc3,rad=0.1')
-        )
-        
-    # Set plot labels and title
-    ax.set_xlabel('log2 Fold Change', fontsize=12)
-    ax.set_ylabel('-log10(FDR)', fontsize=12)
-    ax.set_title(f"{plot_title}\n(Up: {n_up}, Down: {n_down}, FDR < {p_value_threshold}, |log2FC| > {log2fc_threshold})", 
-              fontsize=12, pad=10)
-    
-    # Add a legend
-    ax.legend(title='Differential Expression', loc='lower right', frameon=True, fontsize=9)
-    
-    # Customize the plot
-    ax.grid(True, linestyle='--', alpha=0.3)
-    
-    if diagnostics_text:
-        verdict_line = diagnostics_text.splitlines()[0]
-        plt.figtext(0.5, 0.005, verdict_line, ha="center", fontsize=8, color="firebrick")
-
-    # Save the PNG plot
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    fig.savefig(save_path, dpi=150, bbox_inches='tight', pad_inches=0.2, facecolor='white')
-    plt.close(fig)
-    print(f"Volcano plot (PNG) saved to {save_path}")
-    
-    # =========================================================================
-    # INTERACTIVE PLOTLY PLOT (HTML)
-    # =========================================================================
-    try:
-        import plotly.express as px
-        import plotly.graph_objects as go
-        
-        # Color mapping for plotly
-        color_discrete_map = {
-            'Upregulated': '#e74c3c',  # Red
-            'Downregulated': '#3498db',  # Blue
-            'Not Significant': '#95a5a6'  # Grey
-        }
-        
-        # Create interactive scatter plot
-        fig = px.scatter(
-            plot_df,
-            x='log2_fold_change',
-            y='neg_log10_fdr',
-            color='de_category',
-            color_discrete_map=color_discrete_map,
-            hover_data={
-                'Name': True,
-                'log2_fold_change': ':.3f',
-                'FDR': ':.2e',
-                'neg_log10_fdr': ':.2f',
-                'de_category': True
-            },
-            labels={
-                'log2_fold_change': 'log2 Fold Change',
-                'neg_log10_fdr': '-log10(FDR)',
-                'de_category': 'Category'
-            },
-            title=f"{plot_title}<br><sup>Up: {n_up}, Down: {n_down} | FDR < {p_value_threshold}, |log2FC| > {log2fc_threshold}</sup>",
-            opacity=0.6
-        )
-        
-        # Add threshold lines
-        fig.add_hline(y=-np.log10(p_value_threshold), line_dash="dash", line_color="black", opacity=0.3)
-        fig.add_vline(x=log2fc_threshold, line_dash="dash", line_color="black", opacity=0.3)
-        fig.add_vline(x=-log2fc_threshold, line_dash="dash", line_color="black", opacity=0.3)
-        
-        # Add annotations for top genes
-        for _, gene in top_genes.head(20).iterrows():  # Limit to top 20 for readability
-            fig.add_annotation(
-                x=gene['log2_fold_change'],
-                y=gene['neg_log10_fdr'],
-                text=gene['Name'],
-                showarrow=True,
-                arrowhead=0,
-                arrowsize=0.5,
-                arrowwidth=1,
-                ax=20,
-                ay=-20,
-                font=dict(size=9),
-                bgcolor="white",
-                opacity=0.8
-            )
-        
-        # Update layout
-        fig.update_layout(
-            xaxis_title="log2 Fold Change",
-            yaxis_title="-log10(FDR)",
-            legend_title="Differential Expression",
-            hovermode='closest',
-            template='plotly_white',
-            width=1000,
-            height=800
-        )
-        
-        # Set axis limits
-        fig.update_xaxes(range=[-x_max * 1.05, x_max * 1.05])
-        fig.update_yaxes(range=[0, max_y * 1.05])
-        
-        # Save as HTML
-        html_path = save_path.replace('.png', '.html')
-        fig.write_html(html_path, include_plotlyjs='cdn')
-        print(f"Volcano plot (HTML) saved to {html_path}")
-        
-        # Also export a high-quality PNG from Plotly (better than matplotlib for this)
-        # This will be used in the PDF report
-        try:
-            # Use kaleido for static export if available
-            fig.write_image(save_path, width=1200, height=960, scale=2)
-            print(f"Volcano plot (PNG from Plotly) saved to {save_path}")
-        except Exception as e:
-            print(f"Note: Could not export PNG from Plotly ({e}), using matplotlib version")
-        
-    except ImportError:
-        print("Warning: plotly not installed. Skipping interactive HTML volcano plot.")
-    except Exception as e:
-        print(f"Warning: Failed to create interactive volcano plot: {e}")
-    
-    # Show plot summary statistics
-    print(f"Total genes plotted: {len(plot_df)}")
-    print(f"Significant upregulated genes (FDR < {p_value_threshold}, log2FC > {log2fc_threshold}): {n_up}")
-    print(f"Significant downregulated genes (FDR < {p_value_threshold}, log2FC < -{log2fc_threshold}): {n_down}")
 
 
 def perform_enrichment_analysis(significant_genes, disease_name="Disease", 
@@ -823,234 +523,3 @@ def create_enrichment_summary(gene_list, enrichr_results, sample_id, sample_dir,
                         f.write(f"    Genes: {genes}\n\n")
     
     print(f"Detailed enrichment summary saved to {summary_file}")
-
-def plot_selected_enrichment(disease_name, regulation_type="all", 
-                             databases=["Reactome_2022", "KEGG_2021_Human"], 
-                             enrich_top_n=10, plot_enrich_dir=None,
-                             enrich_results_dir=None):
-    """
-    Create enrichment plots by directly reading the CSV result files.
-    
-    Args:
-        disease_name (str): Name of the disease (used to find file paths)
-        regulation_type (str or list): "all", "up", "down", or a list of these
-        databases (str or list): One or more databases to plot
-        enrich_top_n (int): Number of top terms to show in each plot
-        plot_enrich_dir (str): Directory to save the plots
-        enrich_results_dir (str): Directory containing the enrichment results CSV files
-    """
-    # Create output directory if it doesn't exist
-    os.makedirs(plot_enrich_dir, exist_ok=True)
-    
-    # Determine base directory for enrichment results
-    if enrich_results_dir is None:
-        # Fallback to old hardcoded path if not provided (backward compatibility)
-        enrich_results_base = "./fetched_data/enrichment_results"
-    else:
-        enrich_results_base = enrich_results_dir
-    
-    # Convert inputs to lists if they're not already
-    if isinstance(regulation_type, str):
-        regulation_types = [regulation_type]
-    else:
-        regulation_types = regulation_type
-    
-    if isinstance(databases, str):
-        databases = [databases]
-    
-    # Display name mapping for databases
-    db_name_map = {
-        'GO_Biological_Process_2021': 'GO Biological Process',
-        'GO_Molecular_Function_2021': 'GO Molecular Function',
-        'GO_Cellular_Component_2021': 'GO Cellular Component',
-        'KEGG_2021_Human': 'KEGG Pathways',
-        'Reactome_2022': 'Reactome Pathways',
-        'WikiPathways_2019_Human': 'WikiPathways',
-        'MSigDB_Hallmark_2020': 'MSigDB Hallmark',
-        'DisGeNET': 'DisGeNET',
-        'OMIM_Disease': 'OMIM Disease',
-        'OMIM_Expanded': 'OMIM Expanded',
-        'Human_Phenotype_Ontology': 'Human Phenotype',
-        'Jensen_DISEASES': 'Jensen DISEASES'
-    }
-    
-    # Display name mapping for regulation types
-    reg_name_map = {
-        "all": "All",
-        "up": "Upregulated",
-        "down": "Downregulated"
-    }
-    
-    # Process each combination of regulation type and database in parallel
-    def create_single_plot(reg_type, db):
-        # Create file path using the enrichment results base directory
-        sanitized_disease = disease_name.replace(' ', '_')
-        results_dir = os.path.join(enrich_results_base, f"{sanitized_disease}_{reg_type}_regulated")
-        csv_file = os.path.join(results_dir, f"{db}_results.csv")
-        
-        # Check if file exists
-        if not os.path.exists(csv_file):
-            print(f"No results file found for {db} in {reg_type} regulated genes: {csv_file}")
-            return None
-        
-        try:
-            # Load the CSV file
-            results_df = read_enrichment_results(csv_file)
-            
-            # Check if we have results
-            if len(results_df) == 0:
-                print(f"No results found in {csv_file}")
-                return None
-            
-            # Sort by adjusted p-value and get top terms
-            results_df = results_df.sort_values('Adjusted P-value').head(enrich_top_n)
-            
-            # Initialize empty list for gene counts with correct length
-            gene_counts = []
-            
-            # Parse genes and calculate counts
-            for _, row in results_df.iterrows():
-                gene_str = row['Genes']
-                
-                # Parse the gene string - could be in multiple formats
-                if isinstance(gene_str, str):
-                    if gene_str.startswith('[') and gene_str.endswith(']'):
-                        # Handle string representation of a list
-                        # Remove brackets, split by comma and quote, filter out empty strings
-                        genes = [g.strip("' \"") for g in gene_str.strip('[]').replace("'", "").split(',') if g.strip()]
-                        count = len(genes)
-                    else:
-                        # Handle plain comma-separated string
-                        count = len(gene_str.split(','))
-                else:
-                    # Unknown format
-                    count = 0
-                    print(f"Warning: Unexpected gene format for {row['Term']}")
-                
-                gene_counts.append(count)
-            
-            # Create DataFrame AFTER we have all values ready
-            plot_df = pd.DataFrame({
-                'Term': results_df['Term'].tolist(),
-                'PValue': results_df['Adjusted P-value'].tolist(),
-                'Count': gene_counts  # Now this will have the same length
-            })
-            
-            # Reverse order so most significant is at the top
-            plot_df = plot_df.iloc[::-1].reset_index(drop=True)
-            
-            # Create the plot
-            plt.figure(figsize=(12, min(12, 2 + 0.4 * len(plot_df))))
-            
-            # Use log transformation for p-values
-            log_transform = lambda x: -np.log10(x)
-            transformed_values = log_transform(plot_df['PValue'])
-            
-            # Create horizontal bars
-            bars = plt.barh(
-                y=np.arange(len(plot_df)),
-                width=transformed_values,
-                height=0.65,
-                color='#9e9ac8',
-                edgecolor='#6a51a3',
-                alpha=0.7,
-                linewidth=1.5
-            )
-            
-            # Add count annotations inside bars
-            for i, (_, row) in enumerate(plot_df.iterrows()):
-                count = row['Count']
-                pvalue = row['PValue']
-                transformed = log_transform(pvalue)
-                
-                # Add count as text inside the bar
-                plt.text(
-                    transformed/2,  # Position in the middle of the visible part
-                    i,
-                    f"Count: {count}",
-                    ha='center',
-                    va='center',
-                    color='#3f007d',
-                    fontweight='bold',
-                    fontsize=11
-                )
-                
-                # Add p-value at the end of the bar
-                plt.text(
-                    transformed * 1.05,  # Position just after the bar
-                    i,
-                    f"p={pvalue:.2e}",
-                    ha='left',
-                    va='center',
-                    fontsize=10,
-                    fontweight='medium',
-                    color='#4a4a4a'
-                )
-            
-            # Truncate long terms
-            y_labels = []
-            for term in plot_df['Term']:
-                if len(term) > 60:
-                    y_labels.append(term[:57] + '...')
-                else:
-                    y_labels.append(term)
-            
-            # Set y-tick labels to pathway terms with better formatting
-            plt.yticks(np.arange(len(plot_df)), y_labels, fontsize=11, fontweight='medium')
-            
-            # Format x-axis
-            plt.xlabel('-log10(Adjusted P-Value)', fontsize=12, fontweight='medium')
-            plt.ylabel('Pathway', fontsize=12, fontweight='medium')
-            
-            # Get nice names for titles
-            db_display = db_name_map.get(db, db)
-            reg_display = reg_name_map.get(reg_type, reg_type)
-            
-            plt.title(f'Top {enrich_top_n} Enriched {db_display} Terms\n{reg_display} Genes - {disease_name}', 
-                    fontsize=14, fontweight='bold', pad=15)
-            
-            # Remove top and right spines for cleaner look
-            plt.gca().spines['top'].set_visible(False)
-            plt.gca().spines['right'].set_visible(False)
-            plt.gca().spines['left'].set_linewidth(1.2)
-            plt.gca().spines['bottom'].set_linewidth(1.2)
-            
-            # Add a grid for easier reading
-            plt.grid(axis='x', linestyle='--', alpha=0.3, linewidth=0.8)
-            
-            # Adjust layout
-            plt.tight_layout(pad=2.0)
-            
-            # Save the plot
-            safe_db = db.replace('/', '_')
-            plot_filename = f"{plot_enrich_dir}/{safe_db}_{reg_type}_regulated.png"
-            plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-            
-            # Also save as PDF for publication quality
-            pdf_filename = f"{plot_enrich_dir}/{safe_db}_{reg_type}_regulated.pdf"
-            plt.savefig(pdf_filename, format='pdf', bbox_inches='tight')
-            
-            plt.close()
-            
-            return f"Plot saved to {plot_filename} and {pdf_filename}"
-            
-        except Exception as e:
-            error_msg = f"Error creating plot for {db} in {reg_type} regulated genes: {str(e)}"
-            print(error_msg)
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    # Generate all combinations and process in parallel
-    plot_combinations = [(reg_type, db) for reg_type in regulation_types for db in databases]
-    
-    print(f"Creating {len(plot_combinations)} enrichment plots in parallel...")
-    plot_results = Parallel(n_jobs=-1)(
-        delayed(create_single_plot)(reg_type, db) 
-        for reg_type, db in plot_combinations
-    )
-    
-    # Print successful results
-    successful_plots = [result for result in plot_results if result is not None]
-    for result in successful_plots:
-        print(result)

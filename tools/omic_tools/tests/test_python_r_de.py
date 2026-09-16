@@ -84,15 +84,14 @@ def test_analysis_feeds_real_r_genes_to_existing_enrichment_without_plots(frames
     def unexpected_plot(*args, **kwargs):
         raise AssertionError("enable_plotting=False started a plot")
     monkeypatch.setattr(analysis, "enrichr_analysis", remote_enrichr)
-    monkeypatch.setattr(analysis, "create_volcano_plot", unexpected_plot)
-    monkeypatch.setattr(analysis, "plot_selected_enrichment", unexpected_plot)
+    monkeypatch.setattr(analysis, "render_analysis_plots", unexpected_plot)
     output = analysis.omic_analysis(
         "test contrast", {"normal_omic_feature": ref.iloc[:, 1:].to_numpy().T,
                           "disease_omic_feature": alt.iloc[:, 1:].to_numpy().T},
         enable_plotting=False, session_dir=str(tmp_path), gene_names=ref.Name.tolist(),
         ref_label="Normal", alt_label="Alzheimer's Disease", r_timeout=30,
     )
-    assert set(output) == {"data_dir", "differential_expression_dir", "volcano_plots_dir", "enrichment_results_dir", "enrichment_plots_dir", "enrichment_success", "enrichment_status"}
+    assert set(output) == {"data_dir", "differential_expression_dir", "volcano_plots_dir", "enrichment_results_dir", "enrichment_plots_dir", "enrichment_success", "enrichment_status", "de_plots_status", "de_plot_files", "de_plots_error"}
     for group, filename in {"all": "significant_genes_by_fdr.csv", "up": "significant_upregulated_genes.csv", "down": "significant_downregulated_genes.csv"}.items():
         expected = read_de_results(Path(output["differential_expression_dir"]) / filename).Name.tolist()
         assert calls[f"test_contrast_{group}_regulated"] == expected
@@ -135,8 +134,8 @@ def test_failed_or_missing_r_output_cannot_reuse_stale_results(frames, tmp_path,
     print(f"exception={type(error.value).__name__}; read_attempts={len(read_attempts)}; historical_read_attempts=0; historical_files_unchanged={len(snapshots)}")
 
 
-@pytest.mark.parametrize("failure", ["none", "de", "de_timeout", "de_empty", "kegg", "kegg_empty"],
-                         ids=["real_r", "r_failure", "r_timeout", "r_missing_outputs", "kegg_failure", "kegg_missing_outputs"])
+@pytest.mark.parametrize("failure", ["none", "de", "de_timeout", "de_empty", "kegg", "kegg_empty", "panels", "real_plots"],
+                         ids=["real_r", "r_failure", "r_timeout", "r_missing_outputs", "kegg_failure", "kegg_missing_outputs", "panels_failure", "real_r_plots"])
 def test_workflow_routes_real_r_and_reports_analysis_status(frames, tmp_path, monkeypatch, failure):
     import omic_fetch_analysis_workflow as workflow
 
@@ -153,10 +152,13 @@ def test_workflow_routes_real_r_and_reports_analysis_status(frames, tmp_path, mo
     monkeypatch.setattr(workflow, "omic_fetch_with_new_loader", existing_data)
     def remote_enrichr(genes, sample_id, enrich_output_dir=None, databases=None, request_timeout=60):
         (Path(enrich_output_dir) / sample_id).mkdir(parents=True, exist_ok=True)
-        library = databases[0]
-        return {library: {library: [[1, "fixture term", 0.001, 2.0, 12.0, genes[:2], 0.01, 0, 0]]}}
+        return {library: {library: [[1, "fixture term", 0.001, 2.0, 12.0, genes[:2], 0.01, 0, 0]]}
+                for library in databases}
     monkeypatch.setattr(analysis, "enrichr_analysis", remote_enrichr)
-    plot_enabled = failure in ("kegg", "kegg_empty")
+    plot_enabled = failure in ("kegg", "kegg_empty", "panels", "real_plots")
+    if failure == "real_plots":
+        monkeypatch.setenv("COMPOSITE", "false")
+        monkeypatch.setenv("PERMUTATIONS", "19")
     de_failure = failure in ("de", "de_timeout", "de_empty")
     if de_failure:
         script = tmp_path / "failure.R"
@@ -173,22 +175,25 @@ def test_workflow_routes_real_r_and_reports_analysis_status(frames, tmp_path, mo
             return original_reader(path)
         monkeypatch.setattr(analysis, "read_de_results", observed_reader)
         monkeypatch.setattr(workflow, "read_de_results", observed_reader)
-    elif plot_enabled:
+    elif plot_enabled and failure != "real_plots":
         script = tmp_path / "kegg-failure.R"
         script.write_text('stop("KEGG failure")' if failure == "kegg" else 'quit(status=0)', encoding="utf-8")
         original_get_path = workflow.get_path
         monkeypatch.setattr(workflow, "get_path", lambda key, **kw: str(script) if key == "enrichment.kegg_script" else original_get_path(key, **kw))
-        monkeypatch.setattr(analysis, "create_volcano_plot", lambda *a, **k: None)
-        monkeypatch.setattr(analysis, "plot_selected_enrichment", lambda *a, **k: None)
+        monkeypatch.setattr(analysis, "render_analysis_plots", lambda *a, **k: {"status": "success", "files": []})
+        if failure == "panels":
+            def failed_panels(*args, **kwargs):
+                raise RuntimeError("panel renderer failed")
+            monkeypatch.setattr(analysis, "render_analysis_plots", failed_panels)
         stale_plot = tmp_path / "plots/kegg_dotplot.png"
         stale_plot.parent.mkdir()
         stale_plot.write_bytes(b"old PNG must not imply a successful current R run")
     result = workflow.omic_fetch_analysis_workflow(
         disease="Alzheimer's Disease", session_dir=str(tmp_path), enable_plotting=plot_enabled,
-        r_timeout=0.2 if failure == "de_timeout" else 30)
+        r_timeout=0.2 if failure == "de_timeout" else 120)
     assert result["retrieval_success"] is True
     assert result["analysis_success"] is (not de_failure)
-    assert result["kegg_success"] is False
+    assert result["kegg_success"] is (failure == "real_plots")
     if de_failure:
         assert result["analysis_paths"] is None
         assert result["top_genes_by_fdr"] == []
@@ -202,5 +207,21 @@ def test_workflow_routes_real_r_and_reports_analysis_status(frames, tmp_path, mo
                                check=True, capture_output=True, text=True, timeout=30)
         assert probe.stdout == "Alzheimer.s.Disease - normal"
         assert Path(result["analysis_paths"]["differential_expression_dir"]).is_dir()
-    if plot_enabled:
+    if plot_enabled and failure != "real_plots":
         assert stale_plot.read_bytes() == b"old PNG must not imply a successful current R run"
+    if failure == "panels":
+        assert result["success"] is False
+        assert result["de_plots_status"] == "failed"
+        assert "panel renderer failed" in result["de_plots_error"]
+        assert result["plots_for_report"]["volcano_plots"] == []
+    if failure == "real_plots":
+        assert result["success"] is True
+        assert result["plot_success"] is True
+        assert result["de_plots_status"] == "success"
+        assert result["enrichment_plot_status"] == "success"
+        report = result["plots_for_report"]
+        assert report["volcano_plots"] == []
+        assert len(report["case_study_plots"]) >= 3
+        assert len(report["enrichment_bar_plots"]) == 6
+        assert len(report["kegg_pathway_plots"]) == 2
+        assert all((tmp_path / p).is_file() for p in report["all_plots"])
