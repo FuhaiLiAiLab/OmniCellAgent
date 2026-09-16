@@ -34,7 +34,8 @@ def test_saved_ad_results_render_current_panels_without_legacy_volcano(existing_
     before = snapshot()
     out = tmp_path / "casestudy_R"
     result = subprocess.run([
-        "Rscript", str(MODULE / "run_casestudy.R"), "--stage", "plots",
+        "Rscript", str(MODULE / "tests/fixtures/verify_panel_sources.R"),
+        str(MODULE / "run_casestudy.R"), "--stage", "plots",
         str(existing_session), str(out), "--state-file",
         str(existing_session / "casestudy_R/analysis_state.rds"),
         "--ref-label", "normal", "--alt-label", "Alzheimer's Disease",
@@ -42,6 +43,9 @@ def test_saved_ad_results_render_current_panels_without_legacy_volcano(existing_
         env={**os.environ, "COMPOSITE": "true", "PSEUDOBULK": "false"})
     (tmp_path / "render.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads((out / "panel_source_verification.json").read_text())
+    assert evidence["panel_A"]["renderer_labels_match"] is True
+    assert evidence["panel_B"]["renderer_order_matches"] is True
     assert "DE complete:" not in result.stderr
     assert snapshot() == before
     manifest = read_plot_manifest(out / "plot_manifest.json", [out])

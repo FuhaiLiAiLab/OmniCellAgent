@@ -397,9 +397,9 @@ if (length(extra)) {
       score = safe_logp(p_adjust), row = rev(seq_len(n())))
     labels <- ifelse(nchar(df$Term) > 60, paste0(substr(df$Term, 1, 57), "..."), df$Term)
     plot <- ggplot(df, aes(x = score, y = row)) +
-      geom_col(width = 0.65, fill = "#9e9ac8", colour = "#6a51a3", alpha = 0.7) +
+      geom_col(width = 0.65, orientation = "y", fill = "#9e9ac8", colour = "#6a51a3", alpha = 0.7) +
       geom_text(aes(x = score / 2, label = paste("Count:", Count)), colour = "#3f007d", fontface = "bold") +
-      geom_text(aes(x = score * 1.05, label = sprintf("p=%.2e", p_adjust)), hjust = 0, colour = "#4a4a4a") +
+      geom_text(aes(x = score * 1.05, label = sprintf("FDR=%.2e", p_adjust)), hjust = 0, colour = "#4a4a4a") +
       scale_y_continuous(breaks = df$row, labels = labels) +
       scale_x_continuous(expand = expansion(mult = c(0, 0.25))) +
       labs(title = paste0("Top 10 Enriched ", database_names[[database]], " Terms\n",
