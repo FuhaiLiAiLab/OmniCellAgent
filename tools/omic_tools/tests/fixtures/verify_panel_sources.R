@@ -60,13 +60,16 @@ a <- read.csv(file.path(config$out_dir, "DE_results_panel_A_labeled_genes.csv"))
 b <- read.csv(file.path(config$out_dir, "DE_results_panel_B_corrgram_genes.csv"))
 native <- state$native
 selected <- head(native$Gene[order(native$adj.P.Val)], 20)
-ranked <- native[order(native$adj.P.Val), , drop = FALSE]
-expected_a <- c(head(ranked$Gene[ranked$adj.P.Val < .05 & ranked$logFC >= 1], 10),
-                ranked$Gene[ranked$adj.P.Val < .05 & ranked$logFC <= -1])
+ranked <- native[order(native$adj.P.Val, native$Gene), , drop = FALSE]
+eligible_up <- ranked$Gene[ranked$adj.P.Val < .05 & ranked$logFC >= 1]
+eligible_down <- ranked$Gene[ranked$adj.P.Val < .05 & ranked$logFC <= -1]
+expected_up_n <- min(length(eligible_up), max(10L, 15L - length(eligible_down)))
+expected_down_n <- min(length(eligible_down), 15L - expected_up_n)
+expected_a <- c(head(eligible_up, expected_up_n), head(eligible_down, expected_down_n))
 stopifnot(!is.null(observed$a), length(observed$b) >= 2L,
           identical(as.character(observed$a$label), as.character(a$gene_symbol)),
           identical(as.character(a$gene_symbol), as.character(expected_a)),
-          all(a$is_significant), !any(a$status == "NS"),
+          nrow(a) <= 15L, all(a$is_significant), !any(a$status == "NS"),
           identical(observed$pca_alpha, 0.25),
           identical(a$label_rank, seq_len(nrow(a))),
           identical(b$display_order, seq_len(nrow(b))),

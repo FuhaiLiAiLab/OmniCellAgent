@@ -169,7 +169,11 @@ differential_expression/significant_downregulated_genes.csv
 ## 最终产物与状态
 
 当前显示规则：火山图只标满足原着色阈值（FDR<0.05、|logFC|>=1）的基因，
-上调按FDR取前10个，下调全部标注（test5为5个）；计数文字使用logFC。
+所有疾病和细胞类型共用 `select_volcano_labels()`：仅从达到上色阈值的基因中，
+按FDR升序选标签（并列按基因名），默认优先上调10个、下调5个，合计最多15个；
+某方向不足时由另一方向补足，合格基因不足15个时全部标注，不用灰点补数。
+独立火山图、ABCD的A面板和panel_A_labeled_genes.csv共用同一名单；
+上/下调计数仍统计全部符合阈值的基因，计数文字使用logFC。
 PCA点为size=1.7、alpha=0.25，绘制顺序用固定种子42打散，避免固定组别总被画在最上层；
 样本坐标及分组保持不变。corrgram仍从全部受检验基因按FDR选前20个，未随火山图标注改变。
 

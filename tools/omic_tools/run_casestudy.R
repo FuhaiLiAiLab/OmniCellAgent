@@ -4,6 +4,30 @@
 # COMPOSITE, WHICH_PC and PERMUTATIONS control plotting; PSEUDOBULK defaults off
 # and can only enable the legacy donor contrast with an explicit --stage all.
 
+select_volcano_labels <- function(results, max_labels = 15L,
+                                  up_quota = min(10L, max_labels)) {
+  # Shared by the standalone volcano, panel A and its labeled-gene CSV.
+  # Selection changes annotations only, never DE values or significance counts.
+  valid_count <- function(x) length(x) == 1L && is.finite(x) && x >= 0 && x == floor(x)
+  if (!valid_count(max_labels) || !valid_count(up_quota) || up_quota > max_labels) {
+    stop("Volcano label counts must be nonnegative integers; up_quota cannot exceed max_labels.")
+  }
+  if (!all(c("Gene", "status", "adj.P.Val") %in% names(results))) {
+    stop("Volcano label selection requires Gene, status and adj.P.Val.")
+  }
+  eligible <- results[results$status %in% c("Up", "Down") &
+                        is.finite(results$adj.P.Val), , drop = FALSE]
+  if (anyDuplicated(eligible$Gene)) stop("Volcano label genes must be unique.")
+  ranked <- eligible[order(eligible$adj.P.Val, eligible$Gene), , drop = FALSE]
+  chosen <- rbind(head(ranked[ranked$status == "Up", , drop = FALSE], up_quota),
+                  head(ranked[ranked$status == "Down", , drop = FALSE], max_labels - up_quota))
+  # If one direction has too few genes, fill only from remaining colored genes.
+  remaining <- ranked[!ranked$Gene %in% chosen$Gene, , drop = FALSE]
+  chosen <- rbind(chosen, head(remaining, max_labels - nrow(chosen)))
+  chosen[order(match(chosen$status, c("Up", "Down")),
+               chosen$adj.P.Val, chosen$Gene), , drop = FALSE]
+}
+
 parse_de_config <- function(args) {
   allowed <- c("stage", "ref-csv", "alt-csv", "ref-label", "alt-label",
                "input-scale", "de-dir", "state-file", "diagnostics-file",
@@ -332,11 +356,8 @@ res$is_sig <- with(res, adj.P.Val < fdr_thresh & abs(logFC) >= fc_thresh)
 up_n   <- sum(res$status == "Up", na.rm = TRUE)
 down_n <- sum(res$status == "Down", na.rm = TRUE)
 
-# Label only colored genes: top 10 upregulated by FDR and all downregulated
-# genes (five in the current AD case study). Keep the corrgram selection separate.
-ranked_labels <- res[order(res$adj.P.Val), , drop = FALSE]
-lab_df <- rbind(head(ranked_labels[ranked_labels$status == "Up", , drop = FALSE], 10),
-                ranked_labels[ranked_labels$status == "Down", , drop = FALSE])
+# One annotation rule for every disease/cell type. Corrgram selection is separate.
+lab_df <- select_volcano_labels(res)
 x_min <- min(res$logFC, na.rm = TRUE); x_max <- max(res$logFC, na.rm = TRUE)
 y_max <- max(res$neglog10AdjP, na.rm = TRUE); x_span <- x_max - x_min
 
