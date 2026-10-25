@@ -282,6 +282,49 @@ def test_unknown_donors_are_not_treated_as_one_donor():
     assert diag["checks"]["donor_usability"]["value"] == pytest.approx(0.40)
 
 
+def _pdac_like_cohort():
+    """Disease group without donor IDs, control group fully labelled (7 donors)."""
+    meta = pd.DataFrame({
+        "suspension_type": ["nucleus"] * 33 + ["cell"] * 16,
+        "dataset_id": ["ds_a"] * 33 + ["ds_b"] * 16,
+        "donor_id": ["unknown"] * 32 + ["d0"] + [f"c{i % 7}" for i in range(16)],
+    })
+    is_ref = np.array([False] * 33 + [True] * 16)
+    return meta, is_ref
+
+
+def test_kept_unknown_donors_are_not_reported_or_counted():
+    from cohort_diagnostics import compute_cohort_diagnostics, format_diagnostics_text
+
+    meta, is_ref = _pdac_like_cohort()
+    diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref, ref_name="normal",
+                                      alt_name="disease", keep_unknown_donor=True)
+    assert "donor_usability" not in diag["checks"]
+    # The partly labelled disease group has an unknown number of donors: not counted.
+    assert diag["checks"]["donor_count"]["counts"] == {"normal": 7}
+    text = format_diagnostics_text(diag) + str(diag)
+    assert "unusable" not in text and "usable donor" not in text
+    assert "disease=" not in diag["checks"]["donor_count"]["detail"]
+
+
+def test_kept_unknown_donors_skip_donor_checks_when_no_group_is_fully_labelled():
+    from cohort_diagnostics import compute_cohort_diagnostics
+
+    meta, is_ref = _pdac_like_cohort()
+    meta.loc[is_ref, "donor_id"] = "unknown"
+    diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref, keep_unknown_donor=True)
+    assert not {"donor_usability", "donor_count", "donor_dominance"} & set(diag["checks"])
+
+
+def test_default_still_fails_unknown_donors_in_a_pdac_like_cohort():
+    from cohort_diagnostics import compute_cohort_diagnostics
+
+    meta, is_ref = _pdac_like_cohort()
+    diag = compute_cohort_diagnostics(meta, is_ref, ~is_ref, ref_name="normal", alt_name="disease")
+    assert diag["checks"]["donor_usability"]["status"] == "FAIL"
+    assert diag["checks"]["donor_count"]["counts"] == {"normal": 7, "disease": 1}
+
+
 def test_missing_columns_do_not_raise():
     from cohort_diagnostics import compute_cohort_diagnostics
 
@@ -337,8 +380,8 @@ def test_format_diagnostics_text_lists_failures():
     assert "anti-conservative" in text
 
 
-def test_save_dataframe_stamps_diagnostics_header_through_r(tmp_path):
-    """The R writer preserves diagnostic comments and pandas-readable CSVs."""
+def test_de_tables_from_r_have_no_comment_header(tmp_path):
+    """The R writer produces pandas-readable CSVs that start at the column header."""
     from omic_analysis_components import perform_unpaired_differential_expression
 
     rng = np.random.default_rng(0)
@@ -358,12 +401,6 @@ def test_save_dataframe_stamps_diagnostics_header_through_r(tmp_path):
         values = frame.iloc[:, 1:]
         frame.iloc[:, 1:] = values * (10000 / values.sum(axis=0))
 
-    diagnostics_text = (
-        "COHORT DIAGNOSTICS: UNRELIABLE\n"
-        "  contrast: normal (n=6) vs breast cancer (n=6)\n"
-        "  FAIL    donor_count: donors per group: normal=6, breast cancer=1"
-    )
-
     perform_unpaired_differential_expression(
         disease_df=disease_df,
         normal_df=control_df,
@@ -373,24 +410,20 @@ def test_save_dataframe_stamps_diagnostics_header_through_r(tmp_path):
         n_jobs=-1,
         disease="test",
         de_output_dir=str(tmp_path),
-        diagnostics_text=diagnostics_text,
     )
 
     out_path = os.path.join(str(tmp_path), "unpaired_differential_expression_results.csv")
     with open(out_path) as handle:
-        header_lines = [next(handle) for _ in range(3)]
-    assert header_lines[0] == "# COHORT DIAGNOSTICS: UNRELIABLE\n"
-    assert header_lines[1].startswith("#   contrast:")
-    assert header_lines[2].startswith("#   FAIL")
+        assert next(handle).startswith('"Name",')
 
-    reloaded = pd.read_csv(out_path, comment="#")
+    reloaded = pd.read_csv(out_path)
     assert len(reloaded) == n_genes
     assert "Name" in reloaded.columns
     assert "FDR" in reloaded.columns
 
 
 def test_save_dataframe_survives_non_utf8_locale_default(monkeypatch, tmp_path):
-    """R's UTF-8 diagnostic export survives a C-locale child process."""
+    """R's CSV export survives a C-locale child process."""
     import omic_analysis_components as oac
 
     monkeypatch.setenv("LC_ALL", "C")
@@ -403,14 +436,11 @@ def test_save_dataframe_survives_non_utf8_locale_default(monkeypatch, tmp_path):
         frame = pd.DataFrame(matrix, columns=[f"{prefix}_sample_{i}" for i in range(n)])
         frame.insert(0, "Name", [f"GENE{i}" for i in range(n_genes)])
         frames.append(frame)
-    diagnostics_text = "COHORT DIAGNOSTICS: CAUTION\n  dataset_overlap: 2 of 5 – shared"
     oac.perform_unpaired_differential_expression(
         disease_df=frames[0], normal_df=frames[1], p_value_threshold=0.5,
         sig_top_n=n_genes, disease="test", de_output_dir=str(tmp_path),
-        diagnostics_text=diagnostics_text,
     )
     raw = (tmp_path / "unpaired_differential_expression_results.csv").read_bytes()
-    assert "#   dataset_overlap: 2 of 5 – shared" in raw.decode("utf-8")
     assert b"\r\r\n" not in raw
     table = oac.read_de_results(tmp_path / "unpaired_differential_expression_results.csv")
     assert len(table) == n_genes
@@ -472,6 +502,40 @@ def test_diagnostics_failure_does_not_block_de():
     assert "diagnostics_text" in fallback_names, "handler must reset diagnostics_text"
 
 
+def test_diagnostics_go_to_their_own_file_not_the_de_tables(tmp_path, monkeypatch):
+    """The five DE tables start at their column header; the diagnostics text
+    is written only to differential_expression/COHORT_DIAGNOSTICS.txt."""
+    from omic_analysis_components import omic_analysis
+    monkeypatch.setattr("omic_analysis_components.enrichr_analysis", lambda *a, **k: {})
+
+    rng = np.random.default_rng(4)
+    n_genes, n = 30, 5
+    data_dict = {
+        "normal_omic_feature": rng.poisson(5, size=(n, n_genes)).astype(float),
+        "disease_omic_feature": rng.poisson(5, size=(n, n_genes)).astype(float),
+        "omic_label": np.array([0] * n + [1] * n),
+    }
+    for key in ("normal_omic_feature", "disease_omic_feature"):
+        matrix = data_dict[key]
+        data_dict[key] = matrix * (10000 / matrix.sum(axis=1, keepdims=True))
+    text = "COHORT DIAGNOSTICS: UNRELIABLE\n  FAIL    donor_count: donor keys per group: normal=1"
+
+    result = omic_analysis("test_contrast", data_dict, enable_plotting=False,
+                           session_dir=str(tmp_path), gene_names=[f"GENE{i}" for i in range(n_genes)],
+                           diagnostics_text=text)
+
+    de_dir = result["differential_expression_dir"]
+    with open(os.path.join(de_dir, "COHORT_DIAGNOSTICS.txt"), encoding="utf-8") as handle:
+        assert handle.read() == text + "\n"
+    for name in ("unpaired_differential_expression_results.csv", "significant_genes_by_fdr.csv",
+                 "significant_genes_by_fc.csv", "significant_upregulated_genes.csv",
+                 "significant_downregulated_genes.csv"):
+        with open(os.path.join(de_dir, name), encoding="utf-8") as handle:
+            content = handle.read()
+        assert content.startswith('"Name",'), name
+        assert "COHORT DIAGNOSTICS" not in content and "donor" not in content, name
+
+
 def test_cohort_diagnostics_write_failure_does_not_block_de(tmp_path, monkeypatch):
     """Fix 2: the COHORT_DIAGNOSTICS.txt write inside omic_analysis's body
     (omic_analysis_components.py) sat unguarded. A read-only directory or a
@@ -522,11 +586,11 @@ def test_cohort_diagnostics_write_failure_does_not_block_de(tmp_path, monkeypatc
     assert len(reloaded) == n_genes
 
 
-def test_pdf_renders_cohort_caveat():
-    """Fix-round 1, Finding 2: the PDF's Shared Data Summary (A4) must render
-    a cohort-diagnostics caveat before the top-genes table whenever
-    cohort_verdict is not "ok". Storing the verdict in shared_data (Task 6
-    Step 6) is not enough if the PDF section never reads it back.
+def test_cohort_diagnostics_never_reach_agents_or_the_report():
+    """Cohort diagnostics stay in the session files (cohort_diagnostics.json,
+    COHORT_DIAGNOSTICS.txt). omic_analysis_tool strips them from the result it
+    returns, so no LLM (omic agent, downstream agents, reporter) sees them, and
+    no other part of the agent (hand-off, reporter prompt, appendix) reads them.
 
     Reads agent/langgraph_agent.py's source text directly instead of
     importing the module, since the module has heavy side-effecting imports
@@ -538,29 +602,16 @@ def test_pdf_renders_cohort_caveat():
     with open(agent_path) as handle:
         source = handle.read()
     tree = ast.parse(source)
+    tool_fn = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.FunctionDef) and node.name == "omic_analysis_tool")
+    tool_source = ast.get_source_segment(source, tool_fn)
+    assert '"cohort_diagnostics"' in tool_source and '"cohort_verdict"' in tool_source
+    assert ".pop(" in tool_source, "omic_analysis_tool must strip the diagnostics from its result"
 
-    appendix_fn = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_generate_appendix"
-    )
-    fn_source = ast.get_source_segment(source, appendix_fn)
-    assert fn_source is not None
-
-    verdict_idx = fn_source.find("cohort_verdict")
-    table_idx = fn_source.find("| # | Gene")
-    assert verdict_idx != -1, "PDF appendix must read shared_data['cohort_verdict']"
-    assert table_idx != -1, "top-genes table markup not found (fixture out of date?)"
-    assert verdict_idx < table_idx, "cohort caveat must render BEFORE the top-genes table"
-
-    assert '!= "ok"' in fn_source or "!= 'ok'" in fn_source, (
-        "caveat must be gated on the verdict not being 'ok'"
-    )
-    assert "cohort_diagnostics" in fn_source, (
-        "caveat must read shared_data['cohort_diagnostics'] to surface check details"
-    )
-    assert "failed_checks" in fn_source and "caution_checks" in fn_source, (
-        "caveat must surface both failed_checks and caution_checks"
-    )
+    rest = source.replace(tool_source, "")
+    for term in ("cohort_diagnostics", "cohort_verdict", "failed_checks", "caution_checks",
+                 "Cohort Diagnostics"):
+        assert term not in rest, f"{term!r} is still read outside omic_analysis_tool"
 
 
 @requires_fixture

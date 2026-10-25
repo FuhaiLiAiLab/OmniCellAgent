@@ -14,16 +14,19 @@ import argparse
 import getpass
 import json
 import os
+import re
+import time
 import logging
 import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Literal, TypedDict, Annotated
 from dotenv import load_dotenv
-load_dotenv(".env")
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
 
-# Ensure Google API key is set
-if "GOOGLE_API_KEY" not in os.environ:
-    os.environ["GOOGLE_API_KEY"] = getpass.getpass("Enter your Google AI API key: ")
+# Gemini uses GEMINI_API_KEY; GOOGLE_API_KEY is only a fallback because it may hold a
+# Custom-Search-only key (see GOOGLE_SEARCH_API_KEY in tools/google_search_tools)
+if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+    os.environ["GEMINI_API_KEY"] = getpass.getpass("Enter your Gemini API key: ")
 
 import sys
 # Add project root to Python path for absolute imports
@@ -31,6 +34,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 # Import path config
 from utils.path_config import get_path
+from utils.usage_tracker import (UsageTracker, LLMUsageCallback, usage_label,
+                                 set_current_tracker, get_current_tracker)
 
 # Suppress INFO logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -41,6 +46,7 @@ logging.getLogger("paperscraper").setLevel(logging.ERROR)
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage, ToolMessage
 from langchain_core.tools import tool
 import operator
@@ -51,6 +57,7 @@ _GLOBAL_SESSION_ID: Optional[str] = None
 
 # Import tool functions directly (these are clean async functions without AutoGen dependencies)
 from tools.pubmed_tools.query_pubmed_tool import query_medical_research_async
+from tools.pubmed_tools.get_papers_info_tools import NUM_PAPERS_TO_DOWNLOAD
 from tools.google_search_tools.google_search_w3m import google_search, web_search_tool
 # Lite PubMed search (no PDF download, just metadata + abstracts)
 from langchain_community.tools.pubmed.tool import PubmedQueryRun
@@ -61,6 +68,7 @@ from tools.gretriever_tools.gretriever_client import gretriever_tool
 # Add omic_tools to path for proper imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tools', 'omic_tools'))
 from omic_fetch_analysis_workflow import omic_fetch_analysis_workflow as _omic_workflow
+from tools.omic_tools.cell_type_lookup import available_cell_types, format_cell_types, read_lookup_metadata
 
 # Import prompts
 from utils.prompt import (
@@ -194,6 +202,8 @@ def omic_analysis_tool(
     cell_type: Optional[str] = None,
     organ: Optional[str] = None,
     label: str = "disease",
+    control_cell_type: Optional[str] = None,
+    disease_cell_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run a single-cell RNA-seq (scRNA-seq) cohort analysis: gene expression
@@ -206,17 +216,29 @@ def omic_analysis_tool(
 
     Args:
         disease: Disease name to analyze. Examples: "lung adenocarcinoma",
-            "Alzheimer disease", "breast cancer".
-        cell_type: Optional cell type filter. Examples: "microglial cell",
-            "T cell", "acinar cell".
+            "Alzheimer disease", "breast cancer". For label="disease", if no
+            disease has this exact name, no analysis is run and the result lists
+            the closest disease names.
+        cell_type: Cell type filter. Examples: "microglial cell", "astrocyte",
+            "acinar cell". Required for label="disease": without it no analysis
+            is run, and the result lists the cell types available for the
+            disease and organ.
         organ: Organ filter (IMPORTANT for memory efficiency). Examples:
             "lung", "brain", "breast", "pancreas".
         label: Column used to define the two groups for differential expression.
-            - "disease" (default): disease vs non-disease (uses matched normal
-              cells via stratified balancing). Requires `disease` to be set.
+            - "disease" (default): disease cells vs normal cells that pass the
+              same cell-type (or `control_cell_type`) and organ filters. The
+              normal cells are not matched to the disease cells (e.g. by study,
+              protocol, age or sex). Requires `disease` to be set.
             - "gender": female vs male within the queried subset (e.g. within
               a disease cohort or within an organ).
             - "cell_type": cell-type-stratified comparison.
+        control_cell_type: Optional cell type of the normal (control) group when
+            it differs from `cell_type`, e.g. tumour cells, which have no normal
+            counterpart with the same name. Only for label="disease".
+        disease_cell_label: Optional original (source-study) label that the
+            disease cells must also carry, e.g. "Malignant epithelial cell".
+            Only for label="disease".
 
     Returns:
         Dict with analysis results including top genes, enrichment data,
@@ -232,12 +254,22 @@ def omic_analysis_tool(
     try:
         # Use the global session directory
         session_dir = get_current_session_dir()
+        # Each cell-type run gets its own subfolder, so several OmicMiningAgent
+        # tasks in one session (e.g. CASE_STUDY_COHORTS) do not overwrite each other.
+        if cell_type:
+            slug = re.sub(r"[^a-z0-9]+", "_", cell_type.split(";")[0].lower()).strip("_")
+            suffix = "" if label == "disease" else f"_{label}"
+            session_dir = os.path.join(session_dir, f"omic_{slug}{suffix}")
+        # Set in code from CASE_STUDY_COHORTS, never by the LLM, so it stays out of
+        # prompts, tool arguments and the tool result.
+        keep_unknown_donor = (cell_type or "").lower() in case_study_keep_unknown_cell_types(disease)
 
         params = {
             "session_dir": session_dir,
             "enable_differential_expression": True,
             "enable_plotting": True,
             "label": label,
+            "keep_unknown_donor": keep_unknown_donor,
         }
 
         if disease:
@@ -246,11 +278,40 @@ def omic_analysis_tool(
             params["cell_type"] = cell_type
         if organ:
             params["organ"] = organ
+        if control_cell_type:
+            params["control_cell_type"] = control_cell_type
+        if disease_cell_label:
+            params["disease_cell_label"] = disease_cell_label
 
         if not disease and not cell_type:
             return {"success": False, "message": "Provide at least 'disease' or 'cell_type'"}
 
+        # Pooling every cell type would mix disease effects with cell-type composition, so a
+        # disease-vs-normal run needs a cell type and a database disease name; without them,
+        # return the cell types or disease names to choose from instead
+        lookup = (_cell_type_lookup(disease, organ)
+                  if (label or "disease").lower() == "disease" and disease else None)
+        if lookup is not None and (not cell_type or not lookup["disease_found"]):
+            problem = ("a disease-vs-normal comparison needs one cell type, and none was given"
+                       if lookup["disease_found"] else "the disease name was not found")
+            return {
+                "success": False,
+                "reason": "cell_type_required" if lookup["disease_found"] else "disease_not_found",
+                "message": f"No analysis was run: {problem}.\n\n" + format_cell_types(lookup),
+                "cell_type_options": {
+                    "disease": lookup["disease_name"] or disease,
+                    "organ": organ,
+                    "cell_types": lookup["cell_types"]["cell_type"].tolist(),
+                    "disease_candidates": lookup["disease_candidates"],
+                },
+            }
+
         result = _omic_workflow(**params)
+        # Cohort diagnostics stay in the session files (cohort_diagnostics.json,
+        # COHORT_DIAGNOSTICS.txt); no agent, prompt or report receives them.
+        if isinstance(result, dict):
+            result.pop("cohort_diagnostics", None)
+            result.pop("cohort_verdict", None)
         return result
 
     except Exception as e:
@@ -260,6 +321,15 @@ def omic_analysis_tool(
             "message": f"Error in omic analysis: {str(e)}",
             "traceback": traceback.format_exc()
         }
+
+
+def _cell_type_lookup(disease: Optional[str], organ: Optional[str]) -> Dict[str, Any]:
+    """available_cell_types for a disease and organ, counted the way omic_analysis_tool selects
+    each cell type (keep_unknown_donor set from CASE_STUDY_COHORTS)."""
+    metadata = read_lookup_metadata(os.path.join(
+        get_path("external.omnicell_data_root", absolute=True), "cell_metadata_with_mappings.parquet"))
+    return available_cell_types(metadata, disease, organ,
+                                keep_unknown_donor=case_study_keep_unknown_cell_types(disease))
 
 
 @tool
@@ -467,7 +537,7 @@ def pubmed_lite_tool(query: str) -> str:
 
 
 @tool
-async def pubmed_full_search_tool(query: str, num_papers: int = 50) -> str:
+async def pubmed_full_search_tool(query: str, num_papers: int = NUM_PAPERS_TO_DOWNLOAD) -> str:
     """
     Full PubMed search — downloads papers and extracts full text content from PDFs/XMLs.
     Returns comprehensive paper information with abstracts AND extracted full-text for
@@ -478,32 +548,44 @@ async def pubmed_full_search_tool(query: str, num_papers: int = 50) -> str:
     
     Args:
         query: Search query for PubMed (e.g., "TREM2 Alzheimer's disease microglia",
-               "EGFR lung cancer treatment", '"TP53"[Title/Abstract]')
-        num_papers: Number of papers to download and read (default: 50, max: 100)
-    
+               "EGFR lung cancer treatment", '"TP53"[Title/Abstract]'). Put OR-lists in
+               parentheses: "(TREM2 OR TYROBP) AND Alzheimer's disease"
+        num_papers: Number of papers to download and read (default and max set by
+                    NUM_PAPERS_TO_DOWNLOAD in tools/pubmed_tools/get_papers_info_tools.py)
+
     Returns:
         Formatted results with paper metadata, abstracts, and extracted full-text content
     """
     try:
         session_id = get_current_session_id()
-        num_papers = min(max(num_papers, 1), 100)
+        num_papers = min(max(num_papers, 1), NUM_PAPERS_TO_DOWNLOAD)
         
         print(f"[PubMed Full] Searching and downloading {num_papers} papers for: '{query}'")
+        search_stats = {}
         papers = await query_medical_research_async(
             query=query,
             top_k=num_papers,
-            use_llm_processing=False,  # Raw text extraction (fast, no LLM cost)
+            use_llm_processing=True,  # Per-paper LLM summary of the full PDF/XML text
             max_concurrent=10,
-            session_id=session_id
+            session_id=session_id,
+            stats_out=search_stats
         )
-        
+
+        if search_stats:
+            t, tokens = search_stats["timing_seconds"], search_stats["llm"]["tokens_total"]
+            print(f"[PubMed Full] {t['total']}s total ({t['search_and_download']}s search+download, "
+                  f"{t['summarization']}s summarization), {tokens['total_token_count']:,} summarizer tokens")
+            tracker = get_current_tracker()
+            if tracker is not None:
+                tracker.record_pubmed_call(query, search_stats)
+
         if isinstance(papers, str):
             return f"Error retrieving papers: {papers}"
         if not papers:
             return f"No papers found for query: '{query}'"
         
         # Format results with full content
-        CONTENT_TRUNCATE = 3000  # chars of extracted text per paper in output
+        CONTENT_TRUNCATE = None  # chars of extracted text per paper in output
         
         lines = [
             f"# PubMed Full-Text Search Results",
@@ -560,7 +642,7 @@ async def pubmed_full_search_tool(query: str, num_papers: int = 50) -> str:
             
             if content:
                 truncated = content[:CONTENT_TRUNCATE]
-                if len(content) > CONTENT_TRUNCATE:
+                if CONTENT_TRUNCATE is not None and len(content) > CONTENT_TRUNCATE:
                     truncated += f"\n... [truncated, {len(content)} chars total]"
                 lines.append(f"\n**Extracted Content:**\n{truncated}")
             elif not abstract:
@@ -831,7 +913,19 @@ async def biomarker_kg_tool(query: str) -> str:
 # AGENT DEFINITIONS
 # ==============================================================================
 
-def create_llm(model_name: str = "gemini-3.5-flash"):
+# Model of the sub-agents (OmicMiningAgent, BioMarkerKGAgent, PubMedResearcher, GoogleSearcher,
+# ScientistsAgent and its experts)
+DEFAULT_MODEL = "gemini-3.8-flash"
+# Model of the planner, replanner, reporter and report revision
+LEAD_MODEL = "gemini-4-argon"
+LEAD_REASONING_EFFORT = "high"
+# langchain_google_genai 3.1 cannot send thinking_level (google-ai-generativelanguage, up to 0.12.1, has no
+# such field), so the lead model goes through Gemini's OpenAI-compatible endpoint, which maps
+# reasoning_effort onto the thinking level (checked 2026-10-25: "high" thinks, "low" and no setting do not)
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+def create_llm(model_name: str = DEFAULT_MODEL):
     """
     Create an LLM instance based on the model name.
     Supports Google Gemini models by default.
@@ -842,13 +936,54 @@ def create_llm(model_name: str = "gemini-3.5-flash"):
     Returns:
         LLM instance (type-agnostic)
     """
-    return ChatGoogleGenerativeAI(model=model_name, temperature=0)
+    # Pass the key explicitly: langchain_google_genai otherwise prefers GOOGLE_API_KEY
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return ChatGoogleGenerativeAI(model=model_name, temperature=0, google_api_key=api_key)
+
+
+def create_lead_llm(model_name: str = LEAD_MODEL, reasoning_effort: str = LEAD_REASONING_EFFORT):
+    """Gemini model for planning and reporting, at the given thinking level (none | low | medium | high)."""
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return ChatOpenAI(model=model_name, base_url=GEMINI_OPENAI_BASE_URL, api_key=api_key,
+                      temperature=0, reasoning_effort=reasoning_effort)
+
+
+# Tool outputs that carry no data: no hits, an unreachable service, or an error the tool reports as text
+# (google_search_w3m reports an HTTP 403 as status "no_results"). Matched against the start of the output.
+_NO_DATA_OUTPUT = re.compile(
+    r'^(No papers found|No good PubMed Result|Error |Error:|Connection error to GRetriever|'
+    r'Timeout connecting to GRetriever|GRetriever error|Tool execution error|Tool \S+ not found)'
+    r'|^\{"query": .{0,500}?"status": "(no_results|error)"', re.S)
+
+
+# omic_analysis_tool results that ran nothing and list the values to choose from instead
+_OPTION_REASONS = {"cell_type_required", "disease_not_found"}
+
+
+def _cell_type_options(tool_outputs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The reason and options of the last omic_analysis_tool call that ran nothing because no
+    cell type was given or the disease was not found (None if there is no such call)."""
+    for call in reversed(tool_outputs or []):
+        out = call["output"]
+        if (call["tool"] == "omic_analysis_tool" and isinstance(out, dict)
+                and out.get("reason") in _OPTION_REASONS):
+            return {"reason": out["reason"], **out["cell_type_options"]}
+    return None
+
+
+def _tool_output_has_data(output: Any) -> bool:
+    """False for empty results, error messages and failure dicts (e.g. omic_analysis_tool success=False)."""
+    if output is None or (isinstance(output, (str, list, dict)) and not output):
+        return False
+    if isinstance(output, dict):
+        return output.get("success", True) is not False
+    return not _NO_DATA_OUTPUT.search(str(output).lstrip())
 
 
 class SubAgent:
     """Base class for specialized sub-agents"""
     
-    def __init__(self, name: str, description: str, system_message: str, tools: List, llm=None, model_name: str = "gemini-3.5-flash"):
+    def __init__(self, name: str, description: str, system_message: str, tools: List, llm=None, model_name: str = DEFAULT_MODEL):
         self.name = name
         self.description = description
         self.system_message = system_message
@@ -857,9 +992,12 @@ class SubAgent:
         self.llm = llm if llm is not None else create_llm(model_name)
         if tools:
             self.llm_with_tools = self.llm.bind_tools(tools)
+            # Same tool declarations but calls disabled, for the closing answer once the tool budget is spent
+            self.llm_no_tool_calls = self.llm.bind_tools(tools, tool_choice="none")
         else:
             self.llm_with_tools = self.llm
-    
+            self.llm_no_tool_calls = self.llm
+
     async def execute(self, task: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """Execute a task and return results"""
         messages = [
@@ -875,33 +1013,73 @@ class SubAgent:
             # Handle tool calls if present
             max_iterations = 5
             iteration = 0
-            
+            n_tool_calls = 0
+            n_with_data = 0
+            tool_errors = []
+            # Raw tool return values (e.g. the omics result dict), for structured hand-off;
+            # the executor removes them before the result is stored or passed on as context
+            tool_outputs = []
+
             while response.tool_calls and iteration < max_iterations:
                 # Execute tool calls
                 tool_results = []
                 for tool_call in response.tool_calls:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
-                    
+
                     # Find and execute the tool
-                    tool_result = await self._execute_tool(tool_name, tool_args)
+                    tool_result, tool_error = await self._execute_tool(tool_name, tool_args)
+                    n_tool_calls += 1
+                    if tool_error:
+                        tool_errors.append(tool_error)
+                    else:
+                        tool_outputs.append({"tool": tool_name, "args": tool_args, "output": tool_result})
+                        if _tool_output_has_data(tool_result):
+                            n_with_data += 1
                     tool_results.append(ToolMessage(
                         content=str(tool_result),
                         tool_call_id=tool_call["id"]
                     ))
-                
+
                 messages.extend(tool_results)
-                
+
                 # Get next response
                 response = await self.llm_with_tools.ainvoke(messages)
                 messages.append(response)
                 iteration += 1
-            
-            return {
-                "success": True,
-                "result": extract_text_from_llm_response(response.content),
-                "iterations": iteration
-            }
+
+            # Tool budget spent with calls still pending: the last message has no answer text.
+            # Drop the unexecuted calls and ask for the answer from the tool results gathered so far.
+            hit_tool_cap = bool(response.tool_calls)
+            if hit_tool_cap:
+                messages[-1] = HumanMessage(content=(
+                    f"The tool-call limit ({max_iterations} rounds) is reached; no more tools can be called. "
+                    "Write your final answer now, using only the tool results above, and state which "
+                    "parts of the task could not be completed."))
+                response = await self.llm_no_tool_calls.ainvoke(messages)
+                messages.append(response)
+
+            result_text = extract_text_from_llm_response(response.content)
+            run_info = {"iterations": iteration, "tool_calls": n_tool_calls,
+                        "tool_errors": len(tool_errors), "tool_calls_with_data": n_with_data,
+                        "hit_tool_cap": hit_tool_cap, "tool_outputs": tool_outputs}
+
+            # Report failure (which triggers retry/re-planning) instead of passing on an empty
+            # answer or one written without any tool data (it could only come from model memory)
+            if not result_text.strip():
+                return {"success": False, "result": "", **run_info,
+                        "error": f"{self.name} produced no answer after {iteration} tool rounds "
+                                 f"({n_tool_calls} tool calls, {len(tool_errors)} failed)"}
+            if n_tool_calls and n_with_data == 0:
+                if tool_errors:
+                    detail = f"first error: {tool_errors[0][:300]}"
+                else:
+                    detail = f"first output: {str(tool_outputs[0]['output'])[:300]}"
+                return {"success": False, "result": result_text, **run_info,
+                        "error": f"None of the {n_tool_calls} tool calls returned data "
+                                 f"({len(tool_errors)} raised errors); {detail}"}
+
+            return {"success": True, "result": result_text, **run_info}
             
         except Exception as e:
             import traceback
@@ -911,20 +1089,23 @@ class SubAgent:
                 "traceback": traceback.format_exc()
             }
     
-    async def _execute_tool(self, tool_name: str, tool_args: Dict) -> Any:
-        """Execute a specific tool by name"""
+    async def _execute_tool(self, tool_name: str, tool_args: Dict) -> tuple:
+        """Execute a specific tool by name. Returns (result, error message or None)."""
         for tool in self.tools:
             if tool.name == tool_name:
                 try:
                     # Always use ainvoke for consistency with async execution
-                    return await tool.ainvoke(tool_args)
+                    return await tool.ainvoke(tool_args), None
                 except Exception as e:
                     # Fallback to sync invoke if async fails
                     try:
-                        return tool.invoke(tool_args)
+                        return tool.invoke(tool_args), None
                     except Exception as e2:
-                        return f"Tool execution error: {str(e2)}"
-        return f"Tool {tool_name} not found"
+                        # Report the async error: for async-only tools e2 is just "sync not supported"
+                        msg = f"Tool execution error: {type(e).__name__}: {e}"
+                        return msg, msg
+        msg = f"Tool {tool_name} not found"
+        return msg, msg
 
 
 # ==============================================================================
@@ -936,7 +1117,7 @@ class ExpertRouting(BaseModel):
     """Structured routing decision from the ScientistsAgent"""
     reasoning: str = Field(description="Brief reasoning for why these experts were selected")
     selected_experts: PyList[str] = Field(
-        description="List of expert names to delegate to. Choose from: GenomicsExpert, NeuroscienceExpert, LongevityBiostatsExpert, BioinformaticsExpert"
+        description="List of expert names to delegate to. Choose from: GenomicsExpert, NeuroscienceExpert, LongevityBiostatsExpert, CancerExpert"
     )
     expert_instructions: Dict[str, str] = Field(
         description="Specific instructions/sub-queries tailored for each selected expert"
@@ -1173,7 +1354,7 @@ who leads a multidisciplinary research team. Your role is to:
         "CancerExpert":            CANCER_EXPERT_PROMPT,
     }
 
-    def __init__(self, tools: List = None, llm=None, model_name: str = "gemini-3.5-flash"):
+    def __init__(self, tools: List = None, llm=None, model_name: str = DEFAULT_MODEL):
         super().__init__(
             name="ScientistsAgent",
             description="Multi-expert scientist agent with RAG-backed domain experts",
@@ -1448,20 +1629,78 @@ Be rigorous, cite evidence, and highlight both consensus and disagreements."""),
 # LANGGRAPH AGENT SYSTEM
 # ==============================================================================
 
+# Hard-coded case-study cohorts. When a query is about one of these diseases and
+# names no cell type, the planner runs one OmicMiningAgent task per cell type, in
+# this order. Names are the exact OmniCellTOSG disease / organ / CMT_name strings.
+# A plain string uses that cell type for both groups. A dict gives the cancer-cell
+# cohorts' separate control cell type and, for PDAC, the original label of the
+# disease cells, as chosen in case_study_handoff_20260923. All nine handoff cohorts
+# reproduce with identical metacells, except the LUAD cancer-cell controls: the handoff
+# drew 1,000 of 2,134 type II pneumocyte metacells at random, the sampler draws its own 1,000.
+CASE_STUDY_COHORTS = {
+    "Alzheimer's Disease": {
+        "organ": "brain",
+        "cell_types": ["microglial cell", "astrocyte", "glutamatergic neuron"],
+    },
+    "lung adenocarcinoma": {
+        "organ": "lung",
+        "cell_types": [
+            {"cell_type": "malignant cell",
+             "control_cell_type": "type II pneumocyte;type II pneumocyte:proliferating"},
+            "fibroblast;fibroblast:fibromyocyte",
+            "macrophage;macrophage:monocyte-derived;macrophage:1;macrophage:2;macrophage:3",
+        ],
+    },
+    # The PDAC disease metacells come from GSE202051, which records no donor IDs.
+    # The fibroblast label covers the handoff's CAF cohort. omic_analysis_tool applies
+    # keep_unknown_donor itself; the planner prompt does not show it.
+    "pancreatic ductal adenocarcinoma": {
+        "organ": "pancreas",
+        "cell_types": [
+            {"cell_type": "epithelial cell", "disease_cell_label": "Malignant epithelial cell",
+             "control_cell_type": "pancreatic ductal cell"},
+            "fibroblast;fibroblast:fibromyocyte",
+            "macrophage;macrophage:monocyte-derived;macrophage:1;macrophage:2;macrophage:3",
+        ],
+        "keep_unknown_donor": True,
+    },
+}
+
+
+def cohort_cell_types(cohort: Dict[str, Any]) -> List[Dict[str, str]]:
+    """A cohort's cell-type entries as dicts; a plain string means one cell type for both groups."""
+    return [entry if isinstance(entry, dict) else {"cell_type": entry}
+            for entry in cohort.get("cell_types", [])]
+
+
+def case_study_keep_unknown_cell_types(disease: Optional[str]) -> set:
+    """Lower-cased cell types whose keep_unknown_donor is on: the listed cell types of the
+    disease's CASE_STUDY_COHORTS entry when it sets the flag, otherwise none."""
+    cohort = next((c for name, c in CASE_STUDY_COHORTS.items()
+                   if disease and name.lower() == disease.strip().lower()), {})
+    if not cohort.get("keep_unknown_donor"):
+        return set()
+    return {entry["cell_type"].lower() for entry in cohort_cell_types(cohort)}
+
+
 class LangGraphOmniCellAgent:
     """
     LangGraph-based OmniCellAgent with planning, sub-agent execution, re-planning, and reporting.
     """
     
-    def __init__(self, model_name: str = "gemini-3.5-flash", log_dir: str = None, session_id: str = None, llm=None):
+    def __init__(self, model_name: str = DEFAULT_MODEL, log_dir: str = None, session_id: str = None, llm=None,
+                 lead_model_name: str = LEAD_MODEL, lead_llm=None):
         """
         Initialize the LangGraph agent system.
-        
+
         Args:
-            model_name: Name of the LLM model to use (default: gemini-3.5-flash)
+            model_name: LLM of the sub-agents (default: DEFAULT_MODEL)
             log_dir: Directory to save logs
             session_id: Unique session identifier
-            llm: Optional pre-configured LLM instance (any type)
+            llm: Optional pre-configured sub-agent LLM instance (any type)
+            lead_model_name: LLM of the planner, replanner, reporter and report revision (default: LEAD_MODEL,
+                at LEAD_REASONING_EFFORT)
+            lead_llm: Optional pre-configured LLM instance for those steps
         """
         if log_dir is None:
             log_dir = get_path('logs.base', absolute=True, create=True)
@@ -1472,7 +1711,8 @@ class LangGraphOmniCellAgent:
         self.session_id = session_id
         self.log_dir = log_dir
         self.model_name = model_name
-        
+        self.lead_model_name = lead_model_name
+
         # Create the session directory and set it globally for tools
         self.session_dir = create_session_dir(self.session_id)
         
@@ -1480,9 +1720,23 @@ class LangGraphOmniCellAgent:
         print(f"📁 Session ID: {self.session_id}")
         print(f"📂 Session Directory: {self.session_dir}")
         
-        # Initialize LLM - accept any LLM instance or create one
+        # Initialize LLMs - accept any LLM instance or create one
         self.llm = llm if llm is not None else create_llm(model_name)
-        
+        self.lead_llm = lead_llm if lead_llm is not None else create_lead_llm(lead_model_name)
+        print(f"🤖 Models: {model_name} (sub-agents), {lead_model_name} (planner, replanner, reporter)")
+
+        # Token/time usage of this session, saved to <session_dir>/usage_log.json. The callback sits on
+        # both LLM instances, so it sees every call (bind_tools / structured output too).
+        self.usage_tracker = UsageTracker(self.session_id, model=model_name, lead_model=lead_model_name)
+        self._usage_callback = LLMUsageCallback(self.usage_tracker)
+        for model in [self.llm] + ([self.lead_llm] if self.lead_llm is not self.llm else []):
+            existing_callbacks = model.callbacks
+            if hasattr(existing_callbacks, "add_handler"):
+                existing_callbacks.add_handler(self._usage_callback)
+            else:
+                model.callbacks = list(existing_callbacks or []) + [self._usage_callback]
+        set_current_tracker(self.usage_tracker)
+
         # Initialize sub-agents
         self._init_sub_agents()
         
@@ -1504,7 +1758,27 @@ Your task is to answer gene/biomarker questions using the omic_analysis tool.
 From the user's question, identify:
 - Disease name (MUST match the variations list below)
 - Organ (REQUIRED for efficiency)
-- Cell type (OPTIONAL, if mentioned)
+- Cell type (OPTIONAL, if mentioned):
+  - If the TASK description gives a cell type in double quotes, pass that exact
+    string as `cell_type`, even when the user's query names no cell type. Run one
+    tool call for that cell type only.
+  - Otherwise, if the TASK or the user's query names a cell type, pass it as
+    `cell_type`. Never drop the named cell type.
+  - If no cell type is named at all and label is "disease", do not choose one.
+    Call omic_analysis_tool without `cell_type`: it runs no analysis and returns
+    the cell types available for the disease and organ. Report the returned list
+    in your answer and stop; the planner then chooses the cell types.
+  - If omic_analysis_tool returns `reason: "disease_not_found"`, it ran nothing and
+    lists the closest disease names. If one of them is the same disease, call it
+    once more with that name copied verbatim and the other arguments unchanged;
+    otherwise report the listed names and stop.
+  - For label "gender" or "cell_type", set no `cell_type` unless one is named.
+- Control cell type (OPTIONAL). If the TASK description gives a control cell type
+  in double quotes, pass that exact string as `control_cell_type`: the normal
+  group then uses that cell type instead of `cell_type`.
+- Original disease-cell label (OPTIONAL). If the TASK description gives an original
+  label for the disease cells in double quotes, pass that exact string as
+  `disease_cell_label`.
 - Label column for the comparison (defaults to "disease"; set to "gender" if
   the question is specifically about female-vs-male differences within a cohort)
 
@@ -1528,10 +1802,14 @@ If the tool returns `success: false`, inspect the result for BOTH:
 On the next attempt, pick ONE alternative from `suggestions` (verbatim — keep
 the apostrophe / capitalization exactly as listed) and retry. Do this at most
 once per failed call to avoid loops.
+Exception: a result with `reason: "cell_type_required"` is not an error to fix by
+choosing a cell type; report its list and stop, as STEP 1 says. A result with
+`reason: "disease_not_found"` is handled as STEP 1 says.
 
 ## LABEL COLUMN (default "disease")
-- label="disease" (default) → disease vs non-disease comparison (uses matched
-  normal cells via stratified balancing). Requires `disease`.
+- label="disease" (default) → disease cells vs normal cells that pass the same
+  cell-type (or control_cell_type) and organ filters; the normal cells are not
+  matched to the disease cells (e.g. by study, protocol, age or sex). Requires `disease`.
 - label="gender" → female vs male comparison within the queried subset.
 - label="cell_type" → cell-type-stratified comparison.
 
@@ -1561,14 +1839,21 @@ You download, read, and analyze complete research papers — not just abstracts.
 ## KEY INSTRUCTIONS:
 1. Check context["top_genes"] for genes from previous analysis — search for ALL of them
 2. Use pubmed_full_search_tool as your PRIMARY tool — it downloads and reads full papers
-3. Each tool call retrieves up to 50 papers with extracted full-text content
+3. Each tool call retrieves up to """ + str(NUM_PAPERS_TO_DOWNLOAD) + """ papers with extracted full-text content
 4. READ the extracted content carefully — you have access to actual paper text, not just abstracts
 5. Every claim MUST include a citation: (Author et al., Year, DOI/PMID)
 
 ## SEARCH STRATEGY:
-- Group related genes into 2-4 focused queries for efficiency:
-  e.g., "TREM2 TYROBP microglia Alzheimer" (combines related pathway genes)
+- Queries use PubMed syntax. Words separated by spaces are ANDed. OR binds only its two neighbouring
+  terms, so ALWAYS put OR-lists in parentheses:
+  RIGHT: "(TREM2 OR TYROBP OR APOE) AND Alzheimer's disease"
+  WRONG: "TREM2 OR TYROBP OR APOE Alzheimer" (matches any TREM2 or TYROBP paper on any disease)
+- Group related genes into 2-4 focused queries for efficiency, each an OR-list in parentheses
+  ANDed with the disease (and cell type if useful)
 - Include disease context: "[GENE] [disease]" or "[GENE] [cell_type] [disease]"
+- If a gene has no papers with the disease, say so in your answer. Papers on the gene in other
+  diseases may describe its function, but label them as such: they are not evidence of a role
+  in this disease
 - For maximum coverage, also try pathway-level queries:
   e.g., "neuroinflammation signaling Alzheimer's disease"
 - If context has many genes (>10), prioritize the top ones and group by function
@@ -1618,17 +1903,26 @@ You will provide structured data and relationships from the knowledge graph to e
             )
         }
     
+    @staticmethod
+    def _with_usage_label(label: str, node_fn):
+        """Wrap a graph node so its LLM calls are attributed to `label` in the usage log."""
+        async def labeled_node(state: AgentState) -> Dict[str, Any]:
+            with usage_label(label):
+                return await node_fn(state)
+        return labeled_node
+
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph state machine"""
         
         # Create the graph
         workflow = StateGraph(AgentState)
         
-        # Add nodes
-        workflow.add_node("planner", self._planning_node)
-        workflow.add_node("executor", self._execution_node)
-        workflow.add_node("replanner", self._replanning_node)
-        workflow.add_node("reporter", self._reporting_node)
+        # Add nodes (LLM usage inside each node is attributed to the node name, or to the sub-agent
+        # label set in _execution_node)
+        workflow.add_node("planner", self._with_usage_label("planner", self._planning_node))
+        workflow.add_node("executor", self._with_usage_label("executor", self._execution_node))
+        workflow.add_node("replanner", self._with_usage_label("replanner", self._replanning_node))
+        workflow.add_node("reporter", self._with_usage_label("reporter", self._reporting_node))
         
         # Add edges
         workflow.add_edge(START, "planner")
@@ -1665,12 +1959,44 @@ You will provide structured data and relationships from the knowledge graph to e
         """Create initial plan for the query using structured output"""
         print("\n📋 PLANNING PHASE")
         print("=" * 60)
-        
+
+        def describe(entry):
+            text = f'cell type "{entry["cell_type"]}"'
+            if entry.get("disease_cell_label"):
+                text += f', disease cells with original label "{entry["disease_cell_label"]}"'
+            if entry.get("control_cell_type"):
+                text += f', control cell type "{entry["control_cell_type"]}"'
+            return text
+
+        fixed_cohorts = "\n".join(
+            f'- {disease} (organ "{c["organ"]}"):\n'
+            + "\n".join(f"    {i}. {describe(entry)}" for i, entry in enumerate(cohort_cell_types(c), 1))
+            for disease, c in CASE_STUDY_COHORTS.items()
+        )
+
         planning_prompt = f"""Create a comprehensive research plan for hypothesis-driven discovery:
 
 Query: {state['query']}
 
 **Goal**: Generate thorough Gene→Pathway→Phenotype grounded hypotheses with literature validation.
+
+**FIXED CELL-TYPE COHORTS (MANDATORY — overrides any other omics instruction):**
+If the query is about one of the diseases below and does NOT name a cell type, the plan
+MUST begin with one separate OmicMiningAgent task per listed cell type, in the listed
+order, before any other agent. Each task description MUST contain the exact disease,
+organ and cell-type strings in double quotes, e.g.
+  'Differential expression for disease "Alzheimer's Disease", organ "brain",
+   cell type "microglial cell": disease vs normal cells of the same cell type'
+When a listed cell type also gives a control cell type and/or an original label for the
+disease cells, the disease and control groups are selected by different names: copy
+those strings into the same task description, exactly and in double quotes, e.g.
+  'Differential expression for disease "lung adenocarcinoma", organ "lung",
+   cell type "malignant cell", control cell type "type II pneumocyte;type II pneumocyte:proliferating":
+   disease cells vs normal control cells'
+Never merge the cell types into one task and never add or drop a cell type. All later
+tasks (BioMarkerKGAgent, PubMedResearcher, ScientistsAgent, ...) must use the DEGs from
+every cell type and compare the cell types.
+{fixed_cohorts}
 
 **Available Agents & Capabilities:**
 1. **OmicMiningAgent** - Differential expression analysis 
@@ -1721,7 +2047,7 @@ Without the ScientistsAgent, reports lack expert-level scientific interpretation
         
         # Try structured output first (more robust)
         try:
-            structured_llm = self.llm.with_structured_output(ResearchPlan)
+            structured_llm = self.lead_llm.with_structured_output(ResearchPlan)
             plan_result: ResearchPlan = await structured_llm.ainvoke([
                 SystemMessage(content="""You are an expert research planner for biomedical hypothesis discovery. 
 Create thorough plans that:
@@ -1770,7 +2096,7 @@ Create thorough plans that:
             
             # Fallback to JSON parsing
             try:
-                response = await self.llm.ainvoke([
+                response = await self.lead_llm.ainvoke([
                     SystemMessage(content="You are a research planner. Output ONLY valid JSON, no markdown."),
                     HumanMessage(content=planning_prompt + '\n\nOutput JSON: {"analysis": "...", "tasks": [{"id": "task_1", "description": "...", "assigned_agent": "AgentName"}]}')
                 ])
@@ -1894,28 +2220,57 @@ Create thorough plans that:
         current_task["status"] = "in_progress"
         current_task["attempts"] += 1
         
-        # Get the sub-agent
+        # An unknown agent name fails the task at once (no retry), so the replanner reassigns it;
+        # running it on some other agent would pass that agent's output off as the task's result
         if agent_name not in self.sub_agents:
-            print(f"⚠️ Unknown agent: {agent_name}, using GoogleSearcher")
-            agent_name = "GoogleSearcher"
-        
+            print(f"❌ Unknown agent: {agent_name}")
+            current_task["status"] = "failed"
+            current_task["attempts"] = max(current_task["attempts"], 2)
+            current_task["error"] = (f"Unknown agent '{agent_name}'; valid agents: "
+                                     f"{', '.join(self.sub_agents)}")
+            return {
+                "plan": plan,
+                "current_task_index": current_idx,
+                "process_log": state.get("process_log", []) + [{
+                    "phase": "execution", "timestamp": datetime.now().isoformat(),
+                    "task_id": current_task["id"], "agent": agent_name, "success": False,
+                    "result_summary": current_task["error"]}],
+            }
+
         sub_agent = self.sub_agents[agent_name]
         
         # Prepare context from previous task results, including structured shared_data
         shared_data = state.get("shared_data", {})
+        # Gene lists go in once (top_genes, annotated with cell type), not again inside shared_data
+        # and each omics run record: the context is resent on every LLM call of the sub-agent
+        context_shared = {k: v for k, v in shared_data.items() if k != "top_genes"}
+        if "omic_runs" in context_shared:
+            context_shared["omic_runs"] = [{k: v for k, v in r.items() if k != "top_genes"}
+                                           for r in context_shared["omic_runs"]]
         context = {
             "query": state["query"],
             "session_id": state["session_id"],
             "previous_results": state.get("agent_outputs", {}),
             # Structured data for programmatic access by downstream agents
-            "shared_data": shared_data,
+            "shared_data": context_shared,
             "top_genes": shared_data.get("top_genes", []),  # Explicit gene list
             "paper_dois": shared_data.get("paper_dois", []),  # Explicit DOI list
         }
         
         # Execute the task
-        result = await sub_agent.execute(current_task["description"], context)
-        
+        task_start = time.perf_counter()
+        with usage_label(agent_name):
+            result = await sub_agent.execute(current_task["description"], context)
+        task_seconds = time.perf_counter() - task_start
+        self.usage_tracker.record_task(current_task["id"], agent_name, task_seconds,
+                                       result.get("success", False))
+
+        # Structured tool outputs are kept out of agent_outputs (they are passed to every later
+        # agent as context); they are read here even if the task failed, since the tool data are real
+        tool_outputs = result.pop("tool_outputs", [])
+        shared_data = self._extract_structured_data(
+            agent_name, result, dict(state.get("shared_data", {})), tool_outputs)
+
         # Process result
         process_entry = {
             "phase": "execution",
@@ -1923,6 +2278,7 @@ Create thorough plans that:
             "task_id": current_task["id"],
             "agent": agent_name,
             "task_description": current_task["description"],
+            "seconds": round(task_seconds, 2),
             "success": result.get("success", False),
             "result_summary": str(result.get("result", result.get("error", "")))[:500]
         }
@@ -1935,11 +2291,7 @@ Create thorough plans that:
             # Store in agent outputs
             agent_outputs = state.get("agent_outputs", {})
             agent_outputs[current_task["id"]] = result
-            
-            # Extract and store structured data from agent results
-            shared_data = state.get("shared_data", {}).copy()
-            shared_data = self._extract_structured_data(agent_name, result, shared_data)
-            
+
             return {
                 "plan": plan,
                 "current_task_index": current_idx + 1,
@@ -1952,67 +2304,88 @@ Create thorough plans that:
             print(f"❌ Task failed: {result.get('error', 'Unknown error')}")
             current_task["status"] = "failed"
             current_task["error"] = result.get("error", "Unknown error")
-            
+            # No cell type was given or the disease was not found: rerunning the task cannot help,
+            # so it goes straight to the replanner, which receives the values to choose from
+            options = _cell_type_options(tool_outputs) if agent_name == "OmicMiningAgent" else None
+            if options is not None:
+                current_task["cell_type_options"] = options
+                current_task["attempts"] = max(current_task["attempts"], 2)
+                current_task["error"] = (
+                    "No cell type was given, so no analysis was run: a disease-vs-normal comparison "
+                    "needs one cell type" if options["reason"] == "cell_type_required" else
+                    "The disease name was not found, so no analysis was run")
+
             return {
                 "plan": plan,
                 "current_task_index": current_idx,
+                "shared_data": shared_data,
                 "process_log": state.get("process_log", []) + [process_entry],
                 "messages": [AIMessage(content=f"Task {current_task['id']} failed: {result.get('error', '')}")]
             }
     
-    def _extract_structured_data(self, agent_name: str, result: Dict[str, Any], shared_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_structured_data(self, agent_name: str, result: Dict[str, Any], shared_data: Dict[str, Any],
+                                 tool_outputs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Extract structured data from agent results for programmatic use by downstream agents.
-        
+
         This enables cross-agent data sharing without relying on LLM parsing of free-text context.
-        
+
         Args:
             agent_name: Name of the agent that produced the result
             result: The result dictionary from the agent
             shared_data: Current shared_data dictionary to update
-            
+            tool_outputs: Raw tool return values from SubAgent.execute ({"tool", "args", "output"})
+
         Returns:
             Updated shared_data dictionary
         """
         result_content = result.get("result", "")
-        
-        if agent_name == "OmicAnalysis":
-            # Extract genes from OmicAnalysis result
-            # The result is a dict from omic_analysis_tool
-            if isinstance(result_content, dict):
-                # Direct dict result from tool
-                top_genes = result_content.get("top_genes_by_fdr", [])
-                if top_genes:
-                    shared_data["top_genes"] = top_genes
-                    print(f"[SharedData] Stored {len(top_genes)} genes from OmicAnalysis")
 
-                verdict = result_content.get("cohort_verdict")
-                if verdict:
-                    shared_data["cohort_verdict"] = verdict
-                    shared_data["cohort_diagnostics"] = result_content.get("cohort_diagnostics")
-                    print(f"[SharedData] Cohort verdict: {verdict}")
+        if agent_name == "OmicMiningAgent":
+            # The agent's text answer is prose; the omics numbers come from the tool's result dict.
+            # One record per cohort (CASE_STUDY_COHORTS runs one task per cell type).
+            omic_runs = list(shared_data.get("omic_runs", []))
+            for call in tool_outputs or []:
+                out = call["output"]
+                # A call without a cell type ran nothing (it only listed cell types): not a cohort
+                if (call["tool"] != "omic_analysis_tool" or not isinstance(out, dict)
+                        or out.get("reason") == "cell_type_required"):
+                    continue
+                entities = out.get("extracted_entities") or {}
+                run = {
+                    "disease": entities.get("disease"),
+                    "cell_type": entities.get("cell type"),
+                    "control_cell_type": entities.get("control cell type"),
+                    "disease_cell_label": entities.get("disease cell label"),
+                    "organ": entities.get("organ"),
+                    "label": out.get("actual_label"),
+                    "contrast": out.get("contrast"),
+                    "num_samples": out.get("num_samples"),
+                    "de_success": out.get("de_success"),
+                    "error": None if out.get("success", True) else out.get("message"),
+                    "top_genes": (out.get("top_genes_by_fdr") or [])[:25],
+                }
+                # A retried task replaces its earlier record for the same cohort
+                fields = ("disease", "cell_type", "control_cell_type", "disease_cell_label",
+                          "organ", "label")
+                key = tuple(run[f] for f in fields)
+                omic_runs = [r for r in omic_runs if tuple(r.get(f) for f in fields) != key]
+                omic_runs.append(run)
+                print(f"[SharedData] Omics run {run['cell_type'] or run['disease']}: "
+                      f"{len(run['top_genes'])} top genes")
+            if omic_runs:
+                shared_data["omic_runs"] = omic_runs
+                # Flat gene list for downstream agents: the top genes of every cohort, first occurrence kept
+                seen, top_genes = set(), []
+                for run in omic_runs:
+                    for gene in run["top_genes"]:
+                        if gene.get("gene_name") not in seen:
+                            seen.add(gene.get("gene_name"))
+                            top_genes.append({**gene, "cell_type": run["cell_type"]})
+                shared_data["top_genes"] = top_genes
+                shared_data["disease"] = omic_runs[-1]["disease"] or shared_data.get("disease", "")
+                shared_data["cell_type"] = "; ".join(r["cell_type"] for r in omic_runs if r["cell_type"])
 
-                # Also extract disease and cell type
-                extracted = result_content.get("extracted_entities", {})
-                if extracted.get("disease"):
-                    shared_data["disease"] = extracted["disease"]
-                if extracted.get("cell_type"):
-                    shared_data["cell_type"] = extracted["cell_type"]
-            else:
-                # Try to parse if it's a string representation
-                try:
-                    if "top_genes_by_fdr" in str(result_content):
-                        # Attempt to extract gene list from string
-                        import re
-                        genes_match = re.search(r"top_genes_by_fdr.*?:\s*\[([^\]]+)\]", str(result_content))
-                        if genes_match:
-                            genes_str = genes_match.group(1)
-                            genes = [g.strip().strip("'\"") for g in genes_str.split(",")]
-                            shared_data["top_genes"] = genes
-                            print(f"[SharedData] Parsed {len(genes)} genes from OmicAnalysis string output")
-                except Exception as e:
-                    print(f"[SharedData] Warning: Could not parse genes from OmicAnalysis: {e}")
-        
         elif agent_name == "PubMedResearcher":
             # Extract DOIs from PubMed results
             if isinstance(result_content, str):
@@ -2057,11 +2430,21 @@ Create thorough plans that:
                 }]
             }
         
-        # Get failed tasks
-        failed_tasks = [t for t in state["plan"] if t["status"] == "failed"]
+        # Failed tasks not yet replaced; those replaced in an earlier round stay in the plan (marked
+        # "replaced") so the reporter can state which evidence is missing
+        failed_tasks = [t for t in state["plan"] if t["status"] == "failed" and not t.get("replaced")]
+        earlier_failed = [t for t in state["plan"] if t["status"] == "failed" and t.get("replaced")]
         completed_tasks = [t for t in state["plan"] if t["status"] == "completed"]
-        
-        replanning_prompt = f"""A task has failed. Re-plan the remaining work.
+        # Tasks not yet run are kept as planned and run after the replacements
+        pending_tasks = [t for t in state["plan"] if t["status"] == "pending"]
+        agent_list = "\n".join(f"- {name}: {getattr(agent, 'description', '')}"
+                               for name, agent in self.sub_agents.items())
+        failed_info = [{"id": t["id"], "assigned_agent": t["assigned_agent"], "description": t["description"],
+                        "error": t.get("error", ""),
+                        **({"cell_type_options": t["cell_type_options"]} if t.get("cell_type_options") else {})}
+                       for t in failed_tasks]
+
+        replanning_prompt = f"""A task has failed. Write replacement tasks for the failed task(s).
 
 Original Query: {state['query']}
 
@@ -2069,12 +2452,32 @@ Completed Tasks:
 {json.dumps([{"id": t["id"], "description": t["description"], "result": t.get("result", "")[:200]} for t in completed_tasks], indent=2)}
 
 Failed Tasks:
-{json.dumps([{"id": t["id"], "description": t["description"], "error": t.get("error", "")} for t in failed_tasks], indent=2)}
+{json.dumps(failed_info, indent=2)}
 
-Create a revised plan that:
-1. Accounts for what has already been completed
-2. Addresses the failures with alternative approaches
-3. May use different agents or modify the task descriptions
+Tasks still to run after your replacements (kept unchanged; do not repeat them):
+{json.dumps([{"id": t["id"], "assigned_agent": t["assigned_agent"], "description": t["description"]} for t in pending_tasks], indent=2)}
+
+Available agents (assigned_agent MUST be one of these exact names):
+{agent_list}
+
+Rules:
+1. Replace only the failed task(s), using a different agent or a changed approach that avoids the error.
+2. If a failure cannot be worked around (e.g. no literature exists, a service is down), return no
+   replacement for it; the final report will state that it failed.
+3. Do not add synthesis, summary or report-writing tasks; the reporting step does that.
+4. A failed OmicMiningAgent task with `cell_type_options` ran no analysis:
+   - `reason` "cell_type_required": it named no cell type, and a disease-vs-normal comparison
+     needs one. Replace it with one OmicMiningAgent task per cell type you choose: up to 3 cell
+     types from `cell_type_options.cell_types`, the ones most relevant to the original query. Each
+     task description MUST contain the exact disease, organ and cell-type strings in double
+     quotes, copied verbatim from `cell_type_options` (leave the organ out if it is null), e.g.
+       'Differential expression for disease "<disease>", organ "<organ>", cell type "<cell type>":
+        disease vs normal cells of the same cell type'
+     If `cell_type_options.cell_types` is empty, return no replacement for that task.
+   - `reason` "disease_not_found": no disease has the task's disease name. If one name in
+     `cell_type_options.disease_candidates` is the same disease as the original query, replace the
+     task with one OmicMiningAgent task that gives that name verbatim in double quotes, with the
+     failed task's organ and cell type (if any); otherwise return no replacement for that task.
 
 Respond in JSON format:
 {{
@@ -2089,7 +2492,7 @@ Respond in JSON format:
 }}
 """
         
-        response = await self.llm.ainvoke([
+        response = await self.lead_llm.ainvoke([
             SystemMessage(content="You are a strategic research planner. Output valid JSON only."),
             HumanMessage(content=replanning_prompt)
         ])
@@ -2105,9 +2508,14 @@ Respond in JSON format:
             
             replan_data = json.loads(content)
             
-            # Create new tasks
+            # Create new tasks (tasks naming an agent that does not exist are dropped)
             new_tasks = []
+            dropped = []
             for task in replan_data.get("tasks", []):
+                if task.get("assigned_agent") not in self.sub_agents:
+                    dropped.append(task)
+                    print(f"⚠️ Dropped replanned task {task.get('id')}: unknown agent {task.get('assigned_agent')}")
+                    continue
                 new_tasks.append(SubTask(
                     id=task["id"],
                     description=task["description"],
@@ -2118,14 +2526,18 @@ Respond in JSON format:
                     attempts=0
                 ))
             
-            # Keep completed tasks and add new ones
-            final_plan = completed_tasks + new_tasks
-            
-            print(f"📝 Revised plan with {len(new_tasks)} new tasks")
-            
+            # Done and failed tasks first (not run again), then the replacements, then the tasks not yet run
+            for t in failed_tasks:
+                t["replaced"] = True
+            done = completed_tasks + earlier_failed + failed_tasks
+            final_plan = done + new_tasks + pending_tasks
+
+            print(f"📝 Revised plan with {len(new_tasks)} new tasks"
+                  f" ({len(pending_tasks)} planned tasks kept, {len(dropped)} dropped)")
+
             return {
                 "plan": final_plan,
-                "current_task_index": len(completed_tasks),
+                "current_task_index": len(done),
                 "plan_revision_count": revision_count,
                 "status": "executing",
                 "process_log": state.get("process_log", []) + [{
@@ -2133,7 +2545,9 @@ Respond in JSON format:
                     "timestamp": datetime.now().isoformat(),
                     "revision_count": revision_count,
                     "reason": replan_data.get("revision_reason", ""),
-                    "new_tasks_count": len(new_tasks)
+                    "new_tasks_count": len(new_tasks),
+                    "kept_pending_count": len(pending_tasks),
+                    "dropped_unknown_agent": [t.get("assigned_agent") for t in dropped]
                 }]
             }
             
@@ -2163,7 +2577,61 @@ Respond in JSON format:
                 "agent": task["assigned_agent"],
                 "result": task.get("result", "")
             })
-        
+
+        # Per-cell-type omics runs write to omic_<cell type>/ subfolders (see
+        # omic_analysis_tool); list their figures so the report embeds real files.
+        session_dir = get_current_session_dir()
+        omic_figures = []
+        for sub in sorted(d for d in os.listdir(session_dir) if d.startswith("omic_")):
+            for root, _, files in sorted(os.walk(os.path.join(session_dir, sub))):
+                omic_figures += [os.path.relpath(os.path.join(root, f), session_dir)
+                                 for f in sorted(files) if f.endswith(".png")]
+        omic_figure_section = ""
+        if omic_figures:
+            omic_figure_section = (
+                "\n## Per-Cell-Type Omics Runs\n"
+                "The omics analysis ran once per cell type; each run's outputs are in its own "
+                "omic_<cell type>/ folder. Report Step 1 and Step 4 separately for each cell type, "
+                "then compare the cell types. Embed figures ONLY from this list (paths are relative "
+                "to the report), not the default paths below:\n"
+                + "\n".join(f"- {p}" for p in omic_figures) + "\n"
+            )
+
+        # Per-cohort facts come from the omics tool's result dict (shared_data), not from the
+        # agents' prose, so the report states them as computed
+        cohort_section = ""
+        omic_runs = state.get("shared_data", {}).get("omic_runs", [])
+        if omic_runs:
+            lines = []
+            for run in omic_runs:
+                name = run.get("cell_type") or run.get("disease")
+                if run.get("disease_cell_label"):
+                    name += f' (original label "{run["disease_cell_label"]}")'
+                if run.get("control_cell_type"):
+                    name += f" vs normal {run['control_cell_type']}"
+                lines.append(f"- {name} ({run.get('disease')}, {run.get('organ')}; "
+                             f"{run.get('num_samples')} samples)")
+                if run.get("error"):
+                    lines.append(f"  - analysis error: {run['error']}")
+            cohort_section = "\n## Omics Cohorts (computed by the omics tool)\n" + "\n".join(lines) + "\n"
+
+        # Failed and never-run tasks: the report must say this evidence is missing instead of filling
+        # the corresponding section from model knowledge
+        missing_section = ""
+        not_run = [t for t in state["plan"] if t["status"] in ("pending", "in_progress")]
+        if failed_tasks or not_run:
+            lines = [f"- {t['id']} ({t['assigned_agent']}): {t['description'][:150]} -- FAILED: "
+                     f"{str(t.get('error', ''))[:200]}" for t in failed_tasks]
+            lines += [f"- {t['id']} ({t['assigned_agent']}): {t['description'][:150]} -- NOT RUN"
+                      for t in not_run]
+            missing_section = (
+                "\n## Failed Tasks (no results)\n"
+                "These tasks produced no usable results. In the report, state for each one that this "
+                "evidence is missing and why. Do NOT write the corresponding section (e.g. knowledge-graph, "
+                "web or literature findings) from general knowledge as if the tool had returned it.\n"
+                + "\n".join(lines) + "\n"
+            )
+
         reporting_prompt = f"""Generate a comprehensive research report for a graduate-level biomedical audience.
 
 ## DATA PROVENANCE (DO NOT MISCHARACTERIZE)
@@ -2178,7 +2646,7 @@ fields of the omics tool result to confirm.
 
 ## Task Results:
 {json.dumps(task_results, indent=2, default=str)}
-
+{cohort_section}{missing_section}{omic_figure_section}
 ---
 
 ## REPORT STRUCTURE (Follow this order):
@@ -2351,8 +2819,8 @@ Guidelines — favour DENSITY over conservatism:
   omit silently rather than fabricate.
 """
         
-        response = await self.llm.ainvoke([
-            SystemMessage(content="""You are an expert biomedical research synthesizer specializing in gene-pathway-anchored hypothesis generation. 
+        response = await self.lead_llm.ainvoke([
+            SystemMessage(content="""You are an expert biomedical research synthesizer specializing in gene-pathway-anchored hypothesis generation.
 
 **Core Synthesis Capabilities:**
 1. Summarize omics findings with statistics (samples, DEG counts, effect sizes)
@@ -2519,41 +2987,25 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
         if shared_data:
             appendix_parts.append("## A4. Shared Data Summary\n\n")
             
-            # Top genes - full list if available
-            top_genes = shared_data.get("top_genes", [])
-            if top_genes:
-                appendix_parts.append("### Top Differentially Expressed Genes\n\n")
+            # Top genes, one block per omics run (from the tool's result dict)
+            for run in shared_data.get("omic_runs", []):
+                name = run.get("cell_type") or run.get("disease")
+                appendix_parts.append(f"### Top Differentially Expressed Genes: {name}\n\n")
 
-                cohort_verdict = shared_data.get("cohort_verdict")
-                if cohort_verdict and cohort_verdict != "ok":
-                    appendix_parts.append(
-                        f"**Cohort Diagnostics: {cohort_verdict.upper()}** — this contrast did not "
-                        "pass all comparability checks; the ranking below may be anti-conservative.\n\n"
-                    )
-                    cohort_diag = shared_data.get("cohort_diagnostics") or {}
-                    for item in cohort_diag.get("failed_checks", []):
-                        appendix_parts.append(f"- **{item.get('check')}**: {item.get('detail')}\n")
-                    for item in cohort_diag.get("caution_checks", []):
-                        appendix_parts.append(f"- {item.get('check')}: {item.get('detail')}\n")
-                    appendix_parts.append("\n")
-
+                if not run.get("top_genes"):
+                    appendix_parts.append("No differential expression results.\n\n")
+                    continue
                 appendix_parts.append("| # | Gene | Log2FC | FDR | Direction |\n")
                 appendix_parts.append("|---|------|--------|-----|----------|\n")
-                for i, gene in enumerate(top_genes[:50], 1):  # Top 50 genes
-                    if isinstance(gene, dict):
-                        name = gene.get('gene', gene.get('name', str(gene)))
-                        log2fc = gene.get('log2_fold_change', gene.get('log2fc', 'N/A'))
-                        fdr = gene.get('fdr', gene.get('adj_pvalue', 'N/A'))
-                        direction = gene.get('direction', 'N/A')
-                        if isinstance(log2fc, float):
-                            log2fc = f"{log2fc:.3f}"
-                        if isinstance(fdr, float):
-                            fdr = f"{fdr:.2e}"
-                        appendix_parts.append(f"| {i} | {name} | {log2fc} | {fdr} | {direction} |\n")
-                    else:
-                        appendix_parts.append(f"| {i} | {gene} | - | - | - |\n")
+                for i, gene in enumerate(run["top_genes"], 1):
+                    log2fc = gene.get("log2_fold_change")
+                    fdr = gene.get("FDR")
+                    direction = "N/A" if log2fc is None else ("up" if log2fc > 0 else "down")
+                    log2fc = f"{log2fc:.3f}" if isinstance(log2fc, float) else "N/A"
+                    fdr = f"{fdr:.2e}" if isinstance(fdr, float) else "N/A"
+                    appendix_parts.append(f"| {i} | {gene.get('gene_name')} | {log2fc} | {fdr} | {direction} |\n")
                 appendix_parts.append("\n")
-            
+
             # Disease and cell type
             if shared_data.get("disease"):
                 appendix_parts.append(f"**Disease Context**: {shared_data['disease']}\n\n")
@@ -2778,13 +3230,32 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
 }{%
   \endorigfigure
 }
+% pandoc >= 3 wraps each image in \pandocbounded, which measures it inside a box where \par and
+% center are not allowed (LaTeX Error: Not allowed in LR mode), so inside a box the image is
+% set plainly and the spacing and centering go around \pandocbounded instead
 \let\oldincludegraphics\includegraphics
 \renewcommand{\includegraphics}[2][]{%
-  \par\vspace{12pt}%
-  \begin{center}%
+  \ifinner
     \oldincludegraphics[#1]{#2}%
-  \end{center}%
-  \vspace{12pt}\par%
+  \else
+    \par\vspace{12pt}%
+    \begin{center}%
+      \oldincludegraphics[#1]{#2}%
+    \end{center}%
+    \vspace{12pt}\par%
+  \fi
+}
+\AtBeginDocument{%
+  \ifdefined\pandocbounded
+    \let\oldpandocbounded\pandocbounded
+    \renewcommand*{\pandocbounded}[1]{%
+      \par\vspace{12pt}%
+      \begin{center}%
+        \oldpandocbounded{#1}%
+      \end{center}%
+      \vspace{12pt}\par%
+    }%
+  \fi
 }
 
 % Code blocks
@@ -3089,15 +3560,17 @@ Your job is to **edit the report according to the feedback** while preserving th
 Please return the **full revised report** in Markdown.
 """
 
-        response = await self.llm.ainvoke([
-            SystemMessage(content=(
-                "You are a meticulous scientific editor. You revise biomedical "
-                "research reports based on reviewer feedback. Preserve all existing "
-                "data, citations, and structure unless the feedback explicitly asks "
-                "for changes. Return the complete revised markdown report."
-            )),
-            HumanMessage(content=revision_prompt),
-        ])
+        with usage_label("revision"):
+            response = await self.lead_llm.ainvoke([
+                SystemMessage(content=(
+                    "You are a meticulous scientific editor. You revise biomedical "
+                    "research reports based on reviewer feedback. Preserve all existing "
+                    "data, citations, and structure unless the feedback explicitly asks "
+                    "for changes. Return the complete revised markdown report."
+                )),
+                HumanMessage(content=revision_prompt),
+            ])
+        self._save_usage_log(finish=False)
 
         revised_report = extract_text_from_llm_response(response.content)
 
@@ -3195,11 +3668,34 @@ revision_feedback: |
         except Exception as e:
             print(f"Error saving log: {e}")
     
+    def _save_usage_log(self, finish: bool = True):
+        """Write the session's token/time usage to <session_dir>/usage_log.json.
+
+        finish=False keeps total_seconds of the run (used when a revision is appended afterwards)."""
+        try:
+            if finish or self.usage_tracker.total_seconds is None:
+                self.usage_tracker.finish()
+            filepath = os.path.join(self.session_dir, "usage_log.json")
+            self.usage_tracker.save(filepath)
+            s = self.usage_tracker.summary()
+            print(f"📊 Usage: {s['total_seconds']}s, {s['total_tokens_all_llm_calls']:,} tokens "
+                  f"(agents {s['agent_llm_tokens']['total_tokens']:,}, "
+                  f"PubMed summaries {s['pubmed_full_text']['summarizer_tokens']['total_token_count']:,}) "
+                  f"-> {filepath}")
+        except Exception as e:
+            print(f"Error saving usage log: {e}")
+
     async def run(self, query: str) -> str:
         """Run the agent system on a query"""
         print(f"\n🔬 Processing query: {query}")
         print("=" * 80)
-        
+
+        # Fresh usage record per run
+        self.usage_tracker = UsageTracker(self.session_id, model=self.model_name, lead_model=self.lead_model_name)
+        self.usage_tracker.query = query
+        self._usage_callback.tracker = self.usage_tracker
+        set_current_tracker(self.usage_tracker)
+
         # Initialize state
         initial_state: AgentState = {
             "query": query,
@@ -3211,7 +3707,8 @@ revision_feedback: |
             "messages": [],
             "agent_outputs": {},
             "shared_data": {
-                "top_genes": [],      # Populated by OmicAnalysis
+                "omic_runs": [],      # One record per omic_analysis_tool run (OmicMiningAgent)
+                "top_genes": [],      # Top genes across omic_runs, annotated with cell type
                 "paper_dois": [],      # Populated by PubMed tools
                 "pathways": [],        # Populated by KEGG analysis
                 "disease": "",         # Extracted from query
@@ -3222,9 +3719,14 @@ revision_feedback: |
             "status": "planning"
         }
         
-        # Run the graph
-        final_state = await self.graph.ainvoke(initial_state)
-        
+        # Run the graph (usage log is saved even if the run fails)
+        try:
+            # Each task attempt is one graph step; failed tasks are retried and re-planned (up to
+            # max_plan_revisions), which can exceed LangGraph's default limit of 25 steps
+            final_state = await self.graph.ainvoke(initial_state, config={"recursion_limit": 100})
+        finally:
+            self._save_usage_log()
+
         # Save logs
         self._save_conversation_log(query, final_state)
         
@@ -3247,8 +3749,15 @@ async def main():
     parser.add_argument(
         "--model", 
         type=str, 
-        default="gemini-3.5-flash",
-        help="Model to use (default: gemini-3.5-flash)"
+        default=DEFAULT_MODEL,
+        help=f"Model of the sub-agents (default: {DEFAULT_MODEL})"
+    )
+    parser.add_argument(
+        "--lead-model",
+        type=str,
+        default=LEAD_MODEL,
+        help=f"Model of the planner, replanner and reporter, at {LEAD_REASONING_EFFORT} reasoning effort "
+             f"(default: {LEAD_MODEL})"
     )
     parser.add_argument(
         "--session-id",
@@ -3261,6 +3770,7 @@ async def main():
     
     agent = LangGraphOmniCellAgent(
         model_name=args.model,
+        lead_model_name=args.lead_model,
         session_id=args.session_id
     )
     

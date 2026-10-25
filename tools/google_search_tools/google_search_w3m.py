@@ -24,6 +24,13 @@ try:
 except ImportError:
     openai = None
 
+# Model that judges and summarizes each webpage, called through Gemini's OpenAI-compatible endpoint
+# gemini-3.8-flash accepts reasoning effort none | low | medium | high (checked 2026-10-25)
+FILTER_LLM_MODEL = os.getenv("WEB_SEARCH_LLM_MODEL", "gemini-3.8-flash")
+FILTER_REASONING_EFFORT = os.getenv("WEB_SEARCH_REASONING_EFFORT", "high")
+FILTER_LLM_BASE_URL = os.getenv("WEB_SEARCH_LLM_BASE_URL",
+                                "https://generativelanguage.googleapis.com/v1beta/openai/")
+
 # Add AutoGen imports for agent mode (optional, only used for AutoGen agent mode)
 try:
     from autogen_agentchat.agents import AssistantAgent
@@ -39,7 +46,8 @@ except ImportError:
 
 def google_search(query: str, target_results: int = 10, use_llm_filter: bool = True) -> list:  # type: ignore[type-arg]
 
-    api_key = os.getenv("GOOGLE_API_KEY")
+    # Custom Search has its own key; GOOGLE_API_KEY is a legacy fallback (Gemini clients also read it)
+    api_key = os.getenv("GOOGLE_SEARCH_API_KEY") or os.getenv("GOOGLE_API_KEY")
     search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")
 
     if not api_key or not search_engine_id:
@@ -59,7 +67,7 @@ def google_search(query: str, target_results: int = 10, use_llm_filter: bool = T
     
     print(f"Target: {target_results} results. Searching {max_search_attempts} initially...")
     print(f"Making {calls_needed} API calls...")
-    
+
     # First round of searches
     for call_num in range(calls_needed):
         start_index = call_num * 10 + 1  # Google uses 1-based indexing
@@ -345,23 +353,22 @@ def google_search(query: str, target_results: int = 10, use_llm_filter: bool = T
 
 
 def setup_openai():
-    """Initialize OpenAI API"""
+    """OpenAI-SDK client for the page filter model (Gemini's OpenAI-compatible endpoint)"""
     if openai is None:
         raise ImportError("openai not installed. Install with: pip install openai")
-    
-    # Get API key from environment variable
-    api_key = os.getenv("OPENAI_API_KEY")
+
+    # GEMINI_API_KEY only: GOOGLE_API_KEY may hold a Custom-Search-only key
+    api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY not found in environment variables")
-    
-    # Initialize the OpenAI client
-    client = openai.OpenAI(api_key=api_key)
+        raise ValueError("GEMINI_API_KEY not found in environment variables")
+
+    client = openai.OpenAI(api_key=api_key, base_url=FILTER_LLM_BASE_URL)
     return client
 
 
 def analyze_content_with_llm(content: str, title: str, url: str, query: str, client, max_retries: int = 3) -> dict:
     """
-    Use OpenAI GPT-4o-mini to filter, analyze and summarize webpage content with retry logic for API failures
+    Use FILTER_LLM_MODEL to filter, analyze and summarize webpage content with retry logic for API failures
     
     Returns:
         dict with 'is_relevant', 'summary', 'confidence' keys
@@ -478,9 +485,9 @@ Respond with valid JSON only:
     # Retry logic for API failures
     for attempt in range(max_retries):
         try:
-            # Use OpenAI API call
             response = client.chat.completions.create(
-                model="o4-mini",
+                model=FILTER_LLM_MODEL,
+                reasoning_effort=FILTER_REASONING_EFFORT,
                 messages=[
                     {"role": "system", "content": "You are a research analyst tasked with evaluating webpage content for relevance to search queries and creating comprehensive summaries. Always respond with valid JSON only."},
                     {"role": "user", "content": prompt}
@@ -747,12 +754,12 @@ async def web_search_tool(query: str, target_results: int = 10, use_llm_filter: 
     """
     AutoGen tool wrapper for the Google search functionality.
     Performs web search and returns LLM-filtered JSON data for agent analysis.
-    
+
     Args:
         query: Search query string
         target_results: Number of results to return (default: 10)
         use_llm_filter: Whether to use LLM filtering (default: True)
-    
+
     Returns:
         JSON string containing curated search results with LLM analysis
     """
@@ -945,7 +952,7 @@ if __name__ == "__main__":
         # Run in normal mode
         print(f"Searching for: {query}")
         print(f"Target: {target_results} high-quality results")
-        print("Using parallel processing with w3m + GPT-4o-mini filtering...")
+        print(f"Using parallel processing with w3m + {FILTER_LLM_MODEL} filtering (effort {FILTER_REASONING_EFFORT})...")
         
         t0 = time.time()
         results = google_search(query, target_results=target_results, use_llm_filter=use_llm_filtering)

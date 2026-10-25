@@ -38,8 +38,8 @@ experts:
     top_k: 100
 
   - real_name: "CHANGE_ME"
-    alias: "BioinformaticsExpert"
-    domain: "bioinformatics"
-    description: "Bioinformatics, single-cell analysis, systems biology"
-    cache_key: "bioinformatics_expert"
+    alias: "CancerExpert"
+    domain: "cancer"
+    description: "Cancer biology, tumor microenvironment, oncogenesis, cancer therapeutics"
+    cache_key: "cancer_expert"
     top_k: 100

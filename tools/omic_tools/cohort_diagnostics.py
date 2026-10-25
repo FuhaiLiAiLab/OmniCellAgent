@@ -44,13 +44,18 @@ def donor_keys(metadata: pd.DataFrame) -> pd.Series:
 
 def compute_cohort_diagnostics(metadata, is_ref, is_alt, lib_sizes=None,
                                ref_name: str = "reference",
-                               alt_name: str = "alternate") -> dict:
+                               alt_name: str = "alternate",
+                               keep_unknown_donor: bool = False) -> dict:
     """Assess whether two cell groups are comparable for differential expression.
 
     Args:
         metadata: per-cell DataFrame; may be missing any of the columns used.
         is_ref, is_alt: boolean arrays selecting the two groups.
         lib_sizes: per-cell totals BEFORE normalization. Optional.
+        keep_unknown_donor: True when metacells without a usable donor ID were
+            kept on purpose (donor_sampling keep_unknown_donor). The
+            donor_usability check is then skipped, and donor checks cover only
+            groups whose metacells all have usable donor IDs.
 
     Returns a dict with `verdict` ("ok" | "caution" | "unreliable"),
     `failed_checks`, `caution_checks`, `checks`, and `groups`.
@@ -102,18 +107,23 @@ def compute_cohort_diagnostics(metadata, is_ref, is_alt, lib_sizes=None,
     # --- donor structure --------------------------------------------------
     if metadata is not None and "donor_id" in metadata.columns:
         usable = _usable_donor_mask(metadata["donor_id"])
-        unusable_frac = float(1.0 - usable.mean()) if len(usable) else 0.0
-        record(
-            "donor_usability", unusable_frac,
-            f"{unusable_frac:.1%} of cells have an unusable donor_id; "
-            "these cannot be grouped and must not be treated as one donor",
-            "FAIL" if unusable_frac > DONOR_UNUSABLE_FAIL else "OK",
-        )
+        groups = [(ref_name, is_ref), (alt_name, is_alt)]
+        if keep_unknown_donor:
+            # A group with unlabelled metacells has an unknown number of donors.
+            groups = [(name, mask) for name, mask in groups if usable[mask].all()]
+        else:
+            unusable_frac = float(1.0 - usable.mean()) if len(usable) else 0.0
+            record(
+                "donor_usability", unusable_frac,
+                f"{unusable_frac:.1%} of cells have an unusable donor_id; "
+                "these cannot be grouped and must not be treated as one donor",
+                "FAIL" if unusable_frac > DONOR_UNUSABLE_FAIL else "OK",
+            )
 
         keys = donor_keys(metadata)
         key_columns = donor_key_columns(metadata)
         counts, raw_counts, dominance = {}, {}, 0.0
-        for name, mask in ((ref_name, is_ref), (alt_name, is_alt)):
+        for name, mask in groups:
             sel = mask & usable
             donors = keys.loc[sel]
             counts[name] = int(donors.nunique())
@@ -121,25 +131,26 @@ def compute_cohort_diagnostics(metadata, is_ref, is_alt, lib_sizes=None,
             if len(donors):
                 dominance = max(dominance, float(donors.value_counts().iloc[0] / len(donors)))
 
-        min_donors = min(counts.values()) if counts else 0
-        record(
-            "donor_count", min_donors,
-            f"donor keys per group ({' + '.join(key_columns)}): "
-            + ", ".join(f"{k}={v}" for k, v in counts.items())
-            + "; metacells are still tested as independent replicates",
-            "FAIL" if min_donors < MIN_DONORS_FAIL else "OK",
-        )
-        checks["donor_count"].update({
-            "counts": counts,
-            "unique_donor_id_counts": raw_counts,
-            "donor_key_columns": key_columns,
-        })
-        record(
-            "donor_dominance", dominance,
-            f"largest donor key contributes {dominance:.1%} of its group's "
-            "metacells with usable donor IDs",
-            "FAIL" if dominance > DONOR_DOMINANCE_FAIL else "OK",
-        )
+        if groups:
+            min_donors = min(counts.values())
+            record(
+                "donor_count", min_donors,
+                f"donor keys per group ({' + '.join(key_columns)}): "
+                + ", ".join(f"{k}={v}" for k, v in counts.items())
+                + "; metacells are still tested as independent replicates",
+                "FAIL" if min_donors < MIN_DONORS_FAIL else "OK",
+            )
+            checks["donor_count"].update({
+                "counts": counts,
+                "unique_donor_id_counts": raw_counts,
+                "donor_key_columns": key_columns,
+            })
+            record(
+                "donor_dominance", dominance,
+                f"largest donor key contributes {dominance:.1%} of its group's metacells"
+                + ("" if keep_unknown_donor else " with usable donor IDs"),
+                "FAIL" if dominance > DONOR_DOMINANCE_FAIL else "OK",
+            )
 
     # --- sequencing depth (pre-normalization, informational after CP10K) --
     if lib_sizes is not None and is_ref.any() and is_alt.any():

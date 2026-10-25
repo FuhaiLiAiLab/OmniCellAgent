@@ -7,6 +7,7 @@ import sys
 import json
 import asyncio
 from paperscraper.pubmed import get_and_dump_pubmed_papers
+from paperscraper.pubmed.pubmed import PUBMED
 from paperscraper.pdf import save_pdf_from_dump
 
 # Add project root to path for imports
@@ -24,9 +25,14 @@ except ImportError:
 
 # Handle both relative and absolute imports for tools
 try:
-    from .get_papers_info_tools import get_papers_info, is_error_file
+    from .get_papers_info_tools import get_papers_info, is_error_file, PUBMED_SORT, PUBMED_FILTER
+    from .get_paper_summary import SUMMARY_MODEL, USAGE_FIELDS
+    # Importing it applies the PMC TLS and Wiley fallback fixes (see paperscraper_fixes.py)
+    from .paperscraper_fixes import load_project_api_keys, publisher_for_doi, api_keys_for_publisher
 except ImportError:
-    from get_papers_info_tools import get_papers_info, is_error_file
+    from get_papers_info_tools import get_papers_info, is_error_file, PUBMED_SORT, PUBMED_FILTER
+    from get_paper_summary import SUMMARY_MODEL, USAGE_FIELDS
+    from paperscraper_fixes import load_project_api_keys, publisher_for_doi, api_keys_for_publisher
 from typing import List, Dict, Any
 import time
 
@@ -51,6 +57,10 @@ DEFAULT_JSONL_CACHE_DIR = get_path('cache.pubmed_jsonl', absolute=True, create=T
 DEFAULT_DOI_CACHE_DIR = get_path('cache.pubmed_doi', absolute=True, create=True)
 DEFAULT_TOP_K = 3
 
+# paperscraper's shared PubMed client copies these parameters into every ESearch request
+if PUBMED_SORT:
+    PUBMED.parameters["sort"] = PUBMED_SORT
+
 
 class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
     """Class to handle medical research paper retrieval and processing"""
@@ -71,11 +81,16 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
         # Load API keys path for paperscraper (Wiley, Elsevier, etc.)
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.api_keys_path = os.path.join(project_root, '.env')
-       
+        self.api_keys = load_project_api_keys(self.api_keys_path)
+
         for directory in [jsonl_cache_dir, doi_cache_dir]:
             if not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
-    
+
+    def _api_keys_for_publisher(self, publisher: str) -> Dict[str, str]:
+        """Return the API keys paperscraper may use for a paper from this publisher."""
+        return api_keys_for_publisher(self.api_keys, publisher)
+
     def _doi_to_filename(self, doi: str) -> str:
         """Convert DOI to a safe filename by replacing / with _"""
         return doi.replace("/", "_")
@@ -131,7 +146,11 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
         
         # Track papers for this session (by DOI)
         session_papers = []
-        
+
+        # Filled during this call; read by query_medical_research_async for the run's stats
+        self.download_stats = {"metadata_search_seconds": 0.0, "cache_hits": 0,
+                               "download_attempts": 0, "downloaded": 0}
+
         attempt = 1
         max_attempts = 3
         fetch_multiplier = 100
@@ -148,12 +167,14 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
             output_filepath = os.path.join(self.jsonl_cache_dir, f"{timestr}_attempt_{attempt}.jsonl")
             
             try:
+                search_start = time.perf_counter()
                 get_and_dump_pubmed_papers(
-                    query, 
-                    output_filepath=output_filepath, 
+                    query + [PUBMED_FILTER] if PUBMED_FILTER else query,
+                    output_filepath=output_filepath,
                     max_results=fetch_count
                 )
-                
+                self.download_stats["metadata_search_seconds"] += time.perf_counter() - search_start
+
                 # Load new papers from this attempt
                 with open(output_filepath, 'r') as f:
                     lines = f.readlines()
@@ -262,28 +283,15 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                 print(f"[Cache Hit] Paper {i+1}: {doi} already cached at {os.path.basename(cached_path)}")
                 session_papers.append(doi)
                 found_count += 1
+                self.download_stats["cache_hits"] += 1
                 continue
             
             # Paper not in cache - need to download
             filename = self._doi_to_filename(doi)
             
-            # Identify publisher from DOI for debugging
-            publisher = "unknown"
-            if "wiley" in doi.lower() or "10.1002" in doi or "10.1111" in doi:
-                publisher = "Wiley"
-            elif "elsevier" in doi.lower() or "10.1016" in doi:
-                publisher = "Elsevier"
-            elif "springer" in doi.lower() or "10.1007" in doi:
-                publisher = "Springer"
-            elif "nature" in doi.lower() or "10.1038" in doi:
-                publisher = "Nature"
-            elif "pnas" in doi.lower() or "10.1073" in doi:
-                publisher = "PNAS"
-            elif "10.1371" in doi:
-                publisher = "PLOS"
-            elif "10.3389" in doi:
-                publisher = "Frontiers"
-            
+            # Publisher from the DOI prefix (selects the API key; also used in log messages)
+            publisher = publisher_for_doi(doi)
+
             # Create temporary single-paper jsonl file
             temp_jsonl_path = os.path.join(temp_dir, f"{timestr}_paper_{i+1}_{filename[:50]}.jsonl")
             
@@ -293,13 +301,15 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                     temp_file.write('\n')
                 
                 print(f"[Download] Paper {i+1}/{len(papers_metadata)}: Attempting {doi} (Publisher: {publisher})")
-                
+                self.download_stats["download_attempts"] += 1
+
                 # Track download success before attempting
                 before_files = set(os.listdir(pdf_dir)) if os.path.exists(pdf_dir) else set()
                 
                 # Download using the single-paper temp file directly to global cache
-                # Pass API keys path for Wiley/Elsevier TDM API access
-                save_pdf_from_dump(temp_jsonl_path, pdf_path=pdf_dir, key_to_save='doi', api_keys=self.api_keys_path)
+                # Pass only this publisher's TDM API key (see paperscraper_fixes.py)
+                save_pdf_from_dump(temp_jsonl_path, pdf_path=pdf_dir, key_to_save='doi',
+                                   api_keys=self._api_keys_for_publisher(publisher))
                 
                 # Check if download was successful
                 after_files = set(os.listdir(pdf_dir)) if os.path.exists(pdf_dir) else set()
@@ -329,6 +339,7 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
                     if success:
                         session_papers.append(doi)
                         found_count += 1
+                        self.download_stats["downloaded"] += 1
                         print(f"[Success] Paper {i+1}: Downloaded successfully ({found_count} total)")
                     else:
                         print(f"[Failed] Paper {i+1}: Downloaded but file appears corrupted (Publisher: {publisher})")
@@ -491,6 +502,9 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
             max_concurrent=max_concurrent
         )
         
+        # Every processed paper, including those cut below; their LLM tokens were still spent
+        self.processed_papers = papers
+
         # Limit to target count if specified
         if target_count is not None and len(papers) > target_count:
             print(f"[Info] Limiting results to {target_count} papers out of {len(papers)} processed")
@@ -498,12 +512,52 @@ class MedicalResearchProcessor: # Renamed class as it no longer handles RAG
         
         return papers
 
+def _sum_usage(papers: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Sum the per-paper Gemini token counts of papers that went through the LLM."""
+    totals = {f: 0 for f in USAGE_FIELDS}
+    for paper in papers:
+        for f in USAGE_FIELDS:
+            totals[f] += (paper.get("llm_usage") or {}).get(f, 0)
+    return totals
+
+
+def _run_stats(processor, returned_papers, top_k, use_llm_processing, run_start, downloads_done, run_end):
+    """Timing checkpoints, download counts and token totals for one query_medical_research_async call."""
+    processed = getattr(processor, "processed_papers", returned_papers)
+    returned_ids = {id(p) for p in returned_papers}
+    discarded = [p for p in processed if id(p) not in returned_ids]
+    return {
+        "timing_seconds": {
+            # search start -> output end
+            "total": round(run_end - run_start, 2),
+            # search start -> all required papers downloaded (PubMed search + downloads/cache hits)
+            "search_and_download": round(downloads_done - run_start, 2),
+            "of_which_pubmed_metadata_search": round(processor.download_stats["metadata_search_seconds"], 2),
+            # papers downloaded -> LLM outputs for them (text extraction + concurrent LLM summaries)
+            "summarization": round(run_end - downloads_done, 2),
+        },
+        "downloads": {**{k: v for k, v in processor.download_stats.items() if k != "metadata_search_seconds"},
+                      "papers_requested": top_k, "papers_returned": len(returned_papers)},
+        "llm": {
+            "enabled": use_llm_processing,
+            "model": SUMMARY_MODEL if use_llm_processing else None,
+            "papers_summarized": sum(1 for p in processed if p.get("llm_usage")),
+            "tokens_returned_papers": _sum_usage(returned_papers),
+            # papers summarized but cut to reach top_k (see load_papers)
+            "papers_summarized_but_discarded": sum(1 for p in discarded if p.get("llm_usage")),
+            "tokens_discarded_papers": _sum_usage(discarded),
+            "tokens_total": _sum_usage(processed),
+        },
+    }
+
+
 async def query_medical_research_async(
     query: str,
     top_k: int = 3,
     use_llm_processing: bool = False,
     max_concurrent: int = 10,
-    session_id: str = None
+    session_id: str = None,
+    stats_out: Dict[str, Any] = None
 ) -> List[Dict[str, Any]]:
     """
     Retrieve and process medical research papers.
@@ -515,10 +569,13 @@ async def query_medical_research_async(
         max_concurrent(int): Maximum concurrent LLM operations (default: 10)
         session_id(str): Optional session ID to group papers from the same analysis session.
                         If provided, papers from multiple queries will be stored in the same folder.
+        stats_out(dict): Optional; filled with timing checkpoints, download counts and summed LLM
+                        token usage (see _run_stats). Per-paper usage is in each paper's "llm_usage".
 
     Returns:
         List[Dict]: Information about retrieved papers and their content.
     """
+    run_start = time.perf_counter()
     try:
         # Use session_id if provided, otherwise generate a new timestamp
         # This allows multiple queries in the same session to share a folder
@@ -532,6 +589,7 @@ async def query_medical_research_async(
         print(f"Caching top {top_k} readable papers for query: '{query}'")
         paper_dir = processor.cache_paper([query], top_k=top_k,
                                           timestr=timestr)
+        downloads_done = time.perf_counter()
 
         if not paper_dir:
              return f"Failed to cache papers for query: {query}. Check logs for details."
@@ -549,6 +607,9 @@ async def query_medical_research_async(
             target_count=top_k,
             session_id=timestr  # Pass session_id to find correct JSONL metadata
         )
+        if stats_out is not None:
+            stats_out.update(_run_stats(processor, paper_info, top_k, use_llm_processing,
+                                        run_start, downloads_done, time.perf_counter()))
         return paper_info
 
     except Exception as e:

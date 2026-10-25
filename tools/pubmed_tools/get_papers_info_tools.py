@@ -26,6 +26,21 @@ except ImportError:
     from get_paper_summary import get_paper_summary, has_error_content, get_paper_summary_async
 
 
+# Number of readable papers downloaded per full-text PubMed search (default and upper bound
+# for pubmed_full_search_tool in agent/langgraph_agent.py)
+NUM_PAPERS_TO_DOWNLOAD = 10
+
+# PubMed search settings (used by query_pubmed_tool.py)
+# ESearch sort order: "relevance" = PubMed Best Match; "" = PubMed's default (most recent first)
+PUBMED_SORT = "relevance"
+# Filter ANDed onto every query; '"pubmed pmc"[sb]' keeps only papers with full text in PubMed Central.
+# Set to "" to search all of PubMed.
+PUBMED_FILTER = '"pubmed pmc"[sb]'
+
+# Wiley TDM API waits (seconds). Wiley allows 60 requests per 10 minutes, i.e. one request per 10 s.
+WILEY_RETRY_WAIT_SECONDS = 10       # between a failed attempt and its retry (paperscraper default: 20)
+WILEY_RATE_LIMIT_WAIT_SECONDS = 10  # after each paper's Wiley call, before the next request
+
 # Maximum raw text length to store per paper when LLM processing is disabled
 MAX_RAW_CONTENT_LENGTH = 8192
 
@@ -126,9 +141,12 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
         "journal": paper_metadata.get("journal", paper_metadata.get("venue", "")),
         "year": paper_metadata.get("year", ""),
         "abstract": paper_metadata.get("abstract", ""),
-        "llm_content": None
+        "llm_content": None,
+        "file_format": os.path.splitext(file_name)[1].lstrip("."),  # pdf is sent to the LLM as a file, xml as text
+        "llm_usage": None,  # token counts and llm_seconds of the summary call, see get_paper_summary_async
     }
-    
+    usage = {}
+
     try:
         if file_name.endswith('.xml'):
             print(f"[Debug] Processing XML file: {file_name}")
@@ -148,7 +166,7 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
                     text = format_sections_for_display(sections)
                     if not has_error_content(text) and len(text.strip()) > 50:
                         if use_llm_processing:
-                            processed_text = await get_paper_summary_async(text=text, mine_type="text/plain")
+                            processed_text = await get_paper_summary_async(text=text, mine_type="text/plain", usage_out=usage)
                             if processed_text:
                                 paper_entry['llm_content'] = processed_text
                         else:
@@ -164,7 +182,7 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
                 text = parse_xml_to_sections(file_path)
                 if not has_error_content(text) and len(text.strip()) > 50:
                     if use_llm_processing:
-                        processed_text = await get_paper_summary_async(text=text, mine_type="text/plain")
+                        processed_text = await get_paper_summary_async(text=text, mine_type="text/plain", usage_out=usage)
                         if processed_text:
                             paper_entry['llm_content'] = processed_text
                     else:
@@ -188,7 +206,7 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
             if not has_error_content(extracted_text) and len(extracted_text.strip()) > 50:
                 if use_llm_processing:
                     try:
-                        processed_text = await get_paper_summary_async(file_path=file_path, mine_type="application/pdf")
+                        processed_text = await get_paper_summary_async(file_path=file_path, mine_type="application/pdf", usage_out=usage)
                         if processed_text and not has_error_content(processed_text) and len(processed_text.strip()) > 50:
                             paper_entry['llm_content'] = processed_text
                             print(f"[Debug] Successfully processed pdf with LLM: {file_name}")
@@ -211,7 +229,10 @@ async def _process_single_paper_internal(file_path: str, file_name: str, paper_m
     except Exception as e:
         print(f"[Error] Failed to process {file_name}: {e}")
         return None  # Return None for failed papers
-    
+
+    if usage:
+        paper_entry["llm_usage"] = usage
+
     return paper_entry
 
 async def get_papers_info(paper_dir: str, jsonl_file_path: str = None, use_llm_processing: bool = False, max_concurrent: int = 5) -> List[Dict[str, Any]]:

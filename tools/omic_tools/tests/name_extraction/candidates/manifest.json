@@ -1,0 +1,330 @@
+{
+  "step": "2 - benchmark candidates with draft labels (not gold)",
+  "created_at": "2026-09-28T20:21:16-05:00",
+  "generator": "tools/omic_tools/tests/name_extraction/generate_candidates.py",
+  "git": {
+    "commit": "5b4386de1286c024f2071d91414088340d958f19",
+    "branch": "revision"
+  },
+  "parameters": {
+    "vocab": "/storage3/fs1/fuhai.li/Active/di.huang/Research/LLM/OmniCellAgent/tools/omic_tools/tests/name_extraction/vocabulary",
+    "out": "/storage3/fs1/fuhai.li/Active/di.huang/Research/LLM/OmniCellAgent/tools/omic_tools/tests/name_extraction/candidates",
+    "cache_dir": null,
+    "seed": 13,
+    "cap": 300,
+    "contexts_per_sense": 3,
+    "near_miss_per_concept": 2,
+    "near_miss_min_score": 0.5,
+    "near_miss_cap": 300
+  },
+  "vocabulary_manifest_sha256": "13f7ed04a194627c2029a87fcb29090ff2a72ac95921f0c057972a026ceb46a4",
+  "ontologies": {
+    "cell_ontology": "releases/2025-01-07",
+    "mondo": "releases/2026-09-01"
+  },
+  "sources": {
+    "cell_ontology": {
+      "url": "https://zenodo.org/api/records/18090009/files/cl_v2025-01-08.obo/content",
+      "sha256": "2350e0c6584f43644c56ffe3d204d715f63d06ceb3f571ba8741fdb487424d4d",
+      "version": "Cell Ontology data-version releases/2025-01-07, the copy shipped with CellLink",
+      "license": "CC BY 4.0",
+      "citation": "Diehl AD et al. The Cell Ontology 2016. J Biomed Semantics 7:44."
+    },
+    "celllink": {
+      "url": "https://zenodo.org/api/records/18090009/files/data.zip/content",
+      "sha256": "6c585fcea88b4d9624fcdf46bbb4948bc24307847d3ef6d12036b460ca65ab0c",
+      "version": "NLM CellLink corpus, Zenodo record 18090009 (2025-12-29)",
+      "license": "Public domain (United States Government Work)",
+      "citation": "Rotenberg NH, Leaman R, Islamaj R et al. Cell phenotypes in the biomedical literature: a systematic analysis and text mining corpus. bioRxiv 2026. doi:10.5281/zenodo.18090009"
+    },
+    "lrabr": {
+      "url": "https://data.lhncbc.nlm.nih.gov/public/lsg/lexicon/2025/release/LEX_DOC/LRABR",
+      "sha256": "39f0119727555d9f9dc1d8cfef7c3496360ef718d96f756f5deddb32fb867027",
+      "version": "SPECIALIST Lexicon 2025 release, LRABR table",
+      "license": "NLM SPECIALIST Lexicon terms; review before redistributing the raw table",
+      "citation": "National Library of Medicine. SPECIALIST Lexicon, 2025 release."
+    },
+    "medmentions": {
+      "url": "https://github.com/chanzuckerberg/MedMentions/raw/14578232bb6cdf290fea9dd7fee60a3e01ee6fd5/full/data/corpus_pubtator.txt.gz",
+      "sha256": "95bebda2776e4cd8f59456af3d977eb7c640fa7997db64c112a18fb09158b1ce",
+      "version": "MedMentions full, commit 14578232 (UMLS 2017AA)",
+      "license": "CC0 1.0",
+      "citation": "Mohan S, Li D. MedMentions: A Large Biomedical Corpus Annotated with UMLS Concepts. AKBC 2019."
+    },
+    "medmentions_pmids_dev": {
+      "url": "https://github.com/chanzuckerberg/MedMentions/raw/14578232bb6cdf290fea9dd7fee60a3e01ee6fd5/full/data/corpus_pubtator_pmids_dev.txt",
+      "sha256": "d03508c74df795000599509b997b7280c0ff5bc53b064547e98b29be8b616abd",
+      "version": "MedMentions full, commit 14578232",
+      "license": "CC0 1.0",
+      "citation": "Mohan S, Li D. AKBC 2019."
+    },
+    "medmentions_pmids_test": {
+      "url": "https://github.com/chanzuckerberg/MedMentions/raw/14578232bb6cdf290fea9dd7fee60a3e01ee6fd5/full/data/corpus_pubtator_pmids_test.txt",
+      "sha256": "fece5bcb8c61edf8de73884980b80daf274132ef6d69f0d195c0114acbfdd4ab",
+      "version": "MedMentions full, commit 14578232",
+      "license": "CC0 1.0",
+      "citation": "Mohan S, Li D. AKBC 2019."
+    },
+    "medmentions_pmids_trng": {
+      "url": "https://github.com/chanzuckerberg/MedMentions/raw/14578232bb6cdf290fea9dd7fee60a3e01ee6fd5/full/data/corpus_pubtator_pmids_trng.txt",
+      "sha256": "ab037fc5606588b4294fa1ead987a66652fe8f3c81e7832e6a02d0c1cdb1c7e6",
+      "version": "MedMentions full, commit 14578232",
+      "license": "CC0 1.0",
+      "citation": "Mohan S, Li D. AKBC 2019."
+    },
+    "mondo": {
+      "url": "https://github.com/monarch-initiative/mondo/releases/download/v2026-09-01/mondo.obo",
+      "sha256": "50c8367f9bd9978321eedf84d4e2e79cb757efbed514c81effb00b9ad2e49994",
+      "version": "MONDO v2026-09-01",
+      "license": "CC BY 4.0",
+      "citation": "Vasilevsky NA et al. Mondo: Unifying diseases for the world. medRxiv 2022."
+    }
+  },
+  "inputs": {
+    "celllink_linked_mentions": 13486,
+    "medmentions_mentions": 352496,
+    "medmentions_disease_mentions": 26273,
+    "medmentions_disease_semtypes": [
+      "T019",
+      "T020",
+      "T037",
+      "T046",
+      "T047",
+      "T048",
+      "T049",
+      "T050",
+      "T190",
+      "T191"
+    ],
+    "lrabr_abbreviations": 72317
+  },
+  "excluded_trivial": {
+    "cell_type/cell_ontology": 693,
+    "cell_type/celllink": 696,
+    "cell_type/lrabr": 3,
+    "disease/medmentions": 1091,
+    "disease/mondo": 181
+  },
+  "files": {
+    "synonym.jsonl": 3725,
+    "abbreviation.jsonl": 1742,
+    "surface_variant.jsonl": 422,
+    "granularity.jsonl": 316,
+    "absent_concept.jsonl": 370,
+    "context_abbreviation.jsonl": 1321,
+    "near_miss.jsonl": 128,
+    "sense_inventory.jsonl": 817
+  },
+  "buckets": [
+    {
+      "category": "abbreviation",
+      "field": "cell_type",
+      "expected_action": "choose",
+      "generated": 13,
+      "written": 13
+    },
+    {
+      "category": "abbreviation",
+      "field": "cell_type",
+      "expected_action": "decline",
+      "generated": 15,
+      "written": 15
+    },
+    {
+      "category": "abbreviation",
+      "field": "cell_type",
+      "expected_action": "resolve",
+      "generated": 655,
+      "written": 655
+    },
+    {
+      "category": "abbreviation",
+      "field": "cell_type",
+      "expected_action": "review",
+      "generated": 593,
+      "written": 300
+    },
+    {
+      "category": "abbreviation",
+      "field": "disease",
+      "expected_action": "choose",
+      "generated": 25,
+      "written": 25
+    },
+    {
+      "category": "abbreviation",
+      "field": "disease",
+      "expected_action": "decline",
+      "generated": 239,
+      "written": 239
+    },
+    {
+      "category": "abbreviation",
+      "field": "disease",
+      "expected_action": "resolve",
+      "generated": 195,
+      "written": 195
+    },
+    {
+      "category": "abbreviation",
+      "field": "disease",
+      "expected_action": "review",
+      "generated": 450,
+      "written": 300
+    },
+    {
+      "category": "absent_concept",
+      "field": "cell_type",
+      "expected_action": "decline",
+      "generated": 70,
+      "written": 70
+    },
+    {
+      "category": "absent_concept",
+      "field": "disease",
+      "expected_action": "decline",
+      "generated": 1378,
+      "written": 300
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "cell_type",
+      "expected_action": "choose",
+      "generated": 12,
+      "written": 12
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "cell_type",
+      "expected_action": "decline",
+      "generated": 4,
+      "written": 4
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "cell_type",
+      "expected_action": "resolve",
+      "generated": 545,
+      "written": 545
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "cell_type",
+      "expected_action": "review",
+      "generated": 45,
+      "written": 45
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "disease",
+      "expected_action": "choose",
+      "generated": 16,
+      "written": 16
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "disease",
+      "expected_action": "decline",
+      "generated": 567,
+      "written": 567
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "disease",
+      "expected_action": "resolve",
+      "generated": 80,
+      "written": 80
+    },
+    {
+      "category": "context_abbreviation",
+      "field": "disease",
+      "expected_action": "review",
+      "generated": 52,
+      "written": 52
+    },
+    {
+      "category": "granularity",
+      "field": "cell_type",
+      "expected_action": "choose",
+      "generated": 85,
+      "written": 85
+    },
+    {
+      "category": "granularity",
+      "field": "disease",
+      "expected_action": "choose",
+      "generated": 231,
+      "written": 231
+    },
+    {
+      "category": "near_miss",
+      "field": "cell_type",
+      "expected_action": "decline",
+      "generated": 32,
+      "written": 32
+    },
+    {
+      "category": "near_miss",
+      "field": "disease",
+      "expected_action": "decline",
+      "generated": 96,
+      "written": 96
+    },
+    {
+      "category": "surface_variant",
+      "field": "cell_type",
+      "expected_action": "choose",
+      "generated": 1,
+      "written": 1
+    },
+    {
+      "category": "surface_variant",
+      "field": "cell_type",
+      "expected_action": "resolve",
+      "generated": 398,
+      "written": 398
+    },
+    {
+      "category": "surface_variant",
+      "field": "cell_type",
+      "expected_action": "review",
+      "generated": 2,
+      "written": 2
+    },
+    {
+      "category": "surface_variant",
+      "field": "disease",
+      "expected_action": "resolve",
+      "generated": 21,
+      "written": 21
+    },
+    {
+      "category": "synonym",
+      "field": "cell_type",
+      "expected_action": "resolve",
+      "generated": 2337,
+      "written": 2337
+    },
+    {
+      "category": "synonym",
+      "field": "cell_type",
+      "expected_action": "review",
+      "generated": 2103,
+      "written": 300
+    },
+    {
+      "category": "synonym",
+      "field": "disease",
+      "expected_action": "resolve",
+      "generated": 788,
+      "written": 788
+    },
+    {
+      "category": "synonym",
+      "field": "disease",
+      "expected_action": "review",
+      "generated": 4736,
+      "written": 300
+    }
+  ]
+}

@@ -45,12 +45,9 @@ async def openai_complete_if_cache(
     api_key=None,
     **kwargs,
 ) -> str:
-    if api_key:
-        os.environ["OPENAI_API_KEY"] = api_key
-
-    openai_async_client = (
-        AsyncOpenAI() if base_url is None else AsyncOpenAI(base_url=base_url)
-    )
+    # The key goes to this client only: setting OPENAI_API_KEY would hand it to every other OpenAI
+    # client in the process (e.g. the embeddings, when the LLM is served from another provider)
+    openai_async_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     hashing_kv: BaseKVStorage = kwargs.pop("hashing_kv", None)
     messages = []
     if system_prompt is not None:
@@ -274,12 +271,8 @@ async def openai_embedding(
     base_url: str = None,
     api_key: str = None,
 ) -> np.ndarray:
-    if api_key:
-        os.environ["OPENAI_API_KEY"] = api_key
-
-    openai_async_client = (
-        AsyncOpenAI() if base_url is None else AsyncOpenAI(base_url=base_url)
-    )
+    # Key passed to this client only (see openai_complete_if_cache)
+    openai_async_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     response = await openai_async_client.embeddings.create(
         model=model, input=texts, encoding_format="float"
     )

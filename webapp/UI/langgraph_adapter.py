@@ -25,7 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.langgraph_agent import (
-    LangGraphOmniCellAgent, 
+    LangGraphOmniCellAgent,
+    DEFAULT_MODEL,
     AgentState,
     create_session_dir,
     get_current_session_dir,
@@ -48,13 +49,13 @@ class UILangGraphAdapter:
     - Supports incremental conversation across multiple rounds
     """
     
-    def __init__(self, session_id: str, model_name: str = "gemini-3.5-flash"):
+    def __init__(self, session_id: str, model_name: str = DEFAULT_MODEL):
         """
         Initialize the UI adapter.
-        
+
         Args:
             session_id: Unique session identifier (from UI)
-            model_name: LLM model to use
+            model_name: LLM model of the sub-agents (the planner and reporter use the agent's LEAD_MODEL)
         """
         self.session_id = session_id
         self.model_name = model_name
@@ -93,7 +94,8 @@ class UILangGraphAdapter:
             model_name=self.model_name,
             session_id=self.session_id
         )
-        self._emit_process_step("System", f"🔧 LangGraph Agent initialized (model: {self.model_name})")
+        self._emit_process_step("System", f"🔧 LangGraph Agent initialized (models: {self.model_name}; "
+                                          f"planner and reporter: {self.agent.lead_model_name})")
         
         self.agent.session_dir = self.session_dir
         import agent.langgraph_agent as lg_module
@@ -452,7 +454,7 @@ class UILangGraphAdapter:
             raise
 
 
-def create_langgraph_adapter(session_id: str, 
-                              model_name: str = "gemini-3.5-flash") -> UILangGraphAdapter:
+def create_langgraph_adapter(session_id: str,
+                              model_name: str = DEFAULT_MODEL) -> UILangGraphAdapter:
     """Factory function to create a configured LangGraph adapter for the UI."""
     return UILangGraphAdapter(session_id=session_id, model_name=model_name)

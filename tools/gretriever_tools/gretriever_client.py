@@ -11,6 +11,12 @@ import asyncio
 import os
 from typing import Optional, List, Dict, Any
 
+# Maximum characters of node summary passed to the agent per node
+SUMMARY_MAX_CHARS = 600
+
+# End-of-answer marker in G-Retriever's generated text; generation continues past it up to the token limit
+ANSWER_END_MARKER = "[/s]"
+
 
 class GRetrieverClient:
     """Client for G-Retriever microservice"""
@@ -96,7 +102,14 @@ def extract_summary(description: Dict[str, Any]) -> Optional[str]:
     for field in summary_fields:
         if field in description and description[field]:
             return description[field][0]['text']
-    
+
+    # Drug nodes (DrugBank fields): approval status, indication and mechanism; other node types
+    # (diseases, pathways, GO terms) carry a free-text 'description'
+    text_fields = ['group', 'indication', 'mechanism_of_action', 'description']
+    parts = [str(description[f]).strip()[:300] for f in text_fields if description.get(f)]
+    if parts:
+        return " | ".join(parts)[:SUMMARY_MAX_CHARS]
+
     # If no specific summary field, try to construct from available info
     if 'name' in description and description['name']:
         name = description['name']
@@ -145,12 +158,13 @@ def process_topk_results(results: List[Dict[str, Any]], topk: int = 5) -> List[D
     
     return processed_results
 
-def save_results(processed_results: List[Dict[str, Any]]):
+def save_results(processed_results: List[Dict[str, Any]], model_answer: Optional[str] = None):
     """
     Display the processed results in a readable format and save as JSON
-    
+
     Args:
         processed_results: List of processed result dictionaries
+        model_answer: G-Retriever's generated answer (GNN + LLM over the retrieved subgraph)
     """
     # Convert the console output format to JSON structure
     json_results = []
@@ -164,6 +178,7 @@ def save_results(processed_results: List[Dict[str, Any]]):
     
     # Create the final JSON structure
     output_data = {
+        "model_answer": model_answer or "",
         "total_results": len(json_results),
         "results": json_results
     }
@@ -205,7 +220,8 @@ async def gretriever_tool(query: str) -> str:
         if result.get('graph_data'):
             
             processed_results = process_topk_results(result['graph_data'], topk=5)
-            json_results = save_results(processed_results)
+            model_answer = str(result.get('response') or "").split(ANSWER_END_MARKER)[0].strip()
+            json_results = save_results(processed_results, model_answer=model_answer)
             return json_results
         
 

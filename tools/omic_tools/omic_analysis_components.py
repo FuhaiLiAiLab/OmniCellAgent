@@ -171,7 +171,6 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         disease=disease_name,
         de_output_dir=de_output_dir,
         n_jobs=-1,  # Retained legacy argument; DE execution now belongs to R.
-        diagnostics_text=diagnostics_text,
         session_dir=base_dir,
         ref_label=ref_label,
         alt_label=alt_label,
@@ -224,7 +223,7 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
 def perform_unpaired_differential_expression(disease_df, normal_df,
                                     p_value_threshold=0.05, log2fc_threshold=1.5,
                                     sig_top_n=100, n_jobs=16, disease="Disease",
-                                    de_output_dir=None, diagnostics_text: str = "", *,
+                                    de_output_dir=None, *,
                                     session_dir=None, ref_label="Healthy", alt_label="Diseased",
                                     input_scale="linear_cp10k", r_timeout=3600) -> tuple[dict, pd.DataFrame]:
     """Delegate metacell-level DE to the existing R/limma implementation.
@@ -269,10 +268,8 @@ def perform_unpaired_differential_expression(disease_df, normal_df,
             "--final-out-dir", str(analysis_dir), "--final-de-dir", str(de_dir),
             "--de-fdr", str(p_value_threshold), "--top-n", str(sig_top_n),
         ]
-        if diagnostics_text:
-            diagnostic_path = staging / "diagnostics.txt"
-            diagnostic_path.write_text(diagnostics_text + "\n", encoding="utf-8")
-            args.extend(["--diagnostics-file", str(diagnostic_path)])
+        # The cohort diagnostics stay out of the DE tables; omic_analysis writes them
+        # to COHORT_DIAGNOSTICS.txt in the same folder.
         run_r_script(r_script, args, timeout=r_timeout)
         tables = {name: read_de_results(staged_de / name) for name in filenames}
         if tables[filenames[0]].empty:

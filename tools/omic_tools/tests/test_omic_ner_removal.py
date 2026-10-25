@@ -61,7 +61,7 @@ def test_failed_direct_query_reports_input_timing(monkeypatch, tmp_path):
     import omic_fetch_analysis_workflow as workflow
 
     def no_matching_data(fetch_dict, output_dir, label="disease", suspension_type=None,
-                         sample_size=1000):
+                         sample_size=1000, keep_unknown_donor=False):
         return None, None, None, {}, False, label, None, None
 
     monkeypatch.setattr(workflow, "omic_fetch_with_new_loader", no_matching_data)

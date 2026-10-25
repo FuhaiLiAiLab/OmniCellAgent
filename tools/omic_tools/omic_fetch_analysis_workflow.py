@@ -27,7 +27,7 @@ Based on the working CellTOSGDataLoader example pattern.
 from omic_analysis_components import omic_analysis, EnrichrError
 from cohort_diagnostics import compute_cohort_diagnostics, format_diagnostics_text
 from celltosg_runtime_adapter import writable_celltosg_root
-from donor_sampling import sample_known_donor_cohort
+from donor_sampling import DEFAULT_SAMPLE_SIZE, sample_known_donor_cohort
 from query_value_lists import save_query_value_lists
 from subprocess_r import run_r_script
 from de_results_io import read_de_results
@@ -338,7 +338,8 @@ def select_contrast(Y, mapping: dict):
 
 
 def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease",
-                               suspension_type: str = None, sample_size: int = 1000):
+                               suspension_type: str = None, sample_size: int = DEFAULT_SAMPLE_SIZE,
+                               keep_unknown_donor: bool = False):
     """
     Fetch single-cell RNA-seq data using the new CellTOSGDataLoader with soft matching.
 
@@ -358,6 +359,9 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         sample_size (int): Maximum metacells per disease/control group. Each
             group maximizes donor coverage, then fills in rounds across donors;
             use all known-donor metacells if fewer than the limit are available.
+        keep_unknown_donor (bool): Default False excludes metacells without a
+            usable donor ID from disease comparisons. True keeps them, for studies
+            that record no donor IDs (e.g. PDAC GSE202051).
 
     Returns:
         tuple: (X, Y, metadata, similar_terms, retrieval_success)
@@ -371,10 +375,14 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
     organ = fetch_dict.get("organ", None)
     tissue = fetch_dict.get("tissue", None)
     gender = fetch_dict.get("gender", None)
+    control_cell_type = fetch_dict.get("control cell type", None)
+    disease_cell_label = fetch_dict.get("disease cell label", None)
 
     print(f"\n{'='*60}")
     print(f"[Omic Fetch] Starting scRNA-seq data retrieval")
     print(f"  Cell type: {cell_type}")
+    if control_cell_type or disease_cell_label:
+        print(f"  Control cell type: {control_cell_type}; disease cell label: {disease_cell_label}")
     print(f"  Disease: {disease_name}")
     print(f"  Organ: {organ}")
     print(f"  Tissue: {tissue}")
@@ -449,6 +457,9 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
                 CellTOSGSubsetBuilder.FIELD_ALIAS,
                 sample_size=sample_size,
                 random_state=42,
+                keep_unknown_donor=keep_unknown_donor,
+                control_cell_type=control_cell_type,
+                disease_cell_label=disease_cell_label,
             )
             os.makedirs(output_dir, exist_ok=True)
             with open(os.path.join(output_dir, "donor_sampling.json"), "w", encoding="utf-8") as handle:
@@ -673,9 +684,11 @@ def compute_top_genes(X, top_k=100):
 TOP_K_GENES = 20
 
 def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
-                                 tissue=None, gender=None, session_dir=None,
+                                 tissue=None, gender=None, control_cell_type=None,
+                                 disease_cell_label=None, session_dir=None,
                                  enable_differential_expression=True, enable_plotting=True,
-                                 label="disease", suspension_type=None, sample_size=1000,
+                                 label="disease", suspension_type=None, sample_size=DEFAULT_SAMPLE_SIZE,
+                                 keep_unknown_donor=False,
                                  r_timeout=3600, enrichment_timeout=60, enrichment_databases=None):
     """
     Perform the complete single-cell omic analysis workflow.
@@ -689,6 +702,10 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
 
     Args:
         disease, cell_type, organ, tissue, gender: Direct query parameters
+        control_cell_type: Cell type of the normal group when it differs from the
+            disease group's cell_type (label="disease" only).
+        disease_cell_label: Original source-study label the disease cells must
+            also carry, e.g. "Malignant epithelial cell" (label="disease" only).
         session_dir: Directory to save all outputs (REQUIRED)
         enable_differential_expression: Run DE analysis (default True)
         enable_plotting: Run R plotting script (default True)
@@ -706,11 +723,16 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         sample_size: Maximum metacells per disease/control group (default 1000).
             Maximize donor coverage, then fill in rounds. Use all known-donor
             metacells in a group if fewer than the limit are available.
+        keep_unknown_donor: Default False excludes metacells without a usable
+            donor ID from disease comparisons; True keeps them (see
+            donor_sampling.sample_known_donor_cohort).
     """
     times = {}
     times['start'] = time.time()
     if sample_size < 1:
         raise ValueError("sample_size must be a positive integer")
+    if (control_cell_type or disease_cell_label) and (label or "disease").lower() != "disease":
+        raise ValueError("control_cell_type and disease_cell_label apply only to label='disease'")
 
     if session_dir is None:
         raise ValueError("session_dir must be provided")
@@ -734,6 +756,10 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         fetch_dict["tissue"] = tissue
     if gender is not None:
         fetch_dict["gender"] = gender
+    if control_cell_type is not None:
+        fetch_dict["control cell type"] = control_cell_type
+    if disease_cell_label is not None:
+        fetch_dict["disease cell label"] = disease_cell_label
 
     if not fetch_dict:
         save_query_value_lists(
@@ -767,7 +793,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     (X, Y, metadata, similar_terms, retrieval_success,
      actual_label, label_fallback_message, label_mapping) = omic_fetch_with_new_loader(
         fetch_dict, session_dir, label=label, suspension_type=suspension_type,
-        sample_size=sample_size,
+        sample_size=sample_size, keep_unknown_donor=keep_unknown_donor,
     )
     # The temporary loader root filters the BMG mapping to HGNC-approved
     # protein-coding symbols before extraction, including the saved raw matrix.
@@ -949,6 +975,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                         lib_sizes=lib_sizes,
                         ref_name=contrast["ref_name"],
                         alt_name=contrast["alt_name"],
+                        keep_unknown_donor=keep_unknown_donor,
                     )
                     diagnostics_text = format_diagnostics_text(cohort_diagnostics)
                     print(f"\n{diagnostics_text}\n")
@@ -1238,8 +1265,8 @@ Examples:
                         choices=["disease", "gender", "cell_type"],
                         help="Label column used for the DE comparison (default: 'disease' for disease-vs-normal)")
     parser.add_argument("--session-id", type=str, default="test_session", help="Session ID for output directory")
-    parser.add_argument("--sample-size", type=int, default=1000,
-                        help="Maximum metacells per disease/control group; maximize donor coverage, then fill in rounds; use all if fewer are available (default: 1000)")
+    parser.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE,
+                        help=f"Maximum metacells per disease/control group; maximize donor coverage, then fill in rounds; use all if fewer are available (default: {DEFAULT_SAMPLE_SIZE})")
     parser.add_argument("--no-de", action="store_true", help="Skip differential expression analysis")
     parser.add_argument("--no-plot", action="store_true", help="Skip plotting")
     parser.add_argument("--run-tests", action="store_true", help="Run the full test suite")

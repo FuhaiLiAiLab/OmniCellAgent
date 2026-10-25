@@ -1,0 +1,66 @@
+db_name	n_rows	n_donors	n_datasets
+abdomen	1214	31	1
+adipose tissue	2276	62	6
+adrenal gland	1993	18	4
+axilla	469	9	3
+bladder organ	376	9	2
+blood	58160	2975	62
+bone marrow	4367	159	18
+brain	144409	2041	139
+breast	21030	575	11
+central nervous system	79	14	1
+chest wall	96	3	1
+colon	4696	238	21
+cortex	748	8	1
+digestive system	1288	78	8
+embryo	826	12	6
+endocrine gland	5476	124	11
+esophagogastric junction	63	7	1
+esophagus	850	27	5
+exocrine gland	1312	42	7
+eye	20725	201	20
+fallopian tube	1471	34	5
+forelimb	373	17	3
+gallbladder	98	5	2
+head	34	1	1
+heart	20299	353	18
+hindlimb	827	52	3
+immune system	163	7	1
+intestine	2395	67	8
+kidney	9651	418	24
+lamina propria	118	4	1
+large intestine	990	37	11
+liver	8028	216	23
+lung	35441	1227	42
+lymph node	3193	112	14
+milk	242	13	1
+mucosa	1090	70	4
+musculature	2534	61	6
+neck	68	3	1
+nose	2552	144	6
+omentum	1108	38	2
+ovary	1317	34	8
+pancreas	2221	83	10
+paracolic gutter	40	1	1
+placenta	3173	82	6
+pleura	98	1	1
+pleural fluid	682	30	5
+prostate gland	999	27	7
+respiratory system	5034	213	26
+saliva	72	10	1
+scalp	15	2	1
+sensory system	11	1	1
+skeletal system	396	27	5
+skin of body	4306	230	14
+small intestine	7340	357	28
+spinal cord	247	19	4
+spleen	3002	66	8
+stomach	850	48	6
+tendon of semitendinosus	52	3	1
+testis	103	3	2
+tongue	276	6	2
+ureter	165	11	2
+urinary bladder	161	3	3
+uterus	1483	36	4
+vasculature	1863	64	6
+yolk sac	283	4	1

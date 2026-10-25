@@ -171,15 +171,27 @@ class RateLimiter:
 # Global rate limiter instance
 _rate_limiter = RateLimiter(max_calls_per_minute=50)  # Conservative limit
 
-async def get_paper_summary_async(file_path: str = None, text: str = None, mine_type: str = None) -> str:
+SUMMARY_MODEL = "gemini-3.8-flash"
+
+# Token counts reported by Gemini; thoughts_token_count is billed as output on thinking models
+USAGE_FIELDS = ["prompt_token_count", "candidates_token_count", "thoughts_token_count",
+                "cached_content_token_count", "total_token_count"]
+
+
+async def get_paper_summary_async(file_path: str = None, text: str = None, mine_type: str = None,
+                                  usage_out: dict = None) -> str:
     """
     Async version of get_paper_summary using LLM, but first check if the content contains error messages.
     Returns None if the paper contains error content.
+
+    If usage_out is given, it is filled with the model name, the Gemini token counts (USAGE_FIELDS)
+    and llm_seconds (wall time of the API call, excluding rate-limit waits).
     """
     # Apply rate limiting for LLM calls
     await _rate_limiter.acquire()
     
-    client = genai.Client()
+    # Explicit key: genai.Client() otherwise prefers GOOGLE_API_KEY, which may be a search-only key
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
 
     if mine_type == "application/pdf":
         filepath = pathlib.Path(file_path)
@@ -287,10 +299,11 @@ async def get_paper_summary_async(file_path: str = None, text: str = None, mine_
         """
 
         # Run the LLM call in a thread pool to avoid blocking
+        call_start = time.perf_counter()
         response = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=SUMMARY_MODEL,
                 contents=[
                     types.Part.from_bytes(
                         data=data,
@@ -300,7 +313,13 @@ async def get_paper_summary_async(file_path: str = None, text: str = None, mine_
                 ]
             )
         )
-        
+
+        if usage_out is not None:
+            usage = response.usage_metadata
+            usage_out["model"] = SUMMARY_MODEL
+            usage_out.update({f: (getattr(usage, f, None) or 0) for f in USAGE_FIELDS})
+            usage_out["llm_seconds"] = round(time.perf_counter() - call_start, 2)
+
         # Check if the LLM response also contains error indicators
         if has_error_content(response.text):
             print(f"[Debug] LLM response contains error content, filtering out")

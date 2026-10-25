@@ -1,0 +1,103 @@
+{
+  "step": "1 - frozen query vocabulary",
+  "created_at": "2026-09-28T20:02:06-05:00",
+  "generator": "tools/omic_tools/tests/name_extraction/build_vocabulary.py",
+  "git": {
+    "commit": "5b4386de1286c024f2071d91414088340d958f19",
+    "branch": "revision"
+  },
+  "inputs": {
+    "metadata": {
+      "path": "/storage3/fs1/fuhai.li/Active/Shared/dataset/OmniCellTOSG_dataset/cell_metadata_with_mappings.parquet",
+      "sha256": "b88890b99f8266ac83c7a583e0f49755895f05df91bb60f5f21924abdcb6bd9f",
+      "rows": 395317
+    },
+    "biomedgraphica_disease": {
+      "path": "/storage3/fs1/fuhai.li/Active/Shared/dataset/BioMedGraphica-Conn/Entity/Disease/BioMedGraphica_Conn_Disease.csv",
+      "sha256": "d2ff6a9be8fbf645bc00e5f80841402390655a166a88f4662f8b9bd4b9c6dc66"
+    },
+    "ontologies": {
+      "cell_ontology": "releases/2025-01-07",
+      "mondo": "releases/2026-09-01"
+    },
+    "sources": {
+      "cell_ontology": {
+        "url": "https://zenodo.org/api/records/18090009/files/cl_v2025-01-08.obo/content",
+        "sha256": "2350e0c6584f43644c56ffe3d204d715f63d06ceb3f571ba8741fdb487424d4d",
+        "version": "Cell Ontology data-version releases/2025-01-07, the copy shipped with CellLink",
+        "license": "CC BY 4.0",
+        "citation": "Diehl AD et al. The Cell Ontology 2016. J Biomed Semantics 7:44."
+      },
+      "mondo": {
+        "url": "https://github.com/monarch-initiative/mondo/releases/download/v2026-09-01/mondo.obo",
+        "sha256": "50c8367f9bd9978321eedf84d4e2e79cb757efbed514c81effb00b9ad2e49994",
+        "version": "MONDO v2026-09-01",
+        "license": "CC BY 4.0",
+        "citation": "Vasilevsky NA et al. Mondo: Unifying diseases for the world. medRxiv 2022."
+      }
+    }
+  },
+  "outputs": {
+    "cell_types.tsv": "d1a9ae9fb8327a2651d6b91f5dfaa66afaecd379193ade7309c22cc8653e6288",
+    "diseases.tsv": "0d52e6a594c662c628f81902b290dd45bdd413a565d7ebfbc34e599b2ab5aef7",
+    "organs.tsv": "5229d3e79a4ab64666b737cd5d226881b200ee7c4077ad23529652a6d9fc928f"
+  },
+  "counts": {
+    "cell_type": {
+      "cell_types": 762,
+      "rows_without_cell_type": 25775,
+      "composite_names": 77,
+      "linked_to_cl": 760,
+      "cl_link_methods": {
+        "label": 747,
+        "exact_synonym": 14,
+        "none": 3,
+        "obsolete_label": 1
+      }
+    },
+    "disease": {
+      "diseases": 144,
+      "control_like": 3,
+      "rows_without_disease": 0,
+      "bmg_ids_missing_from_biomedgraphica": [
+        "BMG_DS006197",
+        "BMG_DS009209",
+        "BMG_DS009355",
+        "BMG_DS014545",
+        "BMG_DS014607",
+        "BMG_DS014612",
+        "BMG_DS030172",
+        "BMG_DS032439",
+        "BMG_DS034955",
+        "BMG_DS037191",
+        "BMG_DS053281",
+        "BMG_DS054640",
+        "BMG_DS058557",
+        "BMG_DS062815",
+        "BMG_DS062849",
+        "BMG_DS066245",
+        "BMG_DS068093",
+        "BMG_DS069690",
+        "BMG_DS076026",
+        "BMG_DS116537"
+      ],
+      "with_umls": 116,
+      "with_mondo": 131,
+      "with_mesh": 50,
+      "without_any_ontology_link": [
+        "Acterol",
+        "Cell stress",
+        "Crohn's disease of ileum",
+        "Disorder following viral disease",
+        "Trisomy 18 Syndrome"
+      ]
+    },
+    "organ": {
+      "organs": 65
+    }
+  },
+  "notes": [
+    "Counts are metadata rows (SEACells metacells), usable study-scoped donors (source, dataset_id, donor_id), and source/dataset pairs.",
+    "raw_labels_unaudited lists source-study labels mapped to each name; the mapping contains known errors and must not be used as gold synonyms without review."
+  ]
+}

@@ -33,7 +33,8 @@ except ImportError:
     exit(1)
 
 from paperscraper.pubmed import get_and_dump_pubmed_papers
-from paperscraper.pdf import save_pdf_from_dump
+# Importing it applies the PMC TLS and Wiley fallback fixes to paperscraper's downloads
+from tools.pubmed_tools.paperscraper_fixes import download_paper, load_project_api_keys
 
 import numpy as np
 # Modified imports to work with sys.path changes
@@ -49,24 +50,35 @@ except ImportError:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
     from utils.path_config import get_path
 
-load_dotenv(override=True)  
+# No override: an importing process (the agent) has already loaded its environment, and replacing
+# shell-exported keys here would swap API keys under it
+load_dotenv()
 
 # Constants
 BASE_AUTHOR_DIR = get_path('cache.author_kb', absolute=True, create=True)
 DEFAULT_TOP_K = 50
 
-LLM_BASE_URL = os.getenv("OPENAI_API_BASE")
-LLM_API_KEY = os.getenv("OPENAI_API_KEY")
-LLM_MODEL = "gpt-4.1"
+# Gemini through its OpenAI-compatible endpoint, so HyperRAG's chat-completion calls work unchanged
+LLM_BASE_URL = os.getenv("EXPERT_KB_LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+LLM_API_KEY = os.getenv("GEMINI_API_KEY")
+LLM_MODEL = os.getenv("EXPERT_KB_LLM_MODEL", "gemini-3.8-flash")
+# gemini-3.8-flash accepts none | low | medium | high (checked 2026-10-25)
+LLM_REASONING_EFFORT = os.getenv("EXPERT_KB_REASONING_EFFORT", "high")
 
 EMB_BASE_URL = os.getenv("OPENAI_API_BASE")
 EMB_API_KEY = os.getenv("OPENAI_API_KEY")
+# The ragstores' vector files hold vectors from this model, so changing it means re-embedding them
 EMB_MODEL = "text-embedding-3-small"
 EMB_DIM = 1536
 
 async def llm_model_func(
     prompt, system_prompt=None, history_messages=[], **kwargs
 ) -> str:
+    # HyperRAG's summary calls pass max_tokens, which reasoning models reject. max_completion_tokens
+    # also counts reasoning tokens, so the cap is kept only when the model does no reasoning.
+    max_tokens = kwargs.pop("max_tokens", None)
+    if max_tokens is not None and LLM_REASONING_EFFORT == "none":
+        kwargs["max_completion_tokens"] = max_tokens
     try:
         return await openai_complete_if_cache(
             LLM_MODEL,
@@ -75,6 +87,7 @@ async def llm_model_func(
             history_messages=history_messages,
             api_key=LLM_API_KEY,
             base_url=LLM_BASE_URL,
+            reasoning_effort=LLM_REASONING_EFFORT,
             **kwargs,
         )
     except Exception as e:
@@ -135,65 +148,99 @@ class AuthorKnowledgeBase:
     def _pubmed_author_query(self) -> List[str]:
         return [f"{self.pubmed_name}[Author]"]
 
-    # Minimum number of downloaded papers we consider acceptable.
+    # Full-text papers to download per expert (at least); if fewer can be downloaded, the KB is built
+    # from those.
     MIN_PAPERS = 50
+    # Extracted-text length separating full text from metadata- or abstract-only files: in the PubMed
+    # cache (234 files, 2026-10-24) those were all under 5,000 chars, no file fell between 5,000 and
+    # 10,000, and full papers had 15,000+ (median 79,000)
+    MIN_FULLTEXT_CHARS = 10_000
+    # Pause before retrying failed downloads, so rate limits (bioRxiv, NCBI BioC, BMJ: 429) can reset
+    RETRY_WAIT_SECONDS = 60
+    # Pause after each download attempt: bursts of PMC downloads trigger NCBI BioC 429s
+    DOWNLOAD_PAUSE_SECONDS = 1
 
     async def fetch_and_cache_papers(self) -> str:
+        """Download papers in PubMed order until max(top_k, MIN_PAPERS) full texts are on disk."""
         query_terms = self._pubmed_author_query()
         output_path = os.path.join(self.jsonl_cache_dir, f"{self.author_dir_name}.jsonl")
+        target = max(self.top_k, self.MIN_PAPERS)
 
-        # Step 1: Query PubMed metadata.
-        # Re-fetch if JSONL is missing *or* is stale (fewer entries than top_k).
-        need_refetch = True
-        if os.path.exists(output_path):
-            with open(output_path, 'r') as f:
-                existing_lines = f.readlines()
-            if len(existing_lines) >= self.top_k:
-                print(f"📄 PubMed metadata already cached for {self.author_name} "
-                      f"({len(existing_lines)} entries)")
-                need_refetch = False
-            else:
-                print(f"🔄 JSONL has only {len(existing_lines)} entries "
-                      f"(need {self.top_k}) — re-querying PubMed for {self.author_name}")
+        # Step 1: Query PubMed metadata. Every match is kept as a candidate: many downloads fail
+        #         (paywalls, publisher 403s), and later matches stand in for papers that cannot be fetched.
+        print(f"🔍 Querying PubMed for papers by {self.author_name}...")
+        get_and_dump_pubmed_papers(query_terms, output_filepath=output_path)
+        with open(output_path, 'r') as f:
+            papers = [json.loads(line) for line in f if line.strip()]
+        print(f"📋 PubMed returned {len(papers)} candidate papers (target: {target} full texts)")
 
-        if need_refetch:
-            print(f"🔍 Querying PubMed for papers by {self.author_name} "
-                  f"(max_results={self.top_k})...")
-            get_and_dump_pubmed_papers(query_terms, output_filepath=output_path)
+        # Step 2: Download PDFs/XMLs one paper at a time, each with only its publisher's API key
+        #         (paperscraper otherwise tries the Wiley API after most failures). Files already
+        #         on disk are skipped, and a failed paper doesn't stop the rest. Stops once `target`
+        #         full texts are on disk; papers that failed are retried once after RETRY_WAIT_SECONDS.
+        api_keys = load_project_api_keys()
+        fulltext = set(await self._fulltext_files())
+        outcomes = {}
+        pending = papers
+        for attempt in (1, 2):
+            if len(fulltext) >= target or not pending:
+                break
+            if attempt == 2:
+                print(f"⏳ Retrying {len(pending)} failed downloads in {self.RETRY_WAIT_SECONDS}s...")
+                await asyncio.sleep(self.RETRY_WAIT_SECONDS)
+            failed = []
+            for i, paper in enumerate(pending, 1):
+                if len(fulltext) >= target:
+                    break
+                outcome = download_paper(paper, self.doi_cache_dir, api_keys)
+                if outcome == "downloaded":
+                    fname = self._paper_file(paper["doi"])
+                    if await self._fulltext_chars(os.path.join(self.doi_cache_dir, fname)) >= self.MIN_FULLTEXT_CHARS:
+                        fulltext.add(fname)
+                    else:
+                        outcome = "not_fulltext"
+                elif outcome == "failed":
+                    failed.append(paper)
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
+                if outcome not in ("cached", "no_doi"):
+                    print(f"[{attempt}: {i}/{len(pending)}] {outcome}: {paper.get('doi') or paper.get('title')} "
+                          f"({len(fulltext)}/{target} full texts)")
+                    await asyncio.sleep(self.DOWNLOAD_PAUSE_SECONDS)
+            pending = failed
+        print(f"📥 Download outcomes for {self.author_name}: {outcomes}")
+        print(f"📥 {len(fulltext)} full-text papers in doi_cache for {self.author_name} (target {target})")
 
-            with open(output_path, 'r') as f:
-                lines = f.readlines()
-            total_found = len(lines)
-            lines = lines[:self.top_k]
-            with open(output_path, 'w') as f:
-                f.writelines(lines)
-            print(f"📋 PubMed returned {total_found} papers, kept top {len(lines)}")
-
-        # Step 2: Download PDFs/XMLs — wrap each paper in try/except so a single
-        #         network failure doesn't kill the entire pipeline.
-        #         save_pdf_from_dump already skips files that exist on disk.
-        existing_papers = self._count_doi_papers()
-        try:
-            save_pdf_from_dump(output_path, pdf_path=self.doi_cache_dir, key_to_save='doi')
-        except Exception as e:
-            print(f"⚠️  PDF download partially failed for {self.author_name}: {e}")
-
-        final_count = self._count_doi_papers()
-        new_downloads = final_count - existing_papers
-        print(f"📥 {final_count} papers in doi_cache for {self.author_name} "
-              f"({new_downloads} new downloads)")
-
-        if final_count < self.MIN_PAPERS:
-            print(f"⚠️  Only {final_count} papers downloaded (target ≥{self.MIN_PAPERS}). "
-                  f"Some papers may be paywalled or unavailable.")
+        if len(fulltext) < target:
+            print(f"⚠️  Only {len(fulltext)} full-text papers after trying all {len(papers)} candidates "
+                  f"(target ≥{target}); the KB will be built from these. A broader query in "
+                  f"configs/experts.yaml would give more.")
         return self.doi_cache_dir
 
-    def _count_doi_papers(self) -> int:
-        """Count PDF/XML files in doi_cache."""
+    def _paper_file(self, doi: str) -> Optional[str]:
+        """File name of a paper downloaded by download_paper (<doi with / as _>.pdf or .xml), if on disk."""
+        for suffix in (".pdf", ".xml"):
+            fname = doi.replace("/", "_") + suffix
+            if os.path.exists(os.path.join(self.doi_cache_dir, fname)):
+                return fname
+        return None
+
+    async def _fulltext_chars(self, file_path: str) -> int:
+        """Length of the text extracted from a PDF/XML (0 for other or unreadable files)."""
+        try:
+            if file_path.endswith('.pdf'):
+                return len(await self._extract_text_from_pdf(file_path))
+            if file_path.endswith('.xml'):
+                return len(await self._extract_text_from_xml(file_path))
+        except Exception:
+            pass
+        return 0
+
+    async def _fulltext_files(self) -> List[str]:
+        """PDF/XML files in doi_cache with at least MIN_FULLTEXT_CHARS of extracted text."""
         if not os.path.exists(self.doi_cache_dir):
-            return 0
-        return sum(1 for f in os.listdir(self.doi_cache_dir)
-                   if f.endswith('.pdf') or f.endswith('.xml'))
+            return []
+        return [f for f in sorted(os.listdir(self.doi_cache_dir))
+                if await self._fulltext_chars(os.path.join(self.doi_cache_dir, f)) >= self.MIN_FULLTEXT_CHARS]
 
     # ---- text extraction helpers ----
 
@@ -232,11 +279,11 @@ class AuthorKnowledgeBase:
                     t = await self._extract_text_from_xml(fpath)
                 else:
                     continue
-                if t and len(t) > 100:          # skip near-empty files
+                if t and len(t) >= self.MIN_FULLTEXT_CHARS:    # skip metadata/abstract-only files
                     texts.append(t)
                     print(f"  📄 Extracted {len(t):,} chars from {fname}")
                 else:
-                    print(f"  ⚠️  Skipped {fname} (too short: {len(t)} chars)")
+                    print(f"  ⚠️  Skipped {fname} (not full text: {len(t)} chars)")
             except Exception as e:
                 print(f"  ❌ Failed to extract {fname}: {e}")
         return texts
@@ -266,7 +313,9 @@ class AuthorKnowledgeBase:
 
     # ---- main build pipeline ----
 
-    async def build_knowledge_base(self, paper_dir: str = None):
+    async def build_knowledge_base(self, paper_dir: str = None) -> bool:
+        """Build (or load) the KB. Returns False, without calling the LLM, when no full-text paper
+        could be downloaded."""
         await self.initialize_rag()
 
         # 1. Already indexed? → skip
@@ -275,33 +324,36 @@ class AuthorKnowledgeBase:
                             if f.endswith('.json') or f.endswith('.hgdb')]
             if content_files:
                 print(f"📂 KB already built for {self.author_name}, loading from cache")
-                return
+                return True
 
-        # 2. Papers already downloaded? Re-fetch if below MIN_PAPERS.
-        doi_files = [f for f in os.listdir(self.doi_cache_dir)
-                     if f.endswith('.pdf') or f.endswith('.xml')] \
-                    if os.path.exists(self.doi_cache_dir) else []
-
-        if len(doi_files) >= self.MIN_PAPERS:
-            print(f"📥 Found {len(doi_files)} papers in doi_cache for {self.author_name}, "
-                  f"skipping download (≥{self.MIN_PAPERS})")
-            paper_dir = self.doi_cache_dir
+        # 2. Enough full-text papers downloaded? Otherwise download more.
+        target = max(self.top_k, self.MIN_PAPERS)
+        fulltext = await self._fulltext_files()
+        if len(fulltext) >= target:
+            print(f"📥 Found {len(fulltext)} full-text papers in doi_cache for {self.author_name}, "
+                  f"skipping download (≥{target})")
         else:
-            if doi_files:
-                print(f"📥 Found only {len(doi_files)} papers in doi_cache for {self.author_name} "
-                      f"(need ≥{self.MIN_PAPERS}), re-fetching...")
-            paper_dir = await self.fetch_and_cache_papers()
+            if fulltext:
+                print(f"📥 Found only {len(fulltext)} full-text papers in doi_cache for {self.author_name} "
+                      f"(need ≥{target}), downloading more...")
+            await self.fetch_and_cache_papers()
+        paper_dir = self.doi_cache_dir
 
-        # 3. Extract text directly from PDFs / XMLs
+        # 3. Extract text directly from PDFs / XMLs (full-text files only)
         print(f"📖 Extracting text from papers in {paper_dir}")
         texts = await self._extract_texts_from_dir(paper_dir)
         if not texts:
-            print(f"⚠️  No usable paper text for {self.author_name} — KB will be empty")
-            return
+            print(f"❌ {self.author_name}: no full-text papers; KB not built")
+            return False
+        if len(texts) < self.MIN_PAPERS:
+            # Once built, the KB is loaded as is; delete its ragstore/ to rebuild with more papers
+            print(f"⚠️  {self.author_name}: building from {len(texts)} full-text papers "
+                  f"(below the target of {self.MIN_PAPERS})")
 
         # 4. Insert into HyperRAG
         await self.insert_texts_to_rag(texts)
         print(f"✅ KB built for {self.author_name}: {len(texts)} papers indexed")
+        return True
 
     async def query_system(self, question: str) -> str:
         """
@@ -407,7 +459,7 @@ async def scientist_rag_tool_wrapper(expert_alias: str, question: str) -> str:
     - GenomicsExpert
     - NeuroscienceExpert
     - LongevityBiostatsExpert
-    - BioinformaticsExpert
+    - CancerExpert
     """
     try:
         # Initialize KB if not already done
@@ -437,7 +489,7 @@ async def query_expert_kb(expert_alias: str, question: str) -> str:
     
     Args:
         expert_alias: One of GenomicsExpert, NeuroscienceExpert,
-                      LongevityBiostatsExpert, BioinformaticsExpert
+                      LongevityBiostatsExpert, CancerExpert
         question: Scientific query (3-5 words work best)
     
     Returns:
@@ -709,13 +761,15 @@ _EXPERT_BY_ALIAS = {e["alias"]: e for e in EXPERT_SCIENTISTS}
 _EXPERT_BY_DOMAIN = {e["domain"]: e for e in EXPERT_SCIENTISTS}
 
 
-async def initialize_all_authors():
-    """Build / load KBs for all configured expert scientists."""
+async def initialize_all_authors(aliases: Optional[List[str]] = None):
+    """Build / load KBs for all configured expert scientists, or only those in `aliases`."""
     kb_dict = {}
     for scientist in EXPERT_SCIENTISTS:
         real_name = scientist["real_name"]
         alias = scientist["alias"]
         cache_key = scientist["cache_key"]
+        if aliases is not None and alias not in aliases:
+            continue
 
         # Check if KB is already cached on disk (skip PubMed fetch if so)
         working_dir = os.path.join(BASE_AUTHOR_DIR, cache_key, "ragstore")
@@ -730,7 +784,9 @@ async def initialize_all_authors():
             pubmed_name=real_name if real_name != "CHANGE_ME" else None,
             top_k=scientist["top_k"],
         )
-        await kb.build_knowledge_base(paper_dir=kb.doi_cache_dir)
+        if not await kb.build_knowledge_base(paper_dir=kb.doi_cache_dir):
+            print(f"⚠️  Skipping {alias}: KB not built (no full-text papers)")
+            continue
         kb_dict[alias] = kb
         print(f"✅ {alias} KB ready (cache: {cache_key})")
 

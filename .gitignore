@@ -63,6 +63,10 @@ benchmark/ai_review_results/*
 benchmark/ai_review_results_test-3/*
 tools/omic_tools/outputs/*
 
+tools/pubmed_tools/test/*
+!tools/pubmed_tools/test/test_pubmed_agent.py
+!tools/pubmed_tools/test/test_wiley_api.py
+
 db_cache/*
 
 ProCyon
@@ -124,6 +128,7 @@ coverage.xml
 docs/_build/
 docs/superpowers/*
 docs/deep-research/*
+docs/manuscript/*
 
 
 # logs and results

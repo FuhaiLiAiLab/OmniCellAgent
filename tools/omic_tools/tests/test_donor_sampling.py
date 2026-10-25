@@ -142,6 +142,93 @@ def test_same_donor_label_in_different_studies_gets_distinct_slots():
     assert summary["disease"]["donors_selected"] == 4
 
 
+def test_keep_unknown_donor_includes_unlabelled_metacells_without_counting_them_as_donors(capsys):
+    selected, summary = _sample(_pool(), CONDITIONS, ALIASES, sample_size=1000,
+                                keep_unknown_donor=True)
+    assert selected.disease_BMG_name.value_counts().to_dict() == {"AD": 9, "normal": 6}
+    assert not selected.duplicated(["matrix_file_path", "matrix_row_idx"]).any()
+    assert summary["keep_unknown_donor"] is True
+    assert summary["disease"]["included_unknown_donor"] == 7
+    assert summary["disease"]["excluded_unknown_donor"] == 0
+    assert summary["disease"]["known_donor_available"] == 2
+    assert summary["disease"]["donors_available"] == 2
+    assert summary["control"]["included_unknown_donor"] == 1
+    assert "kept unknown/unusable donor=7" in capsys.readouterr().out
+
+
+def test_default_excludes_unlabelled_metacells_and_reports_none_included():
+    _, summary = _sample(_pool(), CONDITIONS, ALIASES, sample_size=1000)
+    assert summary["keep_unknown_donor"] is False
+    assert summary["disease"]["included_unknown_donor"] == 0
+
+
+def test_keep_unknown_donor_rescues_a_group_with_no_known_donor():
+    pool = _pool()
+    pool.loc[pool.disease_BMG_name.eq("AD"), "donor_id"] = "unknown"
+    selected, summary = _sample(pool, CONDITIONS, ALIASES, sample_size=1000,
+                                keep_unknown_donor=True)
+    assert len(selected[selected.disease_BMG_name.eq("AD")]) == 9
+    assert summary["disease"]["donors_available"] == 0
+
+
+def test_unlabelled_metacells_share_one_sampling_slot_per_study_when_capped():
+    pool = _donor_pool(["unknown"] * 20 + ["NaN"] * 20 + [""] * 10 + ["A", "B"])
+    selected, summary = _sample(pool, CONDITIONS, ALIASES, sample_size=3,
+                                keep_unknown_donor=True)
+    for _, part in selected.groupby("disease_BMG_name"):
+        assert len(part) == 3
+        assert {"A", "B"} <= set(part.donor_id)
+    assert summary["disease"]["included_unknown_donor"] == 1
+    assert summary["disease"]["donors_selected"] == 2
+
+
+def _tumour_pool():
+    """Tumour cells and their control are different cell types, as in LUAD and PDAC."""
+    rows = []
+    for disease, cmt, label, donors in [
+        ("AD", "epithelial cell", "Malignant epithelial cell", ["A", "B", "C"]),
+        ("AD", "epithelial cell", "Ductal epithelial cell", ["D"]),
+        ("AD", "ductal cell", "Ductal", ["E"]),
+        ("normal", "ductal cell", "Ductal", ["F", "G"]),
+        ("normal", "epithelial cell", "Ductal epithelial cell", ["H"]),
+    ]:
+        for donor in donors:
+            rows.append({"disease_BMG_name": disease, "donor_id": donor, "CMT_name": cmt,
+                         "cell_type": label, "tissue_general": "brain",
+                         "matrix_file_path": "matrix.npy", "matrix_row_idx": len(rows)})
+    return pd.DataFrame(rows)
+
+
+def test_control_cell_type_selects_the_control_group_by_its_own_name():
+    conditions = {"disease": "AD", "cell_type": "epithelial cell", "tissue_general": "brain"}
+    selected, summary = _sample(_tumour_pool(), conditions, ALIASES, sample_size=1000,
+                                control_cell_type="ductal cell")
+    disease = selected[selected.disease_BMG_name.eq("AD")]
+    control = selected[selected.disease_BMG_name.eq("normal")]
+    assert set(disease.CMT_name) == {"epithelial cell"} and len(disease) == 4
+    assert set(control.CMT_name) == {"ductal cell"} and set(control.donor_id) == {"F", "G"}
+    assert summary["control_cell_type"] == "ductal cell"
+
+
+def test_disease_cell_label_also_filters_disease_cells_by_their_original_label():
+    conditions = {"disease": "AD", "cell_type": "epithelial cell", "tissue_general": "brain"}
+    selected, summary = _sample(_tumour_pool(), conditions, ALIASES, sample_size=1000,
+                                control_cell_type="ductal cell",
+                                disease_cell_label="malignant EPITHELIAL cell")
+    disease = selected[selected.disease_BMG_name.eq("AD")]
+    assert set(disease.cell_type) == {"Malignant epithelial cell"} and len(disease) == 3
+    assert set(selected[selected.disease_BMG_name.eq("normal")].donor_id) == {"F", "G"}
+    assert summary["disease_cell_label"] == "malignant EPITHELIAL cell"
+
+
+def test_without_the_new_options_both_groups_share_one_cell_type():
+    conditions = {"disease": "AD", "cell_type": "epithelial cell", "tissue_general": "brain"}
+    selected, summary = _sample(_tumour_pool(), conditions, ALIASES, sample_size=1000)
+    assert set(selected.CMT_name) == {"epithelial cell"}
+    assert selected.disease_BMG_name.value_counts().to_dict() == {"AD": 4, "normal": 1}
+    assert summary["control_cell_type"] is None and summary["disease_cell_label"] is None
+
+
 def test_donor_diversity_selection_is_reproducible_and_has_no_duplicate_rows():
     pool = _donor_pool(["A"] * 100 + [f"D{i}" for i in range(30)])
     first, _ = _sample(pool, CONDITIONS, ALIASES, sample_size=12, random_state=42)
