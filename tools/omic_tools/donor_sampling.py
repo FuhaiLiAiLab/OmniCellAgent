@@ -74,7 +74,8 @@ def _normal_mask(values):
 
 def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEFAULT_SAMPLE_SIZE,
                               random_state=42, keep_unknown_donor=False,
-                              control_cell_type=None, disease_cell_label=None):
+                              control_cell_type=None, disease_cell_label=None,
+                              shared_datasets_only=False):
     """Independently cap each pool while covering the maximum number of donors.
 
     Return selected metadata and per-group counts. A pool smaller than the cap
@@ -94,12 +95,19 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
     have no normal counterpart with the same name). disease_cell_label also
     requires the disease cells' original source-study label (the metadata
     `cell_type` column) to equal it, ignoring case.
+
+    shared_datasets_only keeps only the datasets (dataset_id) that contribute
+    eligible metacells to both groups, before sampling. A dataset that holds
+    one group only carries its study effects into that group alone, where no
+    model can separate them from the disease effect.
     """
     if sample_size < 1:
         raise ValueError("sample_size must be a positive integer")
     disease_column = field_alias.get("disease", "disease_BMG_name")
     pointer_columns = ["matrix_file_path", "matrix_row_idx"]
     required = {"donor_id", disease_column, *pointer_columns}
+    if shared_datasets_only:
+        required.add("dataset_id")
     missing = required - set(metadata.columns)
     if missing:
         raise ValueError(f"Known-donor sampling requires metadata columns: {', '.join(sorted(missing))}")
@@ -120,6 +128,17 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
         "disease": scoped.loc[_disease_mask(scoped[disease_column], resolved.get(disease_column))],
         "control": control_scoped.loc[_normal_mask(control_scoped[disease_column])],
     }
+    usable = {name: _usable_donor_mask(pool["donor_id"]) for name, pool in pools.items()}
+    eligible = {name: pool if keep_unknown_donor else pool.loc[usable[name]]
+                for name, pool in pools.items()}
+
+    shared = None
+    if shared_datasets_only:
+        shared = sorted(set(eligible["disease"]["dataset_id"]) & set(eligible["control"]["dataset_id"]))
+        if not shared:
+            raise ValueError("No dataset contributes eligible metacells to both the disease and "
+                             "the control group, so no within-dataset comparison is possible")
+        print(f"[Donor sampling] shared datasets only: {len(shared)} datasets hold both groups")
 
     selected, summary = [], {
         "requested_per_group": sample_size,
@@ -129,12 +148,18 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
         "keep_unknown_donor": bool(keep_unknown_donor),
         "control_cell_type": control_cell_type,
         "disease_cell_label": disease_cell_label,
+        "shared_datasets_only": bool(shared_datasets_only),
+        "shared_datasets": shared,
     }
     empty_groups = []
     for name, pool in pools.items():
-        usable = _usable_donor_mask(pool["donor_id"])
-        eligible = pool if keep_unknown_donor else pool.loc[usable]
-        unique = eligible.drop_duplicates(pointer_columns)
+        rows = eligible[name]
+        excluded_not_shared = 0
+        if shared is not None:
+            in_shared = rows["dataset_id"].isin(shared)
+            excluded_not_shared = int((~in_shared).sum())
+            rows = rows.loc[in_shared]
+        unique = rows.drop_duplicates(pointer_columns)
         take = min(sample_size, len(unique))
         chosen = (unique.copy() if take == len(unique)
                   else _sample_across_donors(unique, take, random_state))
@@ -144,9 +169,10 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
         selected_donors = int(donor_keys(chosen_known).nunique())
         summary[name] = {
             "matching_rows": len(pool),
-            "excluded_unknown_donor": 0 if keep_unknown_donor else int((~usable).sum()),
+            "excluded_unknown_donor": 0 if keep_unknown_donor else int((~usable[name]).sum()),
+            "excluded_not_in_shared_dataset": excluded_not_shared,
             "included_unknown_donor": len(chosen) - len(chosen_known),
-            "duplicate_rows_removed": len(eligible) - len(unique),
+            "duplicate_rows_removed": len(rows) - len(unique),
             "known_donor_available": len(unique_known),
             "selected": len(chosen),
             "donors_available": available_donors,
@@ -157,11 +183,12 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
         action = "using all available" if take == len(unique) else "donor-balanced without replacement"
         print(
             f"[Donor sampling] {name}: matching={len(pool):,}; "
-            f"{'kept' if keep_unknown_donor else 'excluded'} unknown/unusable donor={int((~usable).sum()):,}; "
+            f"{'kept' if keep_unknown_donor else 'excluded'} unknown/unusable donor={int((~usable[name]).sum()):,}; "
+            f"excluded outside shared datasets={excluded_not_shared:,}; "
             f"known-donor available={len(unique_known):,}; requested={sample_size:,}; "
             f"selected={take:,} ({action}); "
             f"donors selected={selected_donors:,}/{available_donors:,}; "
-            f"duplicate rows removed={len(eligible) - len(unique):,}."
+            f"duplicate rows removed={len(rows) - len(unique):,}."
         )
         if not take:
             empty_groups.append(name)

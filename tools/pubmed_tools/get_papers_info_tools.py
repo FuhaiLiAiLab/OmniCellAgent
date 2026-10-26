@@ -120,11 +120,42 @@ async def process_single_paper(file_path: str, file_name: str, paper_metadata: D
     """
     Process a single paper file asynchronously.
     """
+    queued = time.perf_counter()
     if semaphore:
         async with semaphore:  # Limit concurrent LLM calls
-            return await _process_single_paper_internal(file_path, file_name, paper_metadata, use_llm_processing)
+            return await _timed_process_single_paper(file_path, file_name, paper_metadata, use_llm_processing, queued)
     else:
-        return await _process_single_paper_internal(file_path, file_name, paper_metadata, use_llm_processing)
+        return await _timed_process_single_paper(file_path, file_name, paper_metadata, use_llm_processing, queued)
+
+
+async def _timed_process_single_paper(file_path: str, file_name: str, paper_metadata: Dict[str, Any],
+                                      use_llm_processing: bool, queued: float) -> Dict[str, Any]:
+    """
+    Process one paper, add its timing to the entry and print one line with its time and summarizer tokens.
+    wait_seconds: waiting for a concurrency slot. process_seconds: everything after that (text
+    extraction, rate-limit wait, summary call, parsing); llm_usage["llm_seconds"] is the summary call alone.
+    """
+    start = time.perf_counter()
+    paper_entry = await _process_single_paper_internal(file_path, file_name, paper_metadata, use_llm_processing)
+    timing = {"wait_seconds": round(start - queued, 2), "process_seconds": round(time.perf_counter() - start, 2)}
+    if paper_entry is not None:
+        paper_entry.update(timing)
+    print(_paper_timing_line(file_name, paper_entry, timing))
+    return paper_entry
+
+
+def _paper_timing_line(file_name: str, paper_entry: Dict[str, Any], timing: Dict[str, float]) -> str:
+    line = f"[Paper] {file_name}: {timing['process_seconds']:.1f}s"
+    if timing["wait_seconds"] >= 0.5:
+        line += f" (after {timing['wait_seconds']:.1f}s waiting for a slot)"
+    if paper_entry is None:
+        return line + ", skipped (no readable content)"
+    usage = paper_entry.get("llm_usage")
+    if not usage:
+        return line + ", no summarizer tokens recorded"
+    return (line + f", summary call {usage['llm_seconds']:.1f}s, tokens {usage['prompt_token_count']:,} in"
+            f" + {usage['candidates_token_count']:,} out + {usage['thoughts_token_count']:,} thinking"
+            f" = {usage['total_token_count']:,}")
 
 async def _process_single_paper_internal(file_path: str, file_name: str, paper_metadata: Dict[str, Any], use_llm_processing: bool) -> Dict[str, Any]:
     """

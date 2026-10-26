@@ -31,7 +31,8 @@ select_volcano_labels <- function(results, max_labels = 15L,
 parse_de_config <- function(args) {
   allowed <- c("stage", "ref-csv", "alt-csv", "ref-label", "alt-label",
                "input-scale", "de-dir", "state-file", "diagnostics-file",
-               "de-fdr", "top-n", "final-out-dir", "final-de-dir", "volcano-dir")
+               "de-fdr", "top-n", "final-out-dir", "final-de-dir", "volcano-dir",
+               "covariates-csv", "chry-covariate")
   options <- list()
   positional <- character()
   i <- 1L
@@ -83,6 +84,8 @@ parse_de_config <- function(args) {
     final_de_dir = get_option("final-de-dir", get_option("de-dir", file.path(session_dir, "differential_expression"))),
     state_file = get_option("state-file", file.path(out_dir, "analysis_state.rds")),
     diagnostics_file = get_option("diagnostics-file", NULL),
+    covariates_csv = get_option("covariates-csv", NULL),
+    chry_covariate = get_option("chry-covariate", "no"),
     de_fdr = suppressWarnings(as.numeric(get_option("de-fdr", "0.05"))),
     top_n = suppressWarnings(as.numeric(get_option("top-n", "1000")))
   )
@@ -103,6 +106,10 @@ parse_de_config <- function(args) {
   if (!is.null(config$diagnostics_file) && !file.exists(config$diagnostics_file)) {
     stop("Diagnostics file not found: ", config$diagnostics_file, call. = FALSE)
   }
+  if (!is.null(config$covariates_csv) && !file.exists(config$covariates_csv)) {
+    stop("Covariates file not found: ", config$covariates_csv, call. = FALSE)
+  }
+  if (!config$chry_covariate %in% c("yes", "no")) stop("--chry-covariate must be yes or no.", call. = FALSE)
   config
 }
 
@@ -159,8 +166,50 @@ read_inputs <- function(config) {
   }
   message(sprintf("DE input: %d tested genes, %s n=%d, %s n=%d",
                   nrow(expr), config$ref_label, ncol(mat_ref), config$alt_label, ncol(mat_alt)))
-  list(expr = expr, group = group, mat_ref = mat_ref, mat_alt = mat_alt,
+  # Per-sample source dataset, keyed by the matrix column names (sample,dataset_id)
+  dataset <- NULL
+  if (!is.null(config$covariates_csv)) {
+    covariates <- data.table::fread(config$covariates_csv, colClasses = "character")
+    if (!all(c("sample", "dataset_id") %in% names(covariates))) {
+      stop("Covariates file needs columns sample and dataset_id.")
+    }
+    dataset <- covariates$dataset_id[match(colnames(expr), covariates$sample)]
+    if (anyNA(dataset)) stop("Covariates file lacks ", sum(is.na(dataset)), " matrix samples.")
+    dataset <- factor(dataset)
+  }
+  list(expr = expr, group = group, mat_ref = mat_ref, mat_alt = mat_alt, dataset = dataset,
        input_md5 = tools::md5sum(c(config$ref_csv, config$alt_csv)))
+}
+
+# Metacells pool cells of several donors and carry their majority donor's sex label, so the
+# male RNA share is measured from these Y-chromosome genes instead of taken from the label.
+CHRY_GENES <- c("UTY", "NLGN4Y", "KDM5D", "ZFY", "USP9Y", "DDX3Y", "EIF1AY")
+
+build_de_design <- function(expr, group, dataset, chry) {
+  # ~ 0 + group, plus the chrY score (mean log2 expression of CHRY_GENES; off for a sex
+  # contrast, which it would absorb) and the source dataset when they vary; the dataset
+  # term is dropped if it is confounded with group.
+  data <- data.frame(group = group)
+  terms <- "~ 0 + group"
+  ygenes <- if (chry) intersect(CHRY_GENES, rownames(expr)) else character()
+  if (length(ygenes)) {
+    data$chrY_score <- colMeans(expr[ygenes, , drop = FALSE], na.rm = TRUE)
+    if (stats::var(data$chrY_score) > 0) terms <- paste(terms, "+ chrY_score")
+  }
+  if (!is.null(dataset) && nlevels(droplevels(dataset)) > 1L) {
+    data$dataset <- droplevels(dataset)
+    candidate <- paste(terms, "+ dataset")
+    full <- stats::model.matrix(stats::as.formula(candidate), data)
+    if (qr(full)$rank == ncol(full)) {
+      terms <- candidate
+    } else {
+      message("Dataset term omitted: it is confounded with the group contrast.")
+    }
+  }
+  design <- stats::model.matrix(stats::as.formula(terms), data)
+  colnames(design)[seq_len(nlevels(group))] <- levels(group)
+  colnames(design) <- make.names(colnames(design), unique = TRUE)
+  list(design = design, formula = terms)
 }
 
 run_de <- function(inputs, config) {
@@ -168,9 +217,10 @@ run_de <- function(inputs, config) {
   if (!requireNamespace("statmod", quietly = TRUE)) stop("R package statmod is required for robust limma.")
   expr <- inputs$expr
   group <- inputs$group
-  # Verbatim statistical sequence from casestudy_panels.Rmd's de chunk.
-  design <- model.matrix(~ 0 + group)
-  colnames(design) <- make.names(levels(group))
+  # casestudy_panels.Rmd's de chunk, with sex (chrY score) and dataset covariates added.
+  built <- build_de_design(expr, group, inputs$dataset, identical(config$chry_covariate, "yes"))
+  design <- built$design
+  message("DE model: ", built$formula)
   contrast_str <- paste(make.names(config$alt_label), "-", make.names(config$ref_label))
   cm <- limma::makeContrasts(contrasts = contrast_str, levels = design)
   fit <- limma::lmFit(expr, design)
@@ -183,7 +233,8 @@ run_de <- function(inputs, config) {
     stop("limma returned non-finite DE statistics.")
   }
   list(schema_version = 1L, config = config, inputs = inputs, native = res,
-       contrast = contrast_str, limma_version = as.character(utils::packageVersion("limma")))
+       contrast = contrast_str, design_formula = built$formula,
+       limma_version = as.character(utils::packageVersion("limma")))
 }
 
 export_results <- function(state, config) {

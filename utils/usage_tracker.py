@@ -4,7 +4,7 @@ Per-session usage tracking for the LangGraph agent.
 Records, for one agent run:
   - every LangChain LLM call (tokens, wall time), attributed to the agent or graph node that made it
   - wall time of every executed task
-  - timing checkpoints and summarizer tokens of every PubMed full-text search
+  - timing checkpoints and summarizer tokens of every PubMed full-text search, in total and per paper
     (the stats_out dict of query_medical_research_async)
 
 The tracker is written to <session_dir>/usage_log.json by LangGraphOmniCellAgent.
@@ -172,13 +172,15 @@ class LLMUsageCallback(AsyncCallbackHandler):
 
     async def on_llm_end(self, response: LLMResult, *, run_id, **kwargs) -> None:
         start, label, requested = self._runs.pop(run_id, (None, _current_label.get(), None))
-        usage, model = {}, None
+        usage, model, finish_reason = {}, None, None
         for generations in response.generations:
             for generation in generations:
                 message = getattr(generation, "message", None)
                 if message is not None and getattr(message, "usage_metadata", None):
                     usage = message.usage_metadata
                     model = (message.response_metadata or {}).get("model_name")
+                    # "length" (OpenAI-compatible endpoint) or "MAX_TOKENS" (native Gemini): stopped at the output cap
+                    finish_reason = (message.response_metadata or {}).get("finish_reason")
                     break
         input_tokens, output_tokens = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
         total_tokens = usage.get("total_tokens", 0)
@@ -197,6 +199,7 @@ class LLMUsageCallback(AsyncCallbackHandler):
             "output_tokens": output_tokens,
             "reasoning_tokens": reasoning_tokens,
             "total_tokens": total_tokens,
+            "finish_reason": finish_reason,
         })
 
     async def on_llm_error(self, error, *, run_id, **kwargs) -> None:

@@ -134,6 +134,16 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
     print(f"Disease DataFrame shape after aggregation: {combined_disease_df.shape}")
     print(f"Normal DataFrame shape after aggregation: {combined_normal_df.shape}")
 
+    # Source dataset of each sample column, for the dataset term of the limma model
+    covariates = None
+    normal_ids = data_dict.get("normal_dataset_id")
+    disease_ids = data_dict.get("disease_dataset_id")
+    if normal_ids is not None and disease_ids is not None:
+        covariates = pd.DataFrame({
+            "sample": combined_normal_df.columns[1:].tolist() + combined_disease_df.columns[1:].tolist(),
+            "dataset_id": list(normal_ids) + list(disease_ids),
+        })
+
     # Resolve the base directory for all analysis outputs
     # Use session directory if provided, otherwise use the default OUTPUT_DIR
     if session_dir:
@@ -172,6 +182,8 @@ def omic_analysis(disease_name: str, data_dict: dict, enable_plotting: bool = Tr
         de_output_dir=de_output_dir,
         n_jobs=-1,  # Retained legacy argument; DE execution now belongs to R.
         session_dir=base_dir,
+        covariates=covariates,
+        chry_covariate=data_dict.get("adjust_chrY", False),
         ref_label=ref_label,
         alt_label=alt_label,
         input_scale=input_scale,
@@ -225,13 +237,17 @@ def perform_unpaired_differential_expression(disease_df, normal_df,
                                     sig_top_n=100, n_jobs=16, disease="Disease",
                                     de_output_dir=None, *,
                                     session_dir=None, ref_label="Healthy", alt_label="Diseased",
-                                    input_scale="linear_cp10k", r_timeout=3600) -> tuple[dict, pd.DataFrame]:
+                                    input_scale="linear_cp10k", r_timeout=3600,
+                                    covariates=None, chry_covariate=False) -> tuple[dict, pd.DataFrame]:
     """Delegate metacell-level DE to the existing R/limma implementation.
 
     Preserve the historical function name, positional arguments, five CSVs and
     (all/up/down subsets, full table) return structure. n_jobs and the former
     log2fc_threshold argument are retained for callers; neither alters limma.
-    Input matrices must be on the explicitly declared scale.
+    Input matrices must be on the explicitly declared scale. covariates, a
+    sample/dataset_id table keyed by the matrix column names, adds the source
+    dataset to the limma model; chry_covariate adds the chrY expression score
+    (leave it off for a sex contrast).
     """
     if de_output_dir is None:
         de_output_dir = Path(session_dir or OUTPUT_DIR) / "differential_expression"
@@ -268,6 +284,12 @@ def perform_unpaired_differential_expression(disease_df, normal_df,
             "--final-out-dir", str(analysis_dir), "--final-de-dir", str(de_dir),
             "--de-fdr", str(p_value_threshold), "--top-n", str(sig_top_n),
         ]
+        if covariates is not None:
+            covariates_csv = base_dir / f"de_covariates_{disease}.csv"
+            covariates.to_csv(covariates_csv, index=False, encoding="utf-8")
+            args += ["--covariates-csv", str(covariates_csv)]
+        if chry_covariate:
+            args += ["--chry-covariate", "yes"]
         # The cohort diagnostics stay out of the DE tables; omic_analysis writes them
         # to COHORT_DIAGNOSTICS.txt in the same folder.
         run_r_script(r_script, args, timeout=r_timeout)
@@ -432,6 +454,39 @@ def _perform_enrichment_analysis(significant_genes, disease_name="Disease",
     run_status["status"] = "success" if "success" in states else "empty" if "empty" in states else "skipped"
     write_status(status_path, run_status)
     return results
+
+
+# Libraries whose significant terms are handed to the agents (the CSVs keep every library)
+SUMMARY_LIBRARIES = ("KEGG_2021_Human", "Reactome_2022", "GO_Biological_Process_2021", "MSigDB_Hallmark_2020")
+
+
+def summarize_enrichment(enrich_output_dir, top_n=5, max_q=0.05, max_genes=10):
+    """
+    Significant Enrichr terms per regulation direction, read from the saved <Library>_results.csv
+    files: {"up": {library: [{"term", "adjusted_p", "n_genes", "genes"}]}, "down": {...}}.
+    At most top_n terms per library with adjusted p < max_q, lowest first; an empty list means
+    no term of that library reached max_q. Libraries without a results file are left out.
+    """
+    summary = {}
+    for direction in ("up", "down"):
+        folders = sorted(Path(enrich_output_dir).glob(f"*_{direction}_regulated"))
+        if not folders:
+            continue
+        summary[direction] = {}
+        for library in SUMMARY_LIBRARIES:
+            path = folders[0] / f"{library}_results.csv"
+            if not path.is_file():
+                continue
+            table = pd.read_csv(path)
+            table = table[table["Adjusted P-value"] < max_q].sort_values(["Adjusted P-value", "P-value"])
+            terms = []
+            for _, row in table.head(top_n).iterrows():
+                # Genes is a stringified Python list, e.g. "['HLA-A', 'B2M']"
+                genes = [g.strip(" '\"") for g in str(row["Genes"]).strip("[]").split(",") if g.strip(" '\"")]
+                terms.append({"term": row["Term"], "adjusted_p": float(f"{row['Adjusted P-value']:.3g}"),
+                              "n_genes": len(genes), "genes": genes[:max_genes]})
+            summary[direction][library] = terms
+    return summary
 
 def enrichr_analysis(gene_list, sample_id, enrich_output_dir=None, databases=None, *, request_timeout=60):
     """Call the real Enrichr endpoints; errors raise instead of becoming None."""

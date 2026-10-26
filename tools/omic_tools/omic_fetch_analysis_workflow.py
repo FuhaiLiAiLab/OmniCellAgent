@@ -24,7 +24,7 @@ When no exact match is found, provides suggestions using:
 Based on the working CellTOSGDataLoader example pattern.
 """
 
-from omic_analysis_components import omic_analysis, EnrichrError
+from omic_analysis_components import omic_analysis, EnrichrError, summarize_enrichment
 from cohort_diagnostics import compute_cohort_diagnostics, format_diagnostics_text
 from celltosg_runtime_adapter import writable_celltosg_root
 from donor_sampling import DEFAULT_SAMPLE_SIZE, sample_known_donor_cohort
@@ -339,7 +339,7 @@ def select_contrast(Y, mapping: dict):
 
 def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease",
                                suspension_type: str = None, sample_size: int = DEFAULT_SAMPLE_SIZE,
-                               keep_unknown_donor: bool = False):
+                               keep_unknown_donor: bool = False, shared_datasets_only: bool = True):
     """
     Fetch single-cell RNA-seq data using the new CellTOSGDataLoader with soft matching.
 
@@ -362,6 +362,9 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         keep_unknown_donor (bool): Default False excludes metacells without a
             usable donor ID from disease comparisons. True keeps them, for studies
             that record no donor IDs (e.g. PDAC GSE202051).
+        shared_datasets_only (bool): Default True draws both groups of a disease
+            comparison only from datasets that hold eligible disease and control
+            metacells (see donor_sampling.sample_known_donor_cohort).
 
     Returns:
         tuple: (X, Y, metadata, similar_terms, retrieval_success)
@@ -460,6 +463,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
                 keep_unknown_donor=keep_unknown_donor,
                 control_cell_type=control_cell_type,
                 disease_cell_label=disease_cell_label,
+                shared_datasets_only=shared_datasets_only,
             )
             os.makedirs(output_dir, exist_ok=True)
             with open(os.path.join(output_dir, "donor_sampling.json"), "w", encoding="utf-8") as handle:
@@ -688,13 +692,15 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                                  disease_cell_label=None, session_dir=None,
                                  enable_differential_expression=True, enable_plotting=True,
                                  label="disease", suspension_type=None, sample_size=DEFAULT_SAMPLE_SIZE,
-                                 keep_unknown_donor=False,
+                                 keep_unknown_donor=False, shared_datasets_only=True,
                                  r_timeout=3600, enrichment_timeout=60, enrichment_databases=None):
     """
     Perform the complete single-cell omic analysis workflow.
 
     NOTE: This pipeline analyzes a COHORT of single-cell RNA-seq (scRNA-seq)
-    data from OmniCellTOSG. Samples are individual cells, not bulk libraries.
+    data from OmniCellTOSG. Samples are metacells (SEACells aggregates of about
+    200 cells of one cell type from one source file), not single cells, donors
+    or bulk libraries.
 
     Query the cohort with direct, keyword-only parameters (disease, cell_type,
     etc.). Keyword-only input prevents retired free-text positional calls from
@@ -726,6 +732,8 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         keep_unknown_donor: Default False excludes metacells without a usable
             donor ID from disease comparisons; True keeps them (see
             donor_sampling.sample_known_donor_cohort).
+        shared_datasets_only: Default True compares disease and normal metacells
+            only within datasets that hold both groups (label="disease" only).
     """
     times = {}
     times['start'] = time.time()
@@ -794,6 +802,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
      actual_label, label_fallback_message, label_mapping) = omic_fetch_with_new_loader(
         fetch_dict, session_dir, label=label, suspension_type=suspension_type,
         sample_size=sample_size, keep_unknown_donor=keep_unknown_donor,
+        shared_datasets_only=shared_datasets_only,
     )
     # The temporary loader root filters the BMG mapping to HGNC-approved
     # protein-coding symbols before extraction, including the saved raw matrix.
@@ -904,6 +913,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     de_plot_files = []
     analysis_paths = None
     top_genes_by_fdr = []
+    enrichment_top_terms = {}
     cohort_diagnostics = None
     diagnostics_text = ""
 
@@ -958,8 +968,15 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                 data_dict = {
                     "normal_omic_feature": normal_omic_feature,
                     "disease_omic_feature": disease_omic_feature,
-                    "omic_label": Y
+                    "omic_label": Y,
+                    # chrY expression covariate for sex imbalance, except when sex is the contrast
+                    "adjust_chrY": actual_label != "gender",
                 }
+                # Source dataset per row, so limma can model the study effect
+                if metadata is not None and "dataset_id" in metadata.columns and len(metadata) == len(Y):
+                    dataset_ids = metadata["dataset_id"].astype(str).to_numpy()
+                    data_dict["normal_dataset_id"] = dataset_ids[Y == contrast["ref_class"]]
+                    data_dict["disease_dataset_id"] = dataset_ids[Y == contrast["alt_class"]]
 
                 # Diagnostics are advisory only: the gate warns, it never
                 # withholds. Any failure here (bad metadata shape, a
@@ -1033,7 +1050,12 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                                 "effect_size": float(row['effect_size']) if 'effect_size' in row else None,
                             })
                         print(f"[DE] Top {len(top_genes_by_fdr)} genes by FDR: {[g['gene_name'] for g in top_genes_by_fdr[:5]]}...")
-                    
+
+                    # Significant Enrichr terms of the up and down lists, so the agents report the
+                    # computed enrichment instead of annotating single genes
+                    if enrichment_success and analysis_paths.get("enrichment_results_dir"):
+                        enrichment_top_terms = summarize_enrichment(analysis_paths["enrichment_results_dir"])
+
                     del data_and_analysis_dict
                     
                 except EnrichrError as e:
@@ -1175,13 +1197,16 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     # print(f"[Cleanup] Started background compression thread (not blocking workflow)")
     
     gc.collect()
-    success_message = f"Successfully retrieved {metadata.shape[0] if metadata is not None else 0} cells (scRNA-seq)"
+    success_message = (f"Successfully retrieved {metadata.shape[0] if metadata is not None else 0} "
+                       f"metacells (scRNA-seq; about 200 cells each)")
     if label_fallback_message:
         success_message = f"{success_message}. NOTE: {label_fallback_message}"
     return {
         "success": (analysis_success and de_plots_status != "failed" and enrichment_plot_status != "failed") if de_gated else True,
         "session_dir": session_dir,
         "data_type": "single-cell RNA-seq (scRNA-seq) cohort",
+        # num_samples counts these units
+        "sample_unit": "metacell (SEACells aggregate of about 200 cells of one cell type from one source file)",
         "label_column": actual_label,
         "requested_label": label,
         "actual_label": actual_label,
@@ -1194,6 +1219,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         "top_gene_names": top_gene_names,
         "top_gene_values": top_gene_values,
         "top_genes_by_fdr": top_genes_by_fdr,
+        "enrichment_top_terms": enrichment_top_terms,
         "similar_terms": similar_terms,
         "extracted_entities": fetch_dict,
         "retrieval_success": True,

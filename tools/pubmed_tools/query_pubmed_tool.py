@@ -521,6 +521,15 @@ def _sum_usage(papers: List[Dict[str, Any]]) -> Dict[str, int]:
     return totals
 
 
+def _paper_stats(paper: Dict[str, Any], returned: bool) -> Dict[str, Any]:
+    """Timing and summarizer tokens of one processed paper (see get_papers_info_tools._timed_process_single_paper)."""
+    usage = paper.get("llm_usage") or {}
+    return {"doi": paper.get("doi"), "title": paper.get("title"), "file_format": paper.get("file_format"),
+            "returned": returned, "wait_seconds": paper.get("wait_seconds"),
+            "process_seconds": paper.get("process_seconds"), "llm_seconds": usage.get("llm_seconds"),
+            **{f: usage.get(f, 0) for f in USAGE_FIELDS}}
+
+
 def _run_stats(processor, returned_papers, top_k, use_llm_processing, run_start, downloads_done, run_end):
     """Timing checkpoints, download counts and token totals for one query_medical_research_async call."""
     processed = getattr(processor, "processed_papers", returned_papers)
@@ -548,6 +557,8 @@ def _run_stats(processor, returned_papers, top_k, use_llm_processing, run_start,
             "tokens_discarded_papers": _sum_usage(discarded),
             "tokens_total": _sum_usage(processed),
         },
+        # one entry per processed paper; papers skipped as unreadable are only in the log
+        "papers": [_paper_stats(p, id(p) in returned_ids) for p in processed],
     }
 
 

@@ -47,7 +47,8 @@ from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, AIMessageChunk, SystemMessage, BaseMessage, ToolMessage
+from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.tools import tool
 import operator
 
@@ -210,9 +211,10 @@ def omic_analysis_tool(
     profiling, differential expression, and KEGG pathway enrichment.
 
     DATA TYPE: This tool operates on a COHORT of scRNA-seq data drawn from
-    OmniCellTOSG. Samples are individual cells, NOT bulk RNA-seq libraries.
-    Reports based on this tool's output MUST describe the analysis as
-    single-cell, not bulk.
+    OmniCellTOSG. Samples are metacells (SEACells aggregates of about 200 cells
+    of one cell type from one source file), NOT single cells, donors or bulk
+    RNA-seq libraries. Reports based on this tool's output MUST describe the
+    analysis as single-cell at metacell level, not bulk.
 
     Args:
         disease: Disease name to analyze. Examples: "lung adenocarcinoma",
@@ -227,9 +229,11 @@ def omic_analysis_tool(
             "lung", "brain", "breast", "pancreas".
         label: Column used to define the two groups for differential expression.
             - "disease" (default): disease cells vs normal cells that pass the
-              same cell-type (or `control_cell_type`) and organ filters. The
-              normal cells are not matched to the disease cells (e.g. by study,
-              protocol, age or sex). Requires `disease` to be set.
+              same cell-type (or `control_cell_type`) and organ filters. Both
+              groups come only from datasets that hold disease and normal cells;
+              the normal cells are not matched by protocol, age or sex. The DE
+              model adjusts for source dataset and for chrY expression (male RNA
+              share), not for age. Requires `disease` to be set.
             - "gender": female vs male within the queried subset (e.g. within
               a disease cohort or within an organ).
             - "cell_type": cell-type-stratified comparison.
@@ -244,6 +248,13 @@ def omic_analysis_tool(
         Dict with analysis results including top genes, enrichment data,
         plot paths, and provenance fields:
             - `data_type`: always "single-cell RNA-seq (scRNA-seq) cohort"
+            - `sample_unit`: what `num_samples` counts (metacells)
+            - `top_genes_by_fdr`: the differentially expressed genes with lowest FDR
+            - `enrichment_top_terms`: significant Enrichr terms (adjusted p < 0.05)
+              of the up- and down-regulated lists, per library; an empty list
+              means no term of that library was significant
+            - `qc_highest_mean_expression_genes`: most abundant genes, a check
+              of cell identity, not a disease signal
             - `requested_label`: the label you requested
             - `actual_label`: the label actually used for the DE comparison
               (may differ if automatic fallback kicked in)
@@ -312,6 +323,16 @@ def omic_analysis_tool(
         if isinstance(result, dict):
             result.pop("cohort_diagnostics", None)
             result.pop("cohort_verdict", None)
+            # The most abundant genes only confirm the cell type; pass them under a name that says so
+            names = result.pop("top_gene_names", None) or []
+            values = result.pop("top_gene_values", None) or []
+            result.pop("top_gene_indices", None)
+            if names:
+                result["qc_highest_mean_expression_genes"] = {
+                    "note": ("Highest mean expression (CP10K) over both groups: a check that the intended "
+                             "cell type was retrieved, not a disease signal or differential expression."),
+                    "genes": [{"gene": g, "mean_cp10k": round(float(v), 1)} for g, v in zip(names, values)],
+                }
         return result
 
     except Exception as e:
@@ -903,10 +924,37 @@ async def biomarker_kg_tool(query: str) -> str:
         Knowledge graph results
     """
     try:
-        result = await gretriever_tool(query)
-        return str(result)
+        result = str(await gretriever_tool(query))
     except Exception as e:
-        return f"Error in KG query: {str(e)}"
+        result = f"Error in KG query: {str(e)}"
+    _log_kg_call(query, result)
+    return result
+
+
+def _log_kg_call(query: str, result: str) -> None:
+    """Append one knowledge-graph call to <session_dir>/kg_calls.jsonl (tools/logs/gr.json keeps only the last)."""
+    try:
+        with open(os.path.join(get_current_session_dir(), "kg_calls.jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"timestamp": datetime.now().isoformat(timespec="seconds"),
+                                     "query": query, "result": result}, ensure_ascii=False) + "\n")
+    except OSError as error:
+        print(f"[KG] Could not log the call: {error}")
+
+
+def format_enrichment_terms(terms_by_direction: Dict[str, Any]) -> str:
+    """Markdown lines for enrichment_top_terms of one omics run (see summarize_enrichment)."""
+    if not terms_by_direction:
+        return "  - no enrichment results\n"
+    lines = []
+    for direction in ("up", "down"):
+        for library, terms in (terms_by_direction.get(direction) or {}).items():
+            if not terms:
+                lines.append(f"  - {direction}-regulated, {library}: no term with adjusted p < 0.05")
+                continue
+            listed = "; ".join(f"{t['term']} (adj. p {t['adjusted_p']:.2g}, {t['n_genes']} genes: "
+                               f"{', '.join(t['genes'])})" for t in terms)
+            lines.append(f"  - {direction}-regulated, {library}: {listed}")
+    return "\n".join(lines) + "\n"
 
 
 # ==============================================================================
@@ -923,6 +971,10 @@ LEAD_REASONING_EFFORT = "high"
 # such field), so the lead model goes through Gemini's OpenAI-compatible endpoint, which maps
 # reasoning_effort onto the thinking level (checked 2026-10-25: "high" thinks, "low" and no setting do not)
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+# Output tokens per lead-model reply, thinking included. Gemini 4 stops a normal reply at 32,768 tokens and a
+# streamed one at 65,536; longer output ("long decode") is not available on the OpenAI-compatible endpoint
+# (Gemini API docs, long decode, read 2026-10-25).
+LEAD_MAX_OUTPUT_TOKENS = 65536
 
 
 def create_llm(model_name: str = DEFAULT_MODEL):
@@ -941,11 +993,78 @@ def create_llm(model_name: str = DEFAULT_MODEL):
     return ChatGoogleGenerativeAI(model=model_name, temperature=0, google_api_key=api_key)
 
 
+def _hold_back_usage(chunk: ChatGenerationChunk, last_usage):
+    """Strip a streamed chunk's usage report; return the chunk and the latest report seen so far."""
+    usage = getattr(chunk.message, "usage_metadata", None)
+    if not usage:
+        return chunk, last_usage
+    message = chunk.message.model_copy(update={"usage_metadata": None})
+    return ChatGenerationChunk(message=message, generation_info=chunk.generation_info), usage
+
+
+class LastUsageChatOpenAI(ChatOpenAI):
+    """
+    ChatOpenAI for Gemini's OpenAI-compatible endpoint, which sends running usage totals with every
+    streamed chunk. LangChain adds the chunks' usage together, so one streamed reply was recorded as
+    54M input tokens for a prompt of about 50k (LUAD_20261025 report re-run, 2026-10-25). Each stream
+    here carries only its last usage report, on a final empty chunk.
+    """
+
+    def _stream(self, *args, **kwargs):
+        last_usage = None
+        for chunk in super()._stream(*args, **kwargs):
+            chunk, last_usage = _hold_back_usage(chunk, last_usage)
+            yield chunk
+        if last_usage:
+            yield ChatGenerationChunk(message=AIMessageChunk(content="", usage_metadata=last_usage))
+
+    async def _astream(self, *args, **kwargs):
+        last_usage = None
+        async for chunk in super()._astream(*args, **kwargs):
+            chunk, last_usage = _hold_back_usage(chunk, last_usage)
+            yield chunk
+        if last_usage:
+            yield ChatGenerationChunk(message=AIMessageChunk(content="", usage_metadata=last_usage))
+
+
 def create_lead_llm(model_name: str = LEAD_MODEL, reasoning_effort: str = LEAD_REASONING_EFFORT):
-    """Gemini model for planning and reporting, at the given thinking level (none | low | medium | high)."""
+    """Gemini model for planning and reporting, at the given thinking level (none | low | medium | high).
+    Long replies go through stream_long_reply: only a streamed reply can use all of LEAD_MAX_OUTPUT_TOKENS."""
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    return ChatOpenAI(model=model_name, base_url=GEMINI_OPENAI_BASE_URL, api_key=api_key,
-                      temperature=0, reasoning_effort=reasoning_effort)
+    return LastUsageChatOpenAI(model=model_name, base_url=GEMINI_OPENAI_BASE_URL, api_key=api_key,
+                      temperature=0, reasoning_effort=reasoning_effort,
+                      max_tokens=LEAD_MAX_OUTPUT_TOKENS, stream_usage=True)
+
+
+# finish_reason of a reply that stopped at the output cap (OpenAI-compatible endpoint, native Gemini)
+_CUT_OFF_FINISH_REASONS = {"length", "max_tokens"}
+
+# Appended to a report whose reply stopped at the output cap, so the reader sees that its end is missing
+REPORT_CUT_OFF_NOTE = ("\n\n---\n\n**This report is incomplete: the model reached its output limit "
+                       "(thinking included), so everything after this point is missing.**\n")
+
+
+async def stream_long_reply(llm, messages, label: str):
+    """
+    Get one long reply from llm through a stream, which on Gemini 4 raises the output cap from 32,768
+    to 65,536 tokens. Returns (message, cut_off); cut_off is True when the reply stopped at the cap.
+    If the stream fails, the call is repeated without streaming, which caps the reply at 32,768 tokens.
+    """
+    try:
+        response = None
+        async for chunk in llm.astream(messages):
+            response = chunk if response is None else response + chunk
+        if response is None:
+            raise ValueError("the stream returned nothing")
+    except Exception as e:
+        print(f"⚠️ Streaming the {label} failed ({type(e).__name__}: {str(e)[:200]}); repeating the call "
+              f"without streaming, which caps the reply at 32,768 tokens")
+        response = await llm.ainvoke(messages)
+    finish_reason = str((response.response_metadata or {}).get("finish_reason") or "").lower()
+    cut_off = finish_reason in _CUT_OFF_FINISH_REASONS
+    if cut_off:
+        print(f"⚠️ The {label} stopped at the model's output cap (finish_reason {finish_reason}); its end is missing")
+    return response, cut_off
 
 
 # Tool outputs that carry no data: no hits, an unreachable service, or an error the tool reports as text
@@ -1749,8 +1868,8 @@ class LangGraphOmniCellAgent:
         self.sub_agents = {
             "OmicMiningAgent": SubAgent(
                 name="OmicMiningAgent",
-                description="Analyzes a cohort of single-cell RNA-seq (scRNA-seq) data from OmniCellTOSG for gene expression, biomarkers, and pathway enrichment. Inputs are per-cell scRNA-seq samples, NOT bulk RNA-seq.",
-                system_message="""You are an omics data specialist working with a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data from OmniCellTOSG. Samples are individual cells, NOT bulk RNA-seq libraries. Any summary or report you write MUST describe the analysis as single-cell — never call it bulk.
+                description="Analyzes a cohort of single-cell RNA-seq (scRNA-seq) data from OmniCellTOSG for gene expression, biomarkers, and pathway enrichment. Inputs are scRNA-seq metacells (about 200 cells each), NOT bulk RNA-seq.",
+                system_message="""You are an omics data specialist working with a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data from OmniCellTOSG. Samples are metacells (SEACells aggregates of about 200 cells of one cell type from one source file), NOT single cells, donors or bulk RNA-seq libraries. Any summary or report you write MUST describe the analysis as single-cell at metacell level — never call it bulk, and never call the samples individual cells.
 
 Your task is to answer gene/biomarker questions using the omic_analysis tool.
 
@@ -1807,9 +1926,10 @@ choosing a cell type; report its list and stop, as STEP 1 says. A result with
 `reason: "disease_not_found"` is handled as STEP 1 says.
 
 ## LABEL COLUMN (default "disease")
-- label="disease" (default) → disease cells vs normal cells that pass the same
-  cell-type (or control_cell_type) and organ filters; the normal cells are not
-  matched to the disease cells (e.g. by study, protocol, age or sex). Requires `disease`.
+- label="disease" (default) → disease metacells vs normal metacells that pass the same
+  cell-type (or control_cell_type) and organ filters, both drawn only from datasets that
+  hold both groups; the normal metacells are not matched by protocol, age or sex. The DE
+  model adjusts for source dataset and chrY expression. Requires `disease`.
 - label="gender" → female vs male comparison within the queried subset.
 - label="cell_type" → cell-type-stratified comparison.
 
@@ -1823,9 +1943,15 @@ the result fields:
 - `label_fallback_message`: human-readable explanation (only set when fallback occurred)
 
 After tool calls complete, write a concise summary of the gene list and pathway
-data. Explicitly state that the data is single-cell RNA-seq (scRNA-seq), and
-report `actual_label` (the column that drove the comparison). If a fallback
-occurred, surface `label_fallback_message` in your summary.""",
+data. Explicitly state that the data is single-cell RNA-seq (scRNA-seq) at metacell
+level, give sample counts as metacells, and report `actual_label` (the column that
+drove the comparison). If a fallback occurred, surface `label_fallback_message` in
+your summary.
+- Pathways: report only the terms in `enrichment_top_terms`, per direction and library,
+  with their adjusted p-values. An empty list means no term of that library reached
+  adjusted p < 0.05; say so. Never present one gene's known function as an enriched pathway.
+- `qc_highest_mean_expression_genes` only confirms the cell type. Do not present these
+  genes as differentially expressed, discriminating or disease-related.""",
                 tools=[omic_analysis_tool],
                 llm=self.llm
             ),
@@ -2364,6 +2490,7 @@ Create thorough plans that:
                     "de_success": out.get("de_success"),
                     "error": None if out.get("success", True) else out.get("message"),
                     "top_genes": (out.get("top_genes_by_fdr") or [])[:25],
+                    "enrichment_top_terms": out.get("enrichment_top_terms") or {},
                 }
                 # A retried task replaces its earlier record for the same cohort
                 fields = ("disease", "cell_type", "control_cell_type", "disease_cell_label",
@@ -2610,10 +2737,18 @@ Respond in JSON format:
                 if run.get("control_cell_type"):
                     name += f" vs normal {run['control_cell_type']}"
                 lines.append(f"- {name} ({run.get('disease')}, {run.get('organ')}; "
-                             f"{run.get('num_samples')} samples)")
+                             f"{run.get('num_samples')} metacells)")
                 if run.get("error"):
                     lines.append(f"  - analysis error: {run['error']}")
             cohort_section = "\n## Omics Cohorts (computed by the omics tool)\n" + "\n".join(lines) + "\n"
+            # The Enrichr results themselves, so Step 4 reports computed terms
+            enrichment_lines = [f"- {run.get('cell_type') or run.get('disease')}:\n"
+                                + format_enrichment_terms(run.get("enrichment_top_terms"))
+                                for run in omic_runs]
+            cohort_section += (
+                "\n## Pathway Enrichment (computed by Enrichr on each cohort's significant up- and "
+                "down-regulated genes; adjusted p < 0.05, at most 5 terms per library)\n"
+                + "".join(enrichment_lines))
 
         # Failed and never-run tasks: the report must say this evidence is missing instead of filling
         # the corresponding section from model knowledge
@@ -2637,9 +2772,11 @@ Respond in JSON format:
 ## DATA PROVENANCE (DO NOT MISCHARACTERIZE)
 The omics results come from a COHORT of SINGLE-CELL RNA-seq (scRNA-seq) data
 drawn from OmniCellTOSG. Samples in the differential expression analysis are
-INDIVIDUAL CELLS, not bulk RNA-seq libraries. Describe the analysis as
-single-cell throughout the report. Inspect the `data_type` and `label_column`
-fields of the omics tool result to confirm.
+METACELLS (SEACells aggregates of about 200 cells of one cell type from one
+source file), not individual cells, donors or bulk RNA-seq libraries. Describe
+the analysis as single-cell at metacell level throughout the report, and give
+sample counts as metacells. Inspect the `data_type`, `sample_unit` and
+`label_column` fields of the omics tool result to confirm.
 
 ## Research Question:
 {state['query']}
@@ -2655,7 +2792,9 @@ fields of the omics tool result to confirm.
 - State the data type explicitly as single-cell RNA-seq (scRNA-seq) cohort
 - Report the label column used (e.g., "disease" → disease vs normal cells;
   "gender" → female vs male cells)
-- Report sample sizes for each group (cells per group)
+- Report sample sizes for each group (metacells per group)
+- Genes listed as `qc_highest_mean_expression_genes` only confirm the cell type;
+  do not present them as markers, discriminators or disease-related genes
 - Number of DEGs identified (upregulated/downregulated)
 - **Top DEGs Table** (ranked by p-value/FDR): Show top 10-15 genes with:
   | Rank | Gene | log2FC | FDR | Direction |
@@ -2673,7 +2812,11 @@ fields of the omics tool result to confirm.
 - For each validated target: brief literature summary with citations
 
 ### Step 4: Pathway Enrichment Analysis
-- Summarize top enriched pathways (KEGG, Reactome, GO)
+- For each cell type and direction, report the enriched terms listed under
+  "Pathway Enrichment (computed by Enrichr)" above, with their adjusted p-values.
+  These are the only enrichment results; do not add terms that are not listed.
+- Where a direction or library has no term with adjusted p < 0.05, say so.
+- Never present the known function of a single gene as an enriched pathway.
 - **Embed pathway plots** if available:
   - ![KEGG Dotplot](plots/kegg_dotplot.png)
   - ![Pathway Combined](plots/pathway_combined_plot.png)
@@ -2818,8 +2961,8 @@ Guidelines — favour DENSITY over conservatism:
 - Do NOT include this block if you have fewer than 3 drug-evidence pairs;
   omit silently rather than fabricate.
 """
-        
-        response = await self.lead_llm.ainvoke([
+
+        response, cut_off = await stream_long_reply(self.lead_llm, [
             SystemMessage(content="""You are an expert biomedical research synthesizer specializing in gene-pathway-anchored hypothesis generation.
 
 **Core Synthesis Capabilities:**
@@ -2855,11 +2998,13 @@ Guidelines — favour DENSITY over conservatism:
 
 Keep tables concise. Prioritize actionable, testable hypotheses over confirmatory observations."""),
             HumanMessage(content=reporting_prompt)
-        ])
-        
+        ], "report")
+
         # Extract text from response using helper function
         report = extract_text_from_llm_response(response.content)
-        
+        if cut_off:
+            report += REPORT_CUT_OFF_NOTE
+
         # Save the report with appendix and generate PDF
         report_path = self._save_report(state["query"], report, state=state)
         
@@ -2874,6 +3019,7 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
                 "phase": "reporting",
                 "timestamp": datetime.now().isoformat(),
                 "report_length": len(report),
+                "report_cut_off": cut_off,
                 "report_path": report_path
             }]
         }
@@ -3005,6 +3151,8 @@ Keep tables concise. Prioritize actionable, testable hypotheses over confirmator
                     fdr = f"{fdr:.2e}" if isinstance(fdr, float) else "N/A"
                     appendix_parts.append(f"| {i} | {gene.get('gene_name')} | {log2fc} | {fdr} | {direction} |\n")
                 appendix_parts.append("\n")
+                appendix_parts.append(f"### Enriched Terms (Enrichr, adjusted p < 0.05): {name}\n\n")
+                appendix_parts.append(format_enrichment_terms(run.get("enrichment_top_terms")) + "\n")
 
             # Disease and cell type
             if shared_data.get("disease"):
@@ -3561,7 +3709,7 @@ Please return the **full revised report** in Markdown.
 """
 
         with usage_label("revision"):
-            response = await self.lead_llm.ainvoke([
+            response, cut_off = await stream_long_reply(self.lead_llm, [
                 SystemMessage(content=(
                     "You are a meticulous scientific editor. You revise biomedical "
                     "research reports based on reviewer feedback. Preserve all existing "
@@ -3569,10 +3717,12 @@ Please return the **full revised report** in Markdown.
                     "for changes. Return the complete revised markdown report."
                 )),
                 HumanMessage(content=revision_prompt),
-            ])
+            ], "revised report")
         self._save_usage_log(finish=False)
 
         revised_report = extract_text_from_llm_response(response.content)
+        if cut_off:
+            revised_report += REPORT_CUT_OFF_NOTE
 
         # ── Save the revised report (never overwrite original) ──────────
         report_path = self._save_revised_report(query, revised_report, feedback)
