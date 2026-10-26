@@ -10,7 +10,8 @@ import pytest
 from tools.omic_tools.cell_type_lookup import (LINEAGE_FILE, MIN_METACELLS, OTHER_HEADING,
                                                available_cell_types, disease_candidates,
                                                format_cell_types, load_lineage)
-from tools.omic_tools.donor_sampling import DEFAULT_SAMPLE_SIZE, sample_known_donor_cohort
+from tools.omic_tools.donor_sampling import (DEFAULT_SAMPLE_SIZE, MIN_METACELLS_PER_GROUP,
+                                             sample_known_donor_cohort)
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 ALIASES = {"disease": "disease_BMG_name", "cell_type": "CMT_name"}
@@ -33,10 +34,18 @@ def _metadata():
     ]:
         for donor in donors:
             rows.append({"CMT_name": cell_type, "tissue_general": organ, "disease_BMG_name": disease,
-                         "donor_id": donor, "matrix_file_path": "matrix.npy",
+                         "dataset_id": "study", "donor_id": donor, "matrix_file_path": "matrix.npy",
                          "matrix_row_idx": len(rows)})
     rows.append(dict(rows[0]))  # a repeated matrix row counts once
     return pd.DataFrame(rows)
+
+
+def _study_metadata(counts):
+    """{(cell_type, dataset_id, disease): metacells}, in the brain, each from its own donor."""
+    rows = [{"CMT_name": cell_type, "tissue_general": "brain", "disease_BMG_name": disease,
+             "dataset_id": dataset, "donor_id": f"{dataset}-{disease}-{i}", "matrix_file_path": "matrix.npy"}
+            for (cell_type, dataset, disease), n in counts.items() for i in range(n)]
+    return pd.DataFrame(rows).assign(matrix_row_idx=range(len(rows)))
 
 
 def _counts(result):
@@ -53,8 +62,11 @@ def test_counts_usable_donor_metacells_with_both_groups():
 
 
 def test_lists_only_cell_types_with_the_minimum_in_both_groups():
-    assert MIN_METACELLS == 10
+    # One minimum for the list and for the analysis
+    assert MIN_METACELLS == MIN_METACELLS_PER_GROUP == 10
     assert inspect.signature(available_cell_types).parameters["min_metacells"].default == MIN_METACELLS
+    assert (inspect.signature(sample_known_donor_cohort).parameters["min_metacells"].default
+            == MIN_METACELLS)
     metadata = _metadata()
     assert _counts(available_cell_types(metadata, "AD", "brain", min_metacells=2)) == {"astrocyte": (2, 3)}
     assert _counts(available_cell_types(metadata, "AD", "brain", min_metacells=3)) == {}
@@ -86,14 +98,48 @@ def test_keep_unknown_donor_counts_metacells_without_a_usable_donor():
 
 @pytest.mark.parametrize("keep_unknown_donor", [False, True])
 def test_counts_equal_what_the_sampler_can_select(keep_unknown_donor):
+    # Disease-only astrocytes in a second dataset: the workflow leaves them out, so the lookup does too
     metadata = _metadata()
+    extra = metadata[metadata.CMT_name.eq("astrocyte") & metadata.disease_BMG_name.eq("AD")]
+    metadata = pd.concat([metadata, extra.assign(dataset_id="disease-only study",
+                                                 matrix_row_idx=extra.matrix_row_idx + 1000)],
+                         ignore_index=True)
     result = available_cell_types(metadata, "AD", "brain", keep_unknown_donor=keep_unknown_donor,
                                   min_metacells=1)
+    assert _counts(result)["astrocyte"] == ((3, 4) if keep_unknown_donor else (2, 3))
     for cell_type, (n_disease, n_normal) in _counts(result).items():
         _, summary = sample_known_donor_cohort(
             metadata, {"disease": "AD", "cell_type": cell_type, "tissue_general": "brain"}, ALIASES,
-            sample_size=10_000, keep_unknown_donor=keep_unknown_donor)
+            sample_size=10_000, keep_unknown_donor=keep_unknown_donor, shared_datasets_only=True,
+            min_metacells=1)
         assert (summary["disease"]["selected"], summary["control"]["selected"]) == (n_disease, n_normal)
+
+
+def test_counts_only_datasets_that_hold_both_groups():
+    metadata = _study_metadata({
+        ("astrocyte", "s1", "AD"): 12, ("astrocyte", "s1", "normal"): 12,
+        ("astrocyte", "s2", "AD"): 30,                                     # no normal astrocytes in s2
+        ("microglial cell", "s1", "AD"): 15, ("microglial cell", "s2", "normal"): 15,  # no shared dataset
+        ("oligodendrocyte", "s1", "AD"): 6, ("oligodendrocyte", "s1", "normal"): 20,
+        ("oligodendrocyte", "s2", "AD"): 6, ("oligodendrocyte", "s2", "normal"): 1,    # 12 / 21 in two
+    })
+    result = available_cell_types(metadata, "AD", "brain")
+    assert _counts(result) == {"astrocyte": (12, 12), "oligodendrocyte": (12, 21)}
+    assert result["organs_with_cell_types"] == ["brain"]
+    # Each count equals what the workflow's sampler selects; microglia cannot be compared at all
+    for cell_type, counts in _counts(result).items():
+        _, summary = sample_known_donor_cohort(
+            metadata, {"disease": "AD", "cell_type": cell_type, "tissue_general": "brain"}, ALIASES,
+            shared_datasets_only=True)
+        assert (summary["disease"]["known_donor_available"], summary["control"]["known_donor_available"]) == counts
+    with pytest.raises(ValueError, match="No dataset contributes"):
+        sample_known_donor_cohort(metadata, {"disease": "AD", "cell_type": "microglial cell",
+                                             "tissue_general": "brain"}, ALIASES, shared_datasets_only=True)
+
+
+def test_lookup_requires_the_dataset_column():
+    with pytest.raises(ValueError, match="dataset_id"):
+        available_cell_types(_metadata().drop(columns="dataset_id"), "AD", "brain")
 
 
 DISEASES = pd.Series(["COVID-19 Virus Disease", "long COVID-19", "Alzheimer's Disease", "Heart Diseases",
@@ -136,20 +182,20 @@ def test_unknown_disease_lists_the_closest_disease_names():
 
 def test_known_disease_without_cell_types_in_the_organ_names_the_organs_that_have_some():
     text = format_cell_types(available_cell_types(_metadata(), "AD", "heart", min_metacells=1))
-    assert text == ('No cell type has at least 1 disease and 1 normal metacells available for disease "AD" '
-                    'in organ "heart". Organs where some cell type has: "brain".')
+    assert text == ('No cell type has at least 1 disease and 1 normal metacells from datasets that hold '
+                    'both groups for disease "AD" in organ "heart". Organs where some cell type has: "brain".')
     # Under the default minimum no organ qualifies, so none is named
     assert format_cell_types(available_cell_types(_metadata(), "AD", "heart")) == (
-        'No cell type has at least 10 disease and 10 normal metacells available for disease "AD" '
-        'in organ "heart".')
+        'No cell type has at least 10 disease and 10 normal metacells from datasets that hold both '
+        'groups for disease "AD" in organ "heart".')
 
 
 def test_text_lists_names_under_lineage_headings_with_other_last():
     text = format_cell_types(available_cell_types(_metadata(), "AD", "brain", min_metacells=1))
     lines = text.splitlines()
-    assert lines[0] == ('2 cell types have at least 1 disease and 1 normal metacells available before '
-                        'sampling for disease "AD" in organ "brain", listed under Cell Ontology lineage '
-                        'headings:')
+    assert lines[0] == ('2 cell types have at least 1 disease and 1 normal metacells from datasets that '
+                        'hold both groups for disease "AD" in organ "brain", listed under Cell Ontology '
+                        'lineage headings:')
     glial, other = lines.index("## glial cell"), lines.index(f"## {OTHER_HEADING}")
     assert lines[glial + 1] == '- "astrocyte" (disease 2, normal 3 metacells available before sampling)'
     assert lines[other + 1] == '- "made-up cell" (disease 1, normal 1 metacells available before sampling)'

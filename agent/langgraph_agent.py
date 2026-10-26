@@ -298,16 +298,31 @@ def omic_analysis_tool(
             return {"success": False, "message": "Provide at least 'disease' or 'cell_type'"}
 
         # Pooling every cell type would mix disease effects with cell-type composition, so a
-        # disease-vs-normal run needs a cell type and a database disease name; without them,
-        # return the cell types or disease names to choose from instead
+        # disease-vs-normal run needs a cell type and a database disease name, and the cell type
+        # must meet the analysis minimum, which is what the lookup lists; otherwise return the
+        # cell types or disease names to choose from instead. The lookup counts one cell type
+        # for both groups, so a cohort with its own control cell type or disease-cell label is
+        # left to the sampler, which enforces the same minimum.
         lookup = (_cell_type_lookup(disease, organ)
                   if (label or "disease").lower() == "disease" and disease else None)
-        if lookup is not None and (not cell_type or not lookup["disease_found"]):
-            problem = ("a disease-vs-normal comparison needs one cell type, and none was given"
-                       if lookup["disease_found"] else "the disease name was not found")
+        reason = None
+        if lookup is not None:
+            minimum = lookup["min_metacells"]
+            listed = {name.lower() for name in lookup["cell_types"]["cell_type"]}
+            if not lookup["disease_found"]:
+                reason, problem = "disease_not_found", "the disease name was not found"
+            elif not cell_type:
+                reason, problem = ("cell_type_required",
+                                   "a disease-vs-normal comparison needs one cell type, and none was given")
+            elif not (control_cell_type or disease_cell_label) and cell_type.lower() not in listed:
+                reason, problem = ("cell_type_below_minimum",
+                                   f'cell type "{cell_type}" does not have at least {minimum} disease and '
+                                   f"{minimum} normal metacells from datasets that hold both groups, "
+                                   f"the minimum for an analysis")
+        if reason:
             return {
                 "success": False,
-                "reason": "cell_type_required" if lookup["disease_found"] else "disease_not_found",
+                "reason": reason,
                 "message": f"No analysis was run: {problem}.\n\n" + format_cell_types(lookup),
                 "cell_type_options": {
                     "disease": lookup["disease_name"] or disease,
@@ -1076,12 +1091,13 @@ _NO_DATA_OUTPUT = re.compile(
 
 
 # omic_analysis_tool results that ran nothing and list the values to choose from instead
-_OPTION_REASONS = {"cell_type_required", "disease_not_found"}
+_OPTION_REASONS = {"cell_type_required", "disease_not_found", "cell_type_below_minimum"}
 
 
 def _cell_type_options(tool_outputs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The reason and options of the last omic_analysis_tool call that ran nothing because no
-    cell type was given or the disease was not found (None if there is no such call)."""
+    cell type was given, the disease was not found or the cell type is below the analysis
+    minimum (None if there is no such call)."""
     for call in reversed(tool_outputs or []):
         out = call["output"]
         if (call["tool"] == "omic_analysis_tool" and isinstance(out, dict)
@@ -1891,6 +1907,11 @@ From the user's question, identify:
     lists the closest disease names. If one of them is the same disease, call it
     once more with that name copied verbatim and the other arguments unchanged;
     otherwise report the listed names and stop.
+  - If omic_analysis_tool returns `reason: "cell_type_below_minimum"`, it ran nothing:
+    the named cell type is not among the cell types with enough metacells for an
+    analysis, which it lists. If one listed name is the same cell type under its
+    database spelling, call it once more with that name copied verbatim and the other
+    arguments unchanged; otherwise do not pick another cell type: report the list and stop.
   - For label "gender" or "cell_type", set no `cell_type` unless one is named.
 - Control cell type (OPTIONAL). If the TASK description gives a control cell type
   in double quotes, pass that exact string as `control_cell_type`: the normal
@@ -1922,8 +1943,9 @@ On the next attempt, pick ONE alternative from `suggestions` (verbatim — keep
 the apostrophe / capitalization exactly as listed) and retry. Do this at most
 once per failed call to avoid loops.
 Exception: a result with `reason: "cell_type_required"` is not an error to fix by
-choosing a cell type; report its list and stop, as STEP 1 says. A result with
-`reason: "disease_not_found"` is handled as STEP 1 says.
+choosing a cell type; report its list and stop, as STEP 1 says. Results with
+`reason: "disease_not_found"` or `reason: "cell_type_below_minimum"` are handled as
+STEP 1 says.
 
 ## LABEL COLUMN (default "disease")
 - label="disease" (default) → disease metacells vs normal metacells that pass the same
@@ -2430,16 +2452,20 @@ Create thorough plans that:
             print(f"❌ Task failed: {result.get('error', 'Unknown error')}")
             current_task["status"] = "failed"
             current_task["error"] = result.get("error", "Unknown error")
-            # No cell type was given or the disease was not found: rerunning the task cannot help,
-            # so it goes straight to the replanner, which receives the values to choose from
+            # No cell type was given, the disease was not found or the cell type is below the
+            # analysis minimum: rerunning the task cannot help, so it goes straight to the
+            # replanner, which receives the values to choose from
             options = _cell_type_options(tool_outputs) if agent_name == "OmicMiningAgent" else None
             if options is not None:
                 current_task["cell_type_options"] = options
                 current_task["attempts"] = max(current_task["attempts"], 2)
-                current_task["error"] = (
-                    "No cell type was given, so no analysis was run: a disease-vs-normal comparison "
-                    "needs one cell type" if options["reason"] == "cell_type_required" else
-                    "The disease name was not found, so no analysis was run")
+                current_task["error"] = {
+                    "cell_type_required": "No cell type was given, so no analysis was run: a "
+                                          "disease-vs-normal comparison needs one cell type",
+                    "disease_not_found": "The disease name was not found, so no analysis was run",
+                    "cell_type_below_minimum": "The cell type has too few metacells for an analysis, "
+                                               "so no analysis was run",
+                }[options["reason"]]
 
             return {
                 "plan": plan,
@@ -2473,9 +2499,10 @@ Create thorough plans that:
             omic_runs = list(shared_data.get("omic_runs", []))
             for call in tool_outputs or []:
                 out = call["output"]
-                # A call without a cell type ran nothing (it only listed cell types): not a cohort
+                # A refused call ran nothing (it only listed cell types or disease names): not a
+                # cohort; the failed task carries the refusal
                 if (call["tool"] != "omic_analysis_tool" or not isinstance(out, dict)
-                        or out.get("reason") == "cell_type_required"):
+                        or out.get("reason") in _OPTION_REASONS):
                     continue
                 entities = out.get("extracted_entities") or {}
                 run = {
@@ -2605,6 +2632,12 @@ Rules:
      `cell_type_options.disease_candidates` is the same disease as the original query, replace the
      task with one OmicMiningAgent task that gives that name verbatim in double quotes, with the
      failed task's organ and cell type (if any); otherwise return no replacement for that task.
+   - `reason` "cell_type_below_minimum": the task's cell type does not have enough metacells for an
+     analysis; `cell_type_options.cell_types` lists the ones that do. If the original query names
+     that cell type, replace the task only with a listed name for the same cells, in the format
+     above; otherwise return no replacement, so the report states it could not be analysed. If the
+     original query names no cell type, replace it as for "cell_type_required", choosing listed
+     cell types that no other task already covers.
 
 Respond in JSON format:
 {{

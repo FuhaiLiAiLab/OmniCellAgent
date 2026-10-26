@@ -1,6 +1,8 @@
 """Sample only known-donor metacells, with independent per-group caps."""
 
 import importlib
+import inspect
+import re
 
 import pandas as pd
 import pytest
@@ -28,6 +30,8 @@ def _pool():
 
 
 def _sample(*args, **kwargs):
+    # Most fixtures are smaller than the run's minimum, which has its own tests below
+    kwargs.setdefault("min_metacells", 1)
     module = importlib.import_module("tools.omic_tools.donor_sampling")
     return module.sample_known_donor_cohort(*args, **kwargs)
 
@@ -227,6 +231,64 @@ def test_without_the_new_options_both_groups_share_one_cell_type():
     assert set(selected.CMT_name) == {"epithelial cell"}
     assert selected.disease_BMG_name.value_counts().to_dict() == {"AD": 4, "normal": 1}
     assert summary["control_cell_type"] is None and summary["disease_cell_label"] is None
+
+
+def _study_pool(counts):
+    """{(dataset_id, disease): metacells}, each metacell from its own donor."""
+    rows = [{"disease_BMG_name": disease, "dataset_id": dataset, "donor_id": f"{dataset}-{disease}-{i}",
+             "CMT_name": "astrocyte", "tissue_general": "brain", "matrix_file_path": "matrix.npy"}
+            for (dataset, disease), n in counts.items() for i in range(n)]
+    return pd.DataFrame(rows).assign(matrix_row_idx=range(len(rows)))
+
+
+def test_default_minimum_is_ten_metacells_per_group():
+    module = importlib.import_module("tools.omic_tools.donor_sampling")
+    assert module.MIN_METACELLS_PER_GROUP == 10
+    parameters = inspect.signature(module.sample_known_donor_cohort).parameters
+    assert parameters["min_metacells"].default == module.MIN_METACELLS_PER_GROUP
+
+
+@pytest.mark.parametrize("n_disease, n_normal", [(9, 10), (10, 9)])
+def test_a_group_below_the_minimum_fails(n_disease, n_normal, capsys):
+    pool = _study_pool({("s1", "AD"): n_disease, ("s1", "normal"): n_normal})
+    short = "disease (9)" if n_disease == 9 else "control (9)"
+    with pytest.raises(ValueError, match=rf"Fewer than 10 known-donor metacells available for: {re.escape(short)}"):
+        _sample(pool, CONDITIONS, ALIASES, min_metacells=10)
+
+
+def test_exactly_the_minimum_runs_and_is_recorded():
+    pool = _study_pool({("s1", "AD"): 10, ("s1", "normal"): 10})
+    selected, summary = _sample(pool, CONDITIONS, ALIASES, min_metacells=10)
+    assert selected.disease_BMG_name.value_counts().to_dict() == {"AD": 10, "normal": 10}
+    assert summary["min_metacells_per_group"] == 10
+
+
+def test_minimum_counts_only_metacells_in_datasets_holding_both_groups():
+    # 25 disease metacells in all, but only 6 in s1, the one dataset that also holds normal ones
+    pool = _study_pool({("s1", "AD"): 6, ("s1", "normal"): 12, ("s2", "AD"): 19})
+    with pytest.raises(ValueError, match=r"Fewer than 10 known-donor metacells available for: disease \(6\)"):
+        _sample(pool, CONDITIONS, ALIASES, min_metacells=10, shared_datasets_only=True)
+    selected, summary = _sample(pool, CONDITIONS, ALIASES, min_metacells=10)
+    assert selected.disease_BMG_name.value_counts().to_dict() == {"AD": 25, "normal": 12}
+    pool = _study_pool({("s1", "AD"): 6, ("s1", "normal"): 12, ("s2", "AD"): 19, ("s2", "normal"): 1})
+    selected, summary = _sample(pool, CONDITIONS, ALIASES, min_metacells=10, shared_datasets_only=True)
+    assert summary["shared_datasets"] == ["s1", "s2"]
+    assert selected.disease_BMG_name.value_counts().to_dict() == {"AD": 25, "normal": 13}
+
+
+def test_minimum_counts_unlabelled_metacells_only_when_they_are_kept():
+    pool = _study_pool({("s1", "AD"): 10, ("s1", "normal"): 10})
+    pool.loc[pool.index[:2], "donor_id"] = "unknown"
+    with pytest.raises(ValueError, match=r"disease \(8\)"):
+        _sample(pool, CONDITIONS, ALIASES, min_metacells=10)
+    selected, _ = _sample(pool, CONDITIONS, ALIASES, min_metacells=10, keep_unknown_donor=True)
+    assert len(selected) == 20
+
+
+@pytest.mark.parametrize("min_metacells", [0, -1])
+def test_minimum_must_be_positive(min_metacells):
+    with pytest.raises(ValueError, match="min_metacells must be a positive"):
+        _sample(_pool(), CONDITIONS, ALIASES, min_metacells=min_metacells)
 
 
 def test_donor_diversity_selection_is_reproducible_and_has_no_duplicate_rows():

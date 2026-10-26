@@ -366,6 +366,9 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
             comparison only from datasets that hold eligible disease and control
             metacells (see donor_sampling.sample_known_donor_cohort).
 
+    A disease comparison with fewer than donor_sampling.MIN_METACELLS_PER_GROUP
+    eligible metacells in either group retrieves nothing.
+
     Returns:
         tuple: (X, Y, metadata, similar_terms, retrieval_success)
     """
@@ -734,6 +737,8 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
             donor_sampling.sample_known_donor_cohort).
         shared_datasets_only: Default True compares disease and normal metacells
             only within datasets that hold both groups (label="disease" only).
+            Either group having fewer than donor_sampling.MIN_METACELLS_PER_GROUP
+            eligible metacells stops the run before any analysis.
     """
     times = {}
     times['start'] = time.time()

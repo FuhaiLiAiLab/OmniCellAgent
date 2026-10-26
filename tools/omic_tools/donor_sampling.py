@@ -9,6 +9,9 @@ from tools.omic_tools.cohort_diagnostics import _usable_donor_mask, donor_key_co
 
 # Maximum metacells per disease/control group; the workflow and the cell-type lookup use it too
 DEFAULT_SAMPLE_SIZE = 1000
+# Fewest disease and fewest control metacells a comparison may use, counted after every
+# selection rule (shared datasets included); the cell-type lookup lists cell types by it too
+MIN_METACELLS_PER_GROUP = 10
 
 
 def _sample_across_donors(metadata, take, random_state):
@@ -75,7 +78,7 @@ def _normal_mask(values):
 def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEFAULT_SAMPLE_SIZE,
                               random_state=42, keep_unknown_donor=False,
                               control_cell_type=None, disease_cell_label=None,
-                              shared_datasets_only=False):
+                              shared_datasets_only=False, min_metacells=MIN_METACELLS_PER_GROUP):
     """Independently cap each pool while covering the maximum number of donors.
 
     Return selected metadata and per-group counts. A pool smaller than the cap
@@ -100,9 +103,14 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
     eligible metacells to both groups, before sampling. A dataset that holds
     one group only carries its study effects into that group alone, where no
     model can separate them from the disease effect.
+
+    Raise ValueError if either group has fewer than min_metacells eligible
+    metacells after these rules (duplicate matrix rows count once).
     """
     if sample_size < 1:
         raise ValueError("sample_size must be a positive integer")
+    if min_metacells < 1:
+        raise ValueError("min_metacells must be a positive integer")
     disease_column = field_alias.get("disease", "disease_BMG_name")
     pointer_columns = ["matrix_file_path", "matrix_row_idx"]
     required = {"donor_id", disease_column, *pointer_columns}
@@ -150,8 +158,9 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
         "disease_cell_label": disease_cell_label,
         "shared_datasets_only": bool(shared_datasets_only),
         "shared_datasets": shared,
+        "min_metacells_per_group": min_metacells,
     }
-    empty_groups = []
+    empty_groups, small_groups = [], []
     for name, pool in pools.items():
         rows = eligible[name]
         excluded_not_shared = 0
@@ -192,9 +201,13 @@ def sample_known_donor_cohort(metadata, conditions, field_alias, sample_size=DEF
         )
         if not take:
             empty_groups.append(name)
+        elif len(unique) < min_metacells:
+            small_groups.append(f"{name} ({len(unique):,})")
         selected.append(chosen)
 
+    kind = "metacells" if keep_unknown_donor else "known-donor metacells"
     if empty_groups:
-        kind = "metacells" if keep_unknown_donor else "known-donor metacells"
         raise ValueError(f"No {kind} available for: {', '.join(empty_groups)}")
+    if small_groups:
+        raise ValueError(f"Fewer than {min_metacells:,} {kind} available for: {', '.join(small_groups)}")
     return pd.concat(selected, ignore_index=True), summary

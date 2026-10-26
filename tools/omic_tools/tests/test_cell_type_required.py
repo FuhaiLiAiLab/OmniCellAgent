@@ -1,6 +1,6 @@
-"""A disease-vs-normal omics run needs a cell type and a database disease name: without
-them the tool runs nothing and returns the cell types or disease names to choose from, the
-task fails without a retry, and the replanner receives the list."""
+"""A disease-vs-normal omics run needs a database disease name and a cell type that meets the
+analysis minimum: otherwise the tool runs nothing and returns the cell types or disease names
+to choose from, the task fails without a retry, and the replanner receives the list."""
 
 import asyncio
 import functools
@@ -20,12 +20,16 @@ Agent = agent_module.LangGraphOmniCellAgent
 
 def _metadata(n=12):
     rows = []
-    for cell_type, disease, count in [("astrocyte", "AD", n), ("astrocyte", "normal", n),
-                                      ("microglial cell", "AD", n), ("microglial cell", "normal", 3)]:
+    for cell_type, dataset, disease, count in [
+        ("astrocyte", "s1", "AD", n), ("astrocyte", "s1", "normal", n),
+        ("microglial cell", "s1", "AD", n), ("microglial cell", "s1", "normal", 3),
+        # enough of each group, but in different datasets: nothing to compare within one
+        ("oligodendrocyte", "s2", "AD", n), ("oligodendrocyte", "s3", "normal", n),
+    ]:
         for i in range(count):
             rows.append({"CMT_name": cell_type, "tissue_general": "brain", "disease_BMG_name": disease,
-                         "donor_id": f"{cell_type}-{disease}-{i}", "matrix_file_path": "matrix.npy",
-                         "matrix_row_idx": len(rows)})
+                         "dataset_id": dataset, "donor_id": f"{cell_type}-{disease}-{i}",
+                         "matrix_file_path": "matrix.npy", "matrix_row_idx": len(rows)})
     return pd.DataFrame(rows)
 
 
@@ -43,7 +47,8 @@ def test_disease_run_without_cell_type_lists_cell_types_and_runs_nothing(tool_en
     out = agent_module.omic_analysis_tool.invoke({"disease": "ad", "organ": "brain"})
     assert tool_env == []
     assert out["success"] is False and out["reason"] == "cell_type_required"
-    # microglia has 3 normal metacells, below the lookup's minimum of 10
+    # microglia has 3 normal metacells, below the minimum of 10; oligodendrocyte has no dataset
+    # that holds both groups
     assert out["cell_type_options"] == {"disease": "AD", "organ": "brain", "cell_types": ["astrocyte"],
                                         "disease_candidates": []}
     assert out["message"].startswith("No analysis was run: a disease-vs-normal comparison needs one cell type")
@@ -59,11 +64,32 @@ def test_unknown_disease_returns_the_closest_disease_names_and_runs_nothing(tool
     assert out["cell_type_options"]["disease_candidates"] == ["AD"]
 
 
+@pytest.mark.parametrize("cell_type", [
+    "microglial cell",   # 12 disease, 3 normal metacells
+    "oligodendrocyte",   # 12 and 12, but in different datasets
+    "astrocytes",        # not a database name
+])
+def test_named_cell_type_below_the_minimum_lists_cell_types_and_runs_nothing(tool_env, cell_type):
+    out = agent_module.omic_analysis_tool.invoke({"disease": "AD", "organ": "brain", "cell_type": cell_type})
+    assert tool_env == []
+    assert out["success"] is False and out["reason"] == "cell_type_below_minimum"
+    assert out["cell_type_options"]["cell_types"] == ["astrocyte"]
+    assert out["message"].startswith(
+        f'No analysis was run: cell type "{cell_type}" does not have at least 10 disease and 10 normal '
+        f"metacells from datasets that hold both groups, the minimum for an analysis.")
+    assert '- "astrocyte" (disease 12, normal 12 metacells available before sampling)' in out["message"]
+    assert "donor" not in out["message"].lower()
+
+
 @pytest.mark.parametrize("args", [
     {"disease": "AD", "organ": "brain", "label": "gender"},
     {"disease": "AD", "organ": "brain", "label": "cell_type"},
-    # The lookup's minimum does not apply to the analysis itself
-    {"disease": "AD", "organ": "brain", "cell_type": "microglial cell"},
+    {"disease": "AD", "organ": "brain", "cell_type": "astrocyte"},
+    {"disease": "AD", "organ": "brain", "cell_type": "ASTROCYTE"},
+    # A separate control cell type or disease-cell label is not in the lookup: the sampler
+    # enforces the minimum for these cohorts
+    {"disease": "AD", "organ": "brain", "cell_type": "microglial cell", "control_cell_type": "astrocyte"},
+    {"disease": "AD", "organ": "brain", "cell_type": "microglial cell", "disease_cell_label": "Microglia"},
 ])
 def test_other_runs_still_reach_the_workflow(tool_env, args):
     out = agent_module.omic_analysis_tool.invoke(args)
@@ -90,10 +116,11 @@ def test_cell_type_options_come_from_the_last_refusal():
     assert agent_module._cell_type_options([]) is None
 
 
-def test_refusal_is_not_recorded_as_an_omics_cohort():
+@pytest.mark.parametrize("reason", ["cell_type_required", "disease_not_found", "cell_type_below_minimum"])
+def test_refusal_is_not_recorded_as_an_omics_cohort(reason):
     shared = Agent._extract_structured_data(
         None, "OmicMiningAgent", {"result": ""}, {"omic_runs": []},
-        [{"tool": "omic_analysis_tool", "args": {}, "output": REFUSAL}])
+        [{"tool": "omic_analysis_tool", "args": {}, "output": {**REFUSAL, "reason": reason}}])
     assert shared.get("omic_runs") == []
 
 
@@ -106,6 +133,7 @@ def _state(task):
 @pytest.mark.parametrize("reason, error", [
     ("cell_type_required", "No cell type was given, so no analysis was run"),
     ("disease_not_found", "The disease name was not found, so no analysis was run"),
+    ("cell_type_below_minimum", "The cell type has too few metacells for an analysis, so no analysis was run"),
 ])
 def test_refused_task_fails_without_a_retry_and_carries_the_options(monkeypatch, reason, error):
     refusal = {**REFUSAL, "reason": reason}
@@ -146,5 +174,7 @@ def test_replanner_receives_the_options_and_the_rule():
     assert '"cell_type_options": {' in prompts[0] and '"astrocyte"' in prompts[0]
     assert "up to 3 cell\n     types from `cell_type_options.cell_types`" in prompts[0]
     assert '`reason` "disease_not_found"' in prompts[0] and "`cell_type_options.disease_candidates`" in prompts[0]
+    assert '`reason` "cell_type_below_minimum"' in prompts[0]
+    assert "If the original query names\n     that cell type, replace the task only with a listed name for the same cells" in prompts[0]
     assert [t["id"] for t in update["plan"]] == ["task_1", "task_new_1"]
     assert update["current_task_index"] == 1 and task["replaced"]
