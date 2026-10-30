@@ -32,11 +32,11 @@ def test_saves_two_unique_full_vocabulary_lists_with_matches_on_first_line(tmp_p
 
 def test_marks_exact_miss_and_unspecified_filter_and_overwrites_old_header(tmp_path):
     _save(_metadata(), tmp_path, disease="Glioma", cell_type="T cell")
-    _save(_metadata(), tmp_path, disease="Alzheimer disease")
+    _save(_metadata(), tmp_path, disease="Alzheimers disease")
 
     diseases = (tmp_path / "available_diseases.txt").read_text().splitlines()
     cells = (tmp_path / "available_cell_types.txt").read_text().splitlines()
-    assert diseases[0] == 'Matched disease in list: NONE (requested: "Alzheimer disease")'
+    assert diseases[0] == 'Matched disease in list: NONE (requested: "Alzheimers disease")'
     assert cells[0] == 'Matched cell type in list: NONE (no filter requested)'
     assert len(diseases) == 4
     assert len(cells) == 4

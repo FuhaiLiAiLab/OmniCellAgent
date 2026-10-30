@@ -233,7 +233,10 @@ def omic_analysis_tool(
               groups come only from datasets that hold disease and normal cells;
               the normal cells are not matched by protocol, age or sex. The DE
               model adjusts for source dataset and for chrY expression (male RNA
-              share), not for age. Requires `disease` to be set.
+              share), not for age. Requires `disease` to be set. For some
+              case-study cohorts no dataset holds both groups; the normal cells
+              then come from other studies, the result's `control_source` is
+              "other_datasets" and `control_note` says what that means.
             - "gender": female vs male within the queried subset (e.g. within
               a disease cohort or within an organ).
             - "cell_type": cell-type-stratified comparison.
@@ -261,6 +264,10 @@ def omic_analysis_tool(
             - `label_fallback_message`: human-readable explanation when the
               requested label had <2 classes and a fallback was chosen
               (None when no fallback was needed)
+            - `control_source`: "shared_datasets" (both groups from the same
+              studies) or "other_datasets" (normal cells from other studies)
+            - `control_note`: what "other_datasets" means for the result (None
+              otherwise)
     """
     try:
         # Use the global session directory
@@ -271,9 +278,10 @@ def omic_analysis_tool(
             slug = re.sub(r"[^a-z0-9]+", "_", cell_type.split(";")[0].lower()).strip("_")
             suffix = "" if label == "disease" else f"_{label}"
             session_dir = os.path.join(session_dir, f"omic_{slug}{suffix}")
-        # Set in code from CASE_STUDY_COHORTS, never by the LLM, so it stays out of
-        # prompts, tool arguments and the tool result.
+        # Set in code from CASE_STUDY_COHORTS, never by the LLM, so they stay out of
+        # prompts and tool arguments.
         keep_unknown_donor = (cell_type or "").lower() in case_study_keep_unknown_cell_types(disease)
+        borrow_controls = (cell_type or "").lower() in case_study_flag_cell_types(disease, "borrow_controls")
 
         params = {
             "session_dir": session_dir,
@@ -282,6 +290,8 @@ def omic_analysis_tool(
             "label": label,
             "keep_unknown_donor": keep_unknown_donor,
         }
+        if borrow_controls:
+            params["borrow_controls"] = True
 
         if disease:
             params["disease"] = disease
@@ -301,8 +311,9 @@ def omic_analysis_tool(
         # disease-vs-normal run needs a cell type and a database disease name, and the cell type
         # must meet the analysis minimum, which is what the lookup lists; otherwise return the
         # cell types or disease names to choose from instead. The lookup counts one cell type
-        # for both groups, so a cohort with its own control cell type or disease-cell label is
-        # left to the sampler, which enforces the same minimum.
+        # for both groups within shared datasets, so a cohort with its own control cell type or
+        # disease-cell label, or one allowed to borrow controls, is left to the sampler, which
+        # enforces the same minimum.
         lookup = (_cell_type_lookup(disease, organ)
                   if (label or "disease").lower() == "disease" and disease else None)
         reason = None
@@ -314,7 +325,8 @@ def omic_analysis_tool(
             elif not cell_type:
                 reason, problem = ("cell_type_required",
                                    "a disease-vs-normal comparison needs one cell type, and none was given")
-            elif not (control_cell_type or disease_cell_label) and cell_type.lower() not in listed:
+            elif (not (control_cell_type or disease_cell_label or borrow_controls)
+                  and cell_type.lower() not in listed):
                 reason, problem = ("cell_type_below_minimum",
                                    f'cell type "{cell_type}" does not have at least {minimum} disease and '
                                    f"{minimum} normal metacells from datasets that hold both groups, "
@@ -1766,38 +1778,47 @@ Be rigorous, cite evidence, and highlight both consensus and disagreements."""),
 
 # Hard-coded case-study cohorts. When a query is about one of these diseases and
 # names no cell type, the planner runs one OmicMiningAgent task per cell type, in
-# this order. Names are the exact OmniCellTOSG disease / organ / CMT_name strings.
+# this order. Names are the exact OmniCellTOSG v3 disease / organ / CMT_name strings.
 # A plain string uses that cell type for both groups. A dict gives the cancer-cell
 # cohorts' separate control cell type and, for PDAC, the original label of the
-# disease cells, as chosen in case_study_handoff_20260923. All nine handoff cohorts
-# reproduce with identical metacells, except the LUAD cancer-cell controls: the handoff
-# drew 1,000 of 2,134 type II pneumocyte metacells at random, the sampler draws its own 1,000.
+# disease cells, as chosen in case_study_handoff_20260923. v3 renamed three CMT names
+# (same source-study labels): "type II pneumocyte;type II pneumocyte:proliferating" ->
+# "pulmonary alveolar type 2 cell", "fibroblast;fibroblast:fibromyocyte" -> "fibroblast",
+# "macrophage;macrophage:monocyte-derived;macrophage:1;macrophage:2;macrophage:3" ->
+# "macrophage". With the earlier release's names (commit e7f18ea) all nine handoff cohorts
+# reproduce with identical metacells, except the LUAD cancer-cell controls; v3 metacells differ.
 CASE_STUDY_COHORTS = {
     "Alzheimer's Disease": {
         "organ": "brain",
         "cell_types": ["microglial cell", "astrocyte", "glutamatergic neuron"],
     },
+    # v3: no dataset holds LUAD and normal metacells labelled "fibroblast"; "fibroblast of
+    # lung" (44 vs 33) does.
     "lung adenocarcinoma": {
         "organ": "lung",
         "cell_types": [
             {"cell_type": "malignant cell",
-             "control_cell_type": "type II pneumocyte;type II pneumocyte:proliferating"},
-            "fibroblast;fibroblast:fibromyocyte",
-            "macrophage;macrophage:monocyte-derived;macrophage:1;macrophage:2;macrophage:3",
+             "control_cell_type": "pulmonary alveolar type 2 cell"},
+            "fibroblast of lung",
+            "macrophage",
         ],
     },
-    # The PDAC disease metacells come from GSE202051, which records no donor IDs.
-    # The fibroblast label covers the handoff's CAF cohort. omic_analysis_tool applies
-    # keep_unknown_donor itself; the planner prompt does not show it.
+    # The PDAC disease metacells come from GSE202051, which recorded no donor IDs before v3
+    # (v3: U1-U18). The fibroblast label covers the handoff's CAF cohort; normal pancreas calls its
+    # fibroblasts "pancreatic stellate cell". No dataset holds both PDAC and normal metacells
+    # of these cell types, so borrow_controls lets the sampler compare across datasets
+    # (donor_sampling.sample_known_donor_cohort). omic_analysis_tool applies
+    # keep_unknown_donor and borrow_controls itself; the planner prompt does not show them.
     "pancreatic ductal adenocarcinoma": {
         "organ": "pancreas",
         "cell_types": [
             {"cell_type": "epithelial cell", "disease_cell_label": "Malignant epithelial cell",
              "control_cell_type": "pancreatic ductal cell"},
-            "fibroblast;fibroblast:fibromyocyte",
-            "macrophage;macrophage:monocyte-derived;macrophage:1;macrophage:2;macrophage:3",
+            {"cell_type": "fibroblast", "control_cell_type": "pancreatic stellate cell"},
+            "macrophage",
         ],
         "keep_unknown_donor": True,
+        "borrow_controls": True,
     },
 }
 
@@ -1808,14 +1829,19 @@ def cohort_cell_types(cohort: Dict[str, Any]) -> List[Dict[str, str]]:
             for entry in cohort.get("cell_types", [])]
 
 
-def case_study_keep_unknown_cell_types(disease: Optional[str]) -> set:
-    """Lower-cased cell types whose keep_unknown_donor is on: the listed cell types of the
-    disease's CASE_STUDY_COHORTS entry when it sets the flag, otherwise none."""
+def case_study_flag_cell_types(disease: Optional[str], flag: str) -> set:
+    """Lower-cased cell types whose CASE_STUDY_COHORTS flag is on: the listed cell types of the
+    disease's entry when it sets the flag, otherwise none."""
     cohort = next((c for name, c in CASE_STUDY_COHORTS.items()
                    if disease and name.lower() == disease.strip().lower()), {})
-    if not cohort.get("keep_unknown_donor"):
+    if not cohort.get(flag):
         return set()
     return {entry["cell_type"].lower() for entry in cohort_cell_types(cohort)}
+
+
+def case_study_keep_unknown_cell_types(disease: Optional[str]) -> set:
+    """Lower-cased cell types whose keep_unknown_donor is on."""
+    return case_study_flag_cell_types(disease, "keep_unknown_donor")
 
 
 class LangGraphOmniCellAgent:
@@ -1923,7 +1949,7 @@ From the user's question, identify:
   the question is specifically about female-vs-male differences within a cohort)
 
 ## DISEASE NAME VARIATIONS (use EXACT names — verified against OmniCellTOSG DB):
-- Alzheimer's → "Alzheimer's disease"   (note the apostrophe; "Alzheimer disease" without apostrophe returns NO match)
+- Alzheimer's → "Alzheimer's disease"   ("Alzheimer disease" matches the same metacells; "Alzheimers disease" returns NO match)
 - Lung cancer / NSCLC → "lung adenocarcinoma"
 - Breast cancer → "breast cancer"
 - Colon cancer → "colorectal cancer"
@@ -1938,7 +1964,7 @@ From the user's question, identify:
 If the tool returns `success: false`, inspect the result for BOTH:
 - `similar_terms`: dict of soft-matching adjustments (rarely present on hard miss)
 - `suggestions`: a text block listing nearby valid terms from the DB,
-  e.g. "disease: 'Alzheimer disease' -> try ['Alzheimer's disease', ...]"
+  e.g. "disease: 'Alzheimers disease' -> try ['Alzheimer's disease', ...]"
 On the next attempt, pick ONE alternative from `suggestions` (verbatim — keep
 the apostrophe / capitalization exactly as listed) and retry. Do this at most
 once per failed call to avoid loops.
@@ -1951,7 +1977,9 @@ STEP 1 says.
 - label="disease" (default) → disease metacells vs normal metacells that pass the same
   cell-type (or control_cell_type) and organ filters, both drawn only from datasets that
   hold both groups; the normal metacells are not matched by protocol, age or sex. The DE
-  model adjusts for source dataset and chrY expression. Requires `disease`.
+  model adjusts for source dataset and chrY expression. Requires `disease`. If the result's
+  `control_source` is "other_datasets", the normal metacells came from other studies: state
+  `control_note` in one sentence in your summary.
 - label="gender" → female vs male comparison within the queried subset.
 - label="cell_type" → cell-type-stratified comparison.
 
@@ -2139,7 +2167,7 @@ When a listed cell type also gives a control cell type and/or an original label 
 disease cells, the disease and control groups are selected by different names: copy
 those strings into the same task description, exactly and in double quotes, e.g.
   'Differential expression for disease "lung adenocarcinoma", organ "lung",
-   cell type "malignant cell", control cell type "type II pneumocyte;type II pneumocyte:proliferating":
+   cell type "malignant cell", control cell type "pulmonary alveolar type 2 cell":
    disease cells vs normal control cells'
 Never merge the cell types into one task and never add or drop a cell type. All later
 tasks (BioMarkerKGAgent, PubMedResearcher, ScientistsAgent, ...) must use the DEGs from
@@ -2513,6 +2541,7 @@ Create thorough plans that:
                     "organ": entities.get("organ"),
                     "label": out.get("actual_label"),
                     "contrast": out.get("contrast"),
+                    "control_note": out.get("control_note"),
                     "num_samples": out.get("num_samples"),
                     "de_success": out.get("de_success"),
                     "error": None if out.get("success", True) else out.get("message"),
@@ -2771,6 +2800,9 @@ Respond in JSON format:
                     name += f" vs normal {run['control_cell_type']}"
                 lines.append(f"- {name} ({run.get('disease')}, {run.get('organ')}; "
                              f"{run.get('num_samples')} metacells)")
+                if run.get("control_note"):
+                    lines.append(f"  - controls (state this in one sentence where the report presents "
+                                 f"this cohort): {run['control_note']}")
                 if run.get("error"):
                     lines.append(f"  - analysis error: {run['error']}")
             cohort_section = "\n## Omics Cohorts (computed by the omics tool)\n" + "\n".join(lines) + "\n"

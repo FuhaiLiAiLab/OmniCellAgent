@@ -123,12 +123,12 @@ def test_failed_exact_query_still_saves_full_value_lists(monkeypatch, tmp_path):
                         str(source_root) if key == "external.omnicell_data_root"
                         else original_get_path(key, *args, **kwargs))
     result = workflow.omic_fetch_with_new_loader(
-        {"disease": "Alzheimer disease", "cell type": "astrocyte"},
+        {"disease": "Alzheimers disease", "cell type": "astrocyte"},
         str(tmp_path / "session"),
     )
     assert result[4] is False
     diseases = (tmp_path / "session/available_diseases.txt").read_text().splitlines()
-    assert diseases[0] == 'Matched disease in list: NONE (requested: "Alzheimer disease")'
+    assert diseases[0] == 'Matched disease in list: NONE (requested: "Alzheimers disease")'
     assert diseases[1:] == ["Alzheimer's Disease", "normal"]
     assert (tmp_path / "session/available_cell_types.txt").read_text().splitlines()[0] == (
         'Matched cell type in list: "astrocyte"'

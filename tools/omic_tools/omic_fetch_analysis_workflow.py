@@ -27,7 +27,7 @@ Based on the working CellTOSGDataLoader example pattern.
 from omic_analysis_components import omic_analysis, EnrichrError, summarize_enrichment
 from cohort_diagnostics import compute_cohort_diagnostics, format_diagnostics_text
 from celltosg_runtime_adapter import writable_celltosg_root
-from donor_sampling import DEFAULT_SAMPLE_SIZE, sample_known_donor_cohort
+from donor_sampling import DEFAULT_SAMPLE_SIZE, disease_key, sample_known_donor_cohort
 from query_value_lists import save_query_value_lists
 from subprocess_r import run_r_script
 from de_results_io import read_de_results
@@ -64,6 +64,7 @@ def _get_query_builder():
         data_root = get_path('external.omnicell_data_root', absolute=True)
         _query_builder = CellTOSGSubsetBuilder(root=data_root)
     return _query_builder
+
 
 def get_suggestions(conditions: dict, n_matches: int = 5) -> str:
     """
@@ -264,6 +265,12 @@ def _build_labels_from_metadata(metadata, label_col: str, field_alias: dict,
         return None
 
     series = metadata[resolved]
+    if label_col == "disease":
+        # One class per disease as the sampler matches it, named by its most common
+        # spelling: v3 holds both "Alzheimer's Disease" and "Alzheimer disease".
+        keys = disease_key(series)
+        spelling = series.groupby(keys).agg(lambda names: names.value_counts().index[0])
+        series = keys.map(spelling).where(series.notna())
     unique_vals = series.dropna().unique().tolist()
     if len(unique_vals) < 2:
         return None
@@ -337,9 +344,30 @@ def select_contrast(Y, mapping: dict):
     }
 
 
+# run_casestudy.R CHRY_GENES: the chrY covariate genes
+CHRY_GENES = ("UTY", "NLGN4Y", "KDM5D", "ZFY", "USP9Y", "DDX3Y", "EIF1AY")
+
+
+def keep_genes_detected_in_each_group(X, groups):
+    """Columns of the count matrix X with counts in every group, plus the chrY covariate genes.
+
+    The dataset stores a gene a study did not measure as 0. When disease and control
+    metacells come from different datasets, no study term can absorb that, so a gene one
+    side never measured would look differentially expressed. Detection is counted per group
+    rather than per dataset: datasets of a few metacells miss thousands of genes by chance.
+    The chrY genes stay because an all-female group lacks them for real.
+    """
+    values = X.to_numpy() if hasattr(X, "to_numpy") else np.asarray(X)
+    groups = np.asarray(groups)
+    detected = np.all([values[groups == group].sum(axis=0) > 0 for group in np.unique(groups)], axis=0)
+    detected |= np.isin(np.asarray(X.columns).astype(str), CHRY_GENES)
+    return X.loc[:, detected]
+
+
 def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "disease",
                                suspension_type: str = None, sample_size: int = DEFAULT_SAMPLE_SIZE,
-                               keep_unknown_donor: bool = False, shared_datasets_only: bool = True):
+                               keep_unknown_donor: bool = False, shared_datasets_only: bool = True,
+                               borrow_controls: bool = False, sampling_record: dict = None):
     """
     Fetch single-cell RNA-seq data using the new CellTOSGDataLoader with soft matching.
 
@@ -365,6 +393,12 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         shared_datasets_only (bool): Default True draws both groups of a disease
             comparison only from datasets that hold eligible disease and control
             metacells (see donor_sampling.sample_known_donor_cohort).
+        borrow_controls (bool): Default False. True draws both groups from every
+            dataset when the shared datasets fall short of the minimum (see
+            donor_sampling.sample_known_donor_cohort); the matrix then keeps only
+            genes detected in each group (keep_genes_detected_in_each_group).
+        sampling_record (dict): Optional; receives the disease comparison's sampling
+            summary (donor_sampling.json), including "control_source".
 
     A disease comparison with fewer than donor_sampling.MIN_METACELLS_PER_GROUP
     eligible metacells in either group retrieves nothing.
@@ -453,7 +487,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         save_query_value_lists(
             all_metadata, output_dir, disease=disease_name, cell_type=cell_type,
         )
-        sampled_metadata = None
+        sampled_metadata = sampling_summary = None
         loader_conditions = conditions
         loader_sample_size = sample_size
         if task == "disease":
@@ -467,6 +501,7 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
                 control_cell_type=control_cell_type,
                 disease_cell_label=disease_cell_label,
                 shared_datasets_only=shared_datasets_only,
+                borrow_controls=borrow_controls,
             )
             os.makedirs(output_dir, exist_ok=True)
             with open(os.path.join(output_dir, "donor_sampling.json"), "w", encoding="utf-8") as handle:
@@ -636,6 +671,20 @@ def omic_fetch_with_new_loader(fetch_dict: dict, output_dir: str, label: str = "
         # if os.path.exists(expression_matrix_path):
         #     compress_expression_matrix(expression_matrix_path)
 
+        if sampling_summary is not None:
+            if (sampling_summary.get("control_source") == "other_datasets" and actual_label == "disease"
+                    and Y is not None and len(Y) == X.shape[0]):
+                genes_before = X.shape[1]
+                X = keep_genes_detected_in_each_group(X, Y)
+                sampling_summary["gene_filter"] = {
+                    "rule": "detected in each group (chrY covariate genes kept)",
+                    "genes_before": int(genes_before), "genes_kept": int(X.shape[1])}
+                print(f"[Omic Fetch] Genes detected in each group: {X.shape[1]:,} of {genes_before:,}")
+                with open(os.path.join(output_dir, "donor_sampling.json"), "w", encoding="utf-8") as handle:
+                    json.dump(sampling_summary, handle, indent=2)
+            if sampling_record is not None:
+                sampling_record.update(sampling_summary)
+
         return X, Y, metadata, similar_terms, True, actual_label, fallback_message, label_mapping
 
     except ValueError as e:
@@ -696,6 +745,7 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                                  enable_differential_expression=True, enable_plotting=True,
                                  label="disease", suspension_type=None, sample_size=DEFAULT_SAMPLE_SIZE,
                                  keep_unknown_donor=False, shared_datasets_only=True,
+                                 borrow_controls=False,
                                  r_timeout=3600, enrichment_timeout=60, enrichment_databases=None):
     """
     Perform the complete single-cell omic analysis workflow.
@@ -739,6 +789,11 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
             only within datasets that hold both groups (label="disease" only).
             Either group having fewer than donor_sampling.MIN_METACELLS_PER_GROUP
             eligible metacells stops the run before any analysis.
+        borrow_controls: Default False. True is the fallback when no dataset holds
+            enough of both groups: disease and normal metacells then come from every
+            dataset, the DE model has no dataset term (it would be the disease
+            contrast itself), only genes detected in each group are tested, and
+            the result's `control_source` is "other_datasets" with a `control_note`.
     """
     times = {}
     times['start'] = time.time()
@@ -803,12 +858,20 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
     print(f"STEP 2: Data Retrieval with Soft Matching")
     print(f"{'='*70}")
     
+    sampling_record = {}
+    fetch_options = {"borrow_controls": True, "sampling_record": sampling_record} if borrow_controls else {}
     (X, Y, metadata, similar_terms, retrieval_success,
      actual_label, label_fallback_message, label_mapping) = omic_fetch_with_new_loader(
         fetch_dict, session_dir, label=label, suspension_type=suspension_type,
         sample_size=sample_size, keep_unknown_donor=keep_unknown_donor,
-        shared_datasets_only=shared_datasets_only,
+        shared_datasets_only=shared_datasets_only, **fetch_options,
     )
+    control_source = sampling_record.get("control_source")
+    control_note = None
+    if control_source == "other_datasets":
+        control_note = ("No study holds enough metacells of both groups, so the normal metacells come from "
+                        "other studies than the disease metacells: disease and study effects cannot be "
+                        "separated, and the differentially expressed genes are exploratory.")
     # The temporary loader root filters the BMG mapping to HGNC-approved
     # protein-coding symbols before extraction, including the saved raw matrix.
     # Capture them now: np.nan_to_num() downstream returns a bare ndarray and
@@ -977,8 +1040,11 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
                     # chrY expression covariate for sex imbalance, except when sex is the contrast
                     "adjust_chrY": actual_label != "gender",
                 }
-                # Source dataset per row, so limma can model the study effect
-                if metadata is not None and "dataset_id" in metadata.columns and len(metadata) == len(Y):
+                # Source dataset per row, so limma can model the study effect. Not across datasets:
+                # there the term is the disease contrast itself, or it would confine the estimate
+                # to the few datasets that hold both groups.
+                if (control_source != "other_datasets" and metadata is not None
+                        and "dataset_id" in metadata.columns and len(metadata) == len(Y)):
                     dataset_ids = metadata["dataset_id"].astype(str).to_numpy()
                     data_dict["normal_dataset_id"] = dataset_ids[Y == contrast["ref_class"]]
                     data_dict["disease_dataset_id"] = dataset_ids[Y == contrast["alt_class"]]
@@ -1218,6 +1284,8 @@ def omic_fetch_analysis_workflow(*, disease=None, cell_type=None, organ=None,
         "label_fallback_message": label_fallback_message,
         "comparison_name": comparison_name if de_gated else None,
         "contrast": contrast,
+        "control_source": control_source,
+        "control_note": control_note,
         "num_samples": metadata.shape[0] if metadata is not None else 0,
         "num_features": n_features,
         "top_gene_indices": top_gene_indices,
@@ -1285,8 +1353,8 @@ Examples:
         """
     )
     
-    parser.add_argument("--disease", type=str, help="Disease name, matched EXACTLY against the disease_BMG_name column "
-             "(e.g. 'lung adenocarcinoma', \"Alzheimer's Disease\"). A near-miss "
+    parser.add_argument("--disease", type=str, help="Disease name, matched against the disease_BMG_name column "
+             "ignoring case and a possessive 's (e.g. 'lung adenocarcinoma', \"Alzheimer's Disease\"). A near-miss "
              "returns 0 samples and prints the closest valid alternatives.")
     parser.add_argument("--cell-type", type=str, help="Cell type, matched EXACTLY against the CMT_name column "
              "(e.g. 'microglial cell', 'CD4-positive, alpha-beta T cell').")
@@ -1324,12 +1392,13 @@ Examples:
         # Test configurations
         TESTS = [
             {"name": "lung_adenocarcinoma", "disease": "lung adenocarcinoma", "organ": "lung"},
-            # INTENTIONAL near-miss: "Alzheimer disease" is NOT a disease_BMG_name
-            # value (the real one is "Alzheimer's Disease"). This case exists to
+            # INTENTIONAL near-miss: "Alzheimers disease" matches no disease_BMG_name
+            # value, even with the possessive ignored ("Alzheimer's Disease" and
+            # "Alzheimer disease" both match). This case exists to
             # exercise the no-match path and assert the suggestion engine offers a
             # queryable alternative. Do not "correct" it -- doing so deletes the
             # only coverage of that path.
-            {"name": "alzheimer_disease", "disease": "Alzheimer disease", "organ": "brain"},
+            {"name": "alzheimer_disease", "disease": "Alzheimers disease", "organ": "brain"},
             {"name": "breast_cancer", "disease": "breast cancer", "organ": "breast"},
             {"name": "leukemia", "disease": "leukemia"},
             {"name": "microglia_brain", "cell_type": "microglial cell", "organ": "brain"},

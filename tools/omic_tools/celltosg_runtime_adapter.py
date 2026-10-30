@@ -7,22 +7,21 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterator
 
+import pandas as pd
+
 
 HGNC_PROTEIN_CODING_REFERENCE = (
     Path(__file__).resolve().parent / "reference" / "hgnc_protein_coding.tsv"
 )
 
 
+# The workflow uses metadata, the gene mapping and expression only. The loader also
+# loads the graph and embedding arrays (edge_index.npy, x_*_emb.npy) when its root
+# holds them; they are not linked, because nothing downstream reads them.
 CELLTOSG_READ_INPUTS = (
     "cell_metadata_with_mappings.parquet",
     "bmg_gene_index.csv",
     "expression_matrix",
-    "edge_index.npy",
-    "internal_edge_index.npy",
-    "ppi_edge_index.npy",
-    "x_name_emb.npy",
-    "x_desc_emb.npy",
-    "x_bio_emb.npy",
 )
 
 
@@ -67,6 +66,25 @@ def _filter_bmg_gene_index(source: Path, destination: Path, reference: Path) -> 
     )
 
 
+def _matrix_directory(source_root: Path, metadata) -> Path:
+    """The directory that the metadata's matrix_file_path values are relative to.
+
+    Releases before v3 store them relative to expression_matrix/
+    ("cellxgene_ovary_part_0.npy"); v3 stores them relative to the dataset root
+    ("expression_matrix/CellxGene/..."). The loader always joins them to
+    <root>/expression_matrix, so the shadow root links that name here.
+    """
+    if metadata is None:
+        metadata = pd.read_parquet(
+            source_root / "cell_metadata_with_mappings.parquet", columns=["matrix_file_path"]
+        )
+    paths = metadata["matrix_file_path"].dropna() if "matrix_file_path" in metadata else []
+    first = Path(str(paths.iloc[0])) if len(paths) else None
+    if first is not None and first.parts[0] == "expression_matrix" and (source_root / first).is_file():
+        return source_root
+    return source_root / "expression_matrix"
+
+
 @contextmanager
 def writable_celltosg_root(source_root: str | PathLike[str], *, metadata=None) -> Iterator[Path]:
     """Yield a temporary loader root with an HGNC-filtered gene mapping.
@@ -100,6 +118,8 @@ def writable_celltosg_root(source_root: str | PathLike[str], *, metadata=None) -
                     source, shadow_root / name, HGNC_PROTEIN_CODING_REFERENCE
                 )
                 continue
+            if name == "expression_matrix":
+                source = _matrix_directory(source_root, metadata)
             (shadow_root / name).symlink_to(
                 source, target_is_directory=source.is_dir()
             )

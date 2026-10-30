@@ -3,6 +3,10 @@
 import json
 from pathlib import Path
 
+import pandas as pd
+
+from tools.omic_tools.donor_sampling import disease_key
+
 
 def save_query_value_lists(metadata, output_dir, *, disease=None, cell_type=None):
     """Save exact source values with the query's vocabulary match on line one.
@@ -27,9 +31,10 @@ def save_query_value_lists(metadata, output_dir, *, disease=None, cell_type=None
             key=lambda value: (value.lower(), value),
         )
         if requested:
-            # Disease sampling strips surrounding whitespace; cell-type
-            # equality follows CellTOSG's case-insensitive exact lookup.
-            normalize = (lambda value: value.strip().lower()) if label == "disease" else str.lower
+            # Disease sampling also ignores surrounding whitespace and a possessive
+            # "'s"; cell-type equality follows CellTOSG's case-insensitive exact lookup.
+            normalize = ((lambda value: disease_key(pd.Series([value])).iloc[0])
+                         if label == "disease" else str.lower)
             matches = [value for value in values if normalize(value) == normalize(str(requested))]
             matched = ", ".join(json.dumps(value, ensure_ascii=False) for value in matches)
             if not matched:

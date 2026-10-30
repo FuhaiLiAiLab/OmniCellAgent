@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 
@@ -7,12 +8,6 @@ READ_INPUTS = (
     "cell_metadata_with_mappings.parquet",
     "bmg_gene_index.csv",
     "expression_matrix",
-    "edge_index.npy",
-    "internal_edge_index.npy",
-    "ppi_edge_index.npy",
-    "x_name_emb.npy",
-    "x_desc_emb.npy",
-    "x_bio_emb.npy",
 )
 
 
@@ -26,7 +21,8 @@ def _make_source_root(root: Path) -> Path:
         elif name == "bmg_gene_index.csv":
             path.write_text("gene_name,indices\nMALAT1,8\nM6PR,1;7\nARF5,0\n")
         else:
-            path.write_bytes(name.encode())
+            pd.DataFrame({"matrix_file_path": ["matrix.npy"], "matrix_row_idx": [0]}).to_parquet(path)
+    (root / "x_bio_emb.npy").write_bytes(b"not linked")
     (root / "last_query_result.csv").write_text("source result\n")
     return root
 
@@ -88,7 +84,8 @@ def test_shadow_root_reports_missing_required_inputs(tmp_path):
 
     source_root = _make_source_root(tmp_path / "source")
     (source_root / "bmg_gene_index.csv").unlink()
-    (source_root / "x_bio_emb.npy").unlink()
+    (source_root / "expression_matrix" / "matrix.npy").unlink()
+    (source_root / "expression_matrix").rmdir()
 
     with pytest.raises(FileNotFoundError) as exc_info:
         with writable_celltosg_root(source_root):
@@ -96,4 +93,4 @@ def test_shadow_root_reports_missing_required_inputs(tmp_path):
 
     message = str(exc_info.value)
     assert "bmg_gene_index.csv" in message
-    assert "x_bio_emb.npy" in message
+    assert "expression_matrix" in message
