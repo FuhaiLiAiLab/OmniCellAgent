@@ -50,7 +50,7 @@ external:
   # OmniCellTOSG data root - update this path for your system
   # Example: "/home/username/Projects/OmniCellTOSG/OmniCellTOSG_Dataset"
   omnicell_data_root: "/path/to/OmniCellTOSG_Dataset"
-  
+
   # BioMedGraphica directory - update this path for your system
   # Example: "/home/username/Projects/OmniCellTOSG/OmniCellTOSG_Dataset/BioMedGraphica-Conn"
   biomedgraphica_dir: "/path/to/BioMedGraphica-Conn"
