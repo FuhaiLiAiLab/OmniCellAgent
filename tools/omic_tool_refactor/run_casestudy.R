@@ -26,11 +26,21 @@ select_volcano_labels <- function(results, max_labels = 15L,
                chosen$adj.P.Val, chosen$Gene), , drop = FALSE]
 }
 
+default_label_genes <- function() {
+  # This folder runs the AD case study, so the volcano labels default to ad_label_genes.tsv
+  # beside this script: Alzheimer's disease genes listed by at least two of GWAS Catalog,
+  # KEGG hsa05010, DisGeNET and Jensen DISEASES (Enrichr libraries). NULL if it is absent.
+  script <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
+  if (length(script) != 1L) return(NULL)
+  path <- file.path(dirname(normalizePath(script)), "ad_label_genes.tsv")
+  if (file.exists(path)) path else NULL
+}
+
 parse_de_config <- function(args) {
   allowed <- c("stage", "ref-csv", "alt-csv", "ref-label", "alt-label",
                "input-scale", "de-dir", "state-file",
                "de-fdr", "top-n", "final-out-dir", "final-de-dir", "volcano-dir",
-               "covariates-csv", "chry-covariate")
+               "covariates-csv", "chry-covariate", "label-genes")
   options <- list()
   positional <- character()
   i <- 1L
@@ -80,6 +90,7 @@ parse_de_config <- function(args) {
     state_file = get_option("state-file", file.path(out_dir, "analysis_state.rds")),
     covariates_csv = get_option("covariates-csv", NULL),
     chry_covariate = get_option("chry-covariate", "no"),
+    label_genes = get_option("label-genes", default_label_genes()),
     de_fdr = suppressWarnings(as.numeric(get_option("de-fdr", "0.05"))),
     top_n = suppressWarnings(as.numeric(get_option("top-n", "1000")))
   )
@@ -101,6 +112,9 @@ parse_de_config <- function(args) {
     stop("Covariates file not found: ", config$covariates_csv, call. = FALSE)
   }
   if (!config$chry_covariate %in% c("yes", "no")) stop("--chry-covariate must be yes or no.", call. = FALSE)
+  if (!is.null(config$label_genes) && !file.exists(config$label_genes)) {
+    stop("Label gene list not found: ", config$label_genes, call. = FALSE)
+  }
   config
 }
 
@@ -315,7 +329,7 @@ run_plots <- function(state, config) {
   config$out_dir <- normalizePath(config$out_dir, mustWork = TRUE)
   # The agent's defaults for the PERMUTATIONS and WHICH_PC environment variables, which it never sets
   params <- list(out_dir = config$out_dir, out_prefix = "DE_results", ref_label = config$ref_label,
-                 alt_label = config$alt_label, fdr_thresh = 0.05, fc_thresh = 1,
+                 alt_label = config$alt_label, fdr_thresh = 0.05,
                  n_corrgram = 20, n_pca = 100, permutations = 999,
                  which_pc = "PC1")
   suppressPackageStartupMessages({
@@ -324,7 +338,6 @@ run_plots <- function(state, config) {
   })
   out_stem <- file.path(config$out_dir, params$out_prefix)
   fdr_thresh <- params$fdr_thresh
-  fc_thresh <- params$fc_thresh
   expr <- state$inputs$expr
   group <- state$inputs$group
   res <- state$native
@@ -366,44 +379,67 @@ message("PERMANOVA (", params$permutations, " permutations): R2 = ",
   # panel-a-volcano
 res$neglog10AdjP <- -log10(pmax(res$adj.P.Val, .Machine$double.xmin))
 res$status <- "NS"
-res$status[res$adj.P.Val < fdr_thresh & res$logFC >=  fc_thresh] <- "Up"
-res$status[res$adj.P.Val < fdr_thresh & res$logFC <= -fc_thresh] <- "Down"
+# Significance is the BH-adjusted P alone (the horizontal line); the sign of logFC sets
+# the direction. Single-cell fold changes are small, so a fold-change cutoff left most
+# cohorts with no colored gene.
+res$status[res$adj.P.Val < fdr_thresh & res$logFC > 0] <- "Up"
+res$status[res$adj.P.Val < fdr_thresh & res$logFC < 0] <- "Down"
 res$status <- factor(res$status, levels = c("Down", "NS", "Up"))
-res$is_sig <- with(res, adj.P.Val < fdr_thresh & abs(logFC) >= fc_thresh)
+res$is_sig <- with(res, adj.P.Val < fdr_thresh & logFC != 0)
 
 up_n   <- sum(res$status == "Up", na.rm = TRUE)
 down_n <- sum(res$status == "Down", na.rm = TRUE)
 
-# One annotation rule for every disease/cell type. Corrgram selection is separate.
-lab_df <- select_volcano_labels(res)
+# One annotation rule for every disease/cell type: the 10 most significant genes per
+# direction. With --label-genes (a TSV with a `gene` column), only genes on that list are
+# labeled, e.g. genes with disease evidence in curated databases. Corrgram selection is separate.
+label_pool <- res
+if (!is.null(config$label_genes)) {
+  label_list <- data.table::fread(config$label_genes)
+  if (!"gene" %in% names(label_list)) stop("Label gene list needs a `gene` column.")
+  label_pool <- res[res$Gene %in% label_list$gene, , drop = FALSE]
+  message("Volcano labels restricted to ", nrow(label_pool), " tested genes of ",
+          basename(config$label_genes))
+}
+lab_df <- select_volcano_labels(label_pool, max_labels = 20L, up_quota = 10L)
 x_min <- min(res$logFC, na.rm = TRUE); x_max <- max(res$logFC, na.rm = TRUE)
 y_max <- max(res$neglog10AdjP, na.rm = TRUE); x_span <- x_max - x_min
+fdr_line <- -log10(fdr_thresh)
 
 fc_axis_lab <- paste0("log2 Fold Change (", params$alt_label, " / ", params$ref_label, ")")
 
 volcano <- ggplot(res, aes(x = logFC, y = neglog10AdjP)) +
-  geom_vline(xintercept = -fc_thresh, color = "steelblue3", linetype = "dashed") +
-  geom_vline(xintercept =  fc_thresh, color = "red3",       linetype = "dashed") +
-  geom_point(aes(color = status, shape = is_sig), alpha = 0.85, size = 2) +
-  scale_color_manual(values = c(Down = "steelblue3", NS = "grey70", Up = "red3")) +
-  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17),
-                     labels = c("Not sig", "Significant")) +
-  # ylim keeps repelled labels out of the band the two count annotations occupy;
-  # without it they collide as soon as a top gene sits near the y maximum.
-  geom_text_repel(data = lab_df, aes(label = Gene), size = 3, max.overlaps = 200,
-                  min.segment.length = 0, box.padding = 0.3, point.padding = 0.2,
-                  ylim = c(NA, y_max * 0.88)) +
+  geom_hline(yintercept = fdr_line, color = "grey30", linetype = "dashed", linewidth = 0.4) +
+  annotate("text", x = x_max, y = fdr_line, label = paste0("FDR = ", fdr_thresh),
+           hjust = 1, vjust = -0.4, size = 2.8, color = "grey30") +
+  geom_point(aes(color = status), alpha = 0.75, size = 1.6, stroke = 0) +
+  # Labeled genes are outlined so each name points at a visible dot.
+  geom_point(data = lab_df, aes(fill = status), shape = 21, color = "black",
+             size = 2.2, stroke = 0.5, show.legend = FALSE) +
+  scale_color_manual(values = c(Down = "steelblue3", NS = "grey75", Up = "red3"),
+                     labels = c(Down = "Down", NS = "Not significant", Up = "Up"), name = NULL) +
+  scale_fill_manual(values = c(Down = "steelblue3", NS = "grey75", Up = "red3")) +
+  # Paper-style labels: italic gene names pushed outward on the side of their direction,
+  # each tied to its point by a leader line. ylim keeps them below the count annotations.
+  geom_text_repel(data = lab_df, aes(label = Gene),
+                  nudge_x = ifelse(lab_df$status == "Up", 0.12, -0.12) * x_span,
+                  size = 2.8, fontface = "italic", max.overlaps = Inf, seed = 42,
+                  min.segment.length = 0, segment.color = "grey35", segment.size = 0.3,
+                  box.padding = 0.35, point.padding = 0.25, force = 2,
+                  ylim = c(fdr_line, y_max * 0.86)) +
   annotate("text", x = x_min + 0.02 * x_span, y = y_max * 0.98,
-           label = paste0("Up (logFC >= ", fc_thresh, ", FDR < ", fdr_thresh, "): ", up_n),
+           label = paste0("Up (FDR < ", fdr_thresh, "): ", up_n),
            hjust = 0, vjust = 1, color = "red3", fontface = "bold") +
   annotate("text", x = x_min + 0.02 * x_span, y = y_max * 0.92,
-           label = paste0("Down (logFC <= -", fc_thresh, ", FDR < ", fdr_thresh, "): ", down_n),
+           label = paste0("Down (FDR < ", fdr_thresh, "): ", down_n),
            hjust = 0, vjust = 1, color = "steelblue3", fontface = "bold") +
+  scale_x_continuous(expand = expansion(mult = 0.18)) +
   labs(title = paste0("Volcano plot: ", params$alt_label, " vs ", params$ref_label),
        x = fc_axis_lab, y = expression(-log[10]("BH-adjusted P"))) +
   theme_bw() +
   theme(plot.title = element_text(face = "bold"), legend.position = "top",
         aspect.ratio = 1) +
+  guides(color = guide_legend(override.aes = list(size = 2.5, alpha = 1))) +
   coord_cartesian(clip = "off")
 
 ggsave(paste0(out_stem, "_volcano.png"), volcano, width = 5.5, height = 5.5, dpi = 300,
