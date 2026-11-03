@@ -6,6 +6,34 @@ The source is the agent's omic pipeline on branch `omic-shared-controls` at comm
 
 The check folder `webapp/sessions/AD_20261030_refactor_check/` exists only in the cluster checkout, because `webapp/sessions/` is gitignored. It holds the comparison scripts (`compare_outputs.py`, `check_trim.py`, `check_lines.py`), both runs' outputs and `COMPARISON.md`.
 
+## Added after the extraction: sex-stratified figure (2026-11-02)
+
+These files are not from bb92fab:
+- **`sex_stratified_de.R` and `plot_sex_stratified_scatter.py`:** byte-identical copies of the scripts of the same name in `tools/omic_tools/`. Those scripts were written on 2026-10-30 in the `revision` working tree, untracked. On 2026-10-30 they drew `AD_20261027_v3_omic_only/sex_stratified/foursector_scatter_AD.pdf` from the agent's three AD cohorts.
+- **`run_ad_sex_stratified.py`:** new. It runs the workflow for the agent's three AD cell types, with the call `run_ad_microglia.py` makes. It then runs the two scripts with the labels of the 2026-10-30 figure.
+
+`run_ad_microglia.py` and the files it writes are unchanged.
+
+Verification: on 2026-11-02 the driver ran into an empty folder (Slurm 4312736). Compared with the 2026-10-30 figure folder:
+- The sex-model tables and the PNG are byte-identical.
+- The PDF differs only in `/CreationDate`, and `summary.json` only in `cohort_dir`.
+
+Its three cohort folders also equal the earlier runs, file for file (234 files each): the agent's for microglia and the mini's for the other two.
+
+## Changed after the extraction: volcano plot (`e58bcc7`, 2026-11-02)
+
+Commit `e58bcc7` (wenyuli23) changed the plot stage of `run_casestudy.R` and added `ad_label_genes.tsv`:
+- **Colours:** volcano significance is FDR < 0.05 alone. The |log2FC| ≥ 1 lines are gone, because no gene in this cohort reached them.
+- **Labels:** paper-style labels, the 10 most significant genes per direction.
+- **Label list:** a new `--label-genes` option limits the labels to a gene list. It defaults to `ad_label_genes.tsv`.
+
+Because of this change, the volcano files and the tables built from the volcano's gene status no longer match the agent's:
+- `DE_results_volcano.*`;
+- panel A of the composite figure;
+- the `DE_results_panel_*` CSVs.
+
+The rest of this file describes the extraction at `de8e82b`.
+
 ## Trimming rule
 
 - Every function the run calls is kept, with the statements that do the work, in the original order.
@@ -29,7 +57,8 @@ The check folder `webapp/sessions/AD_20261030_refactor_check/` exists only in th
 | `query_value_lists.py` | same name | flat import; "no filter requested" branch removed |
 | `r_plotting.py` | same name | flat import only |
 | `subprocess_r.py`, `de_results_io.py` | same name | unchanged |
-| `run_casestudy.R` | same name | trimmed (852 → 736) |
+| `run_casestudy.R` | same name | trimmed (852 → 736); volcano redrawn in `e58bcc7` (772 lines) |
+| `ad_label_genes.tsv` | new in `e58bcc7` | AD genes the volcano may label |
 | `kegg_simple.R` | `enrichment/kegg_simple.R` | arguments required; legacy branch removed |
 
 `cell_type_lookup.py` is not included. The tool runs it as a gate before the workflow. For today's v3 data, microglia passes the gate, which writes no files. See *Where the mini differs from the agent*.

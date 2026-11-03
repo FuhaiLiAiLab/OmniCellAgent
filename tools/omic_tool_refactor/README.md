@@ -9,7 +9,11 @@ The run has five stages:
 4. runs Enrichr pathway enrichment;
 5. draws the case-study figures.
 
-It writes the same files and returns the same result as the agent's `omic_analysis_tool` for this case study (verified 2026-10-30; see `EXTRACTION.md`).
+It writes the same files and returns the same result as the agent's `omic_analysis_tool` for this case study (verified 2026-10-30; see `EXTRACTION.md`), with one exception: the volcano plot was redrawn after the extraction (commit `e58bcc7`). So the volcano, panel A of the composite figure and the panel gene tables now differ from the agent's.
+
+There are two entry points:
+- **`run_ad_microglia.py`:** the microglia run described below. It is the agent tool's call.
+- **`run_ad_sex_stratified.py`:** runs all three AD case-study cohorts (microglia, astrocyte, glutamatergic neuron) and draws the female-vs-male four-sector figure. See *Sex-stratified figure*.
 
 ## Start
 
@@ -67,6 +71,8 @@ Paths are set in `settings.py`:
 | `HGNC_REFERENCE` | `tools/omic_tools/reference/hgnc_protein_coding.tsv` | HGNC approved protein-coding symbols, which define the gene axis |
 | `KEGG_SCRIPT` | `kegg_simple.R` in this folder | the enrichment plot script |
 
+`run_casestudy.R` also reads `ad_label_genes.tsv` from its own folder: the genes the volcano plot may label. It lists 375 Alzheimer's disease genes that at least two of GWAS Catalog 2023, KEGG hsa05010, DisGeNET and Jensen DISEASES name (Enrichr libraries, retrieved 2026-11-02).
+
 It also needs:
 - **Python:** the `omnicellagent` conda environment (pandas, numpy, pyarrow, requests).
 - **R:**
@@ -84,7 +90,7 @@ It also needs:
 | normalisation | counts per 10,000 (CP10K) per metacell; DE uses log2(CP10K + 1) | workflow, `run_casestudy.R` |
 | DE significance | Benjamini–Hochberg FDR < 0.05 | `omic_analysis_components.py` → `run_casestudy.R` |
 | genes per significant-gene table | at most 1,000 | same |
-| figure thresholds | FDR < 0.05 and \|log2FC\| ≥ 1 (volcano colours); top 100 genes (PCA); top 20 (correlation plot); 999 permutations (PERMANOVA) | `run_casestudy.R` |
+| figure thresholds | FDR < 0.05, no fold-change cutoff (volcano colours); 10 labels per direction from `ad_label_genes.tsv` (volcano); top 100 genes (PCA); top 20 (correlation plot); 999 permutations (PERMANOVA) | `run_casestudy.R` |
 | Enrichr | 14 libraries; 50 best terms saved per library; 60 s per request | `omic_analysis_components.py`, `enrichr_client.py` |
 | R time limit | 3,600 s per call | workflow |
 
@@ -162,7 +168,9 @@ The numbers below are from the verified run on 2026-10-30.
 
 R reloads `analysis_state.rds`, checks that it matches the input matrices (MD5), and draws into `casestudy_R/`:
 - **PCA and PERMANOVA:** PCA of the 100 genes with the lowest FDR, and a PERMANOVA on Bray–Curtis distances with 999 permutations. This run: R² = 0.087, p ≤ 0.001.
-- **Volcano plot:** `DE_results_volcano.{png,pdf}`. It colours genes with FDR < 0.05 and |log2FC| ≥ 1 and labels up to 15 of them.
+- **Volcano plot:** `DE_results_volcano.{png,pdf}`.
+  - It colours genes with FDR < 0.05 by the sign of log2FC, with no fold-change cutoff, and draws the FDR = 0.05 line.
+  - It labels up to 20 genes from `ad_label_genes.tsv`: the 10 most significant up and the 10 most significant down. Another list can be passed with `--label-genes`.
 - **Correlation plot:** the 20 genes with the lowest FDR (`DE_results_corrgram_genes`).
 - **PC1 violin plot:** by group, with a Wilcoxon test (`DE_results_violin_PC1_2groups.pdf`).
 - **PCA panel:** with Tukey letters (`DE_results_PCA_panel`).
@@ -205,9 +213,61 @@ The workflow's result dict, post-processed as the agent tool does, is saved by t
     └── volcano_plots/                       empty; kept from the agent's folder layout
 ```
 
-The session folder holds 234 files, about 710 MB:
+`run_ad_sex_stratified.py` writes the same kind of cohort folder for each cell type: `omic_microglial_cell/`, `omic_astrocyte/` and `omic_glutamatergic_neuron/`. It also writes `omic_result_<cell type>.json` for each cohort it runs, and:
+
+```
+<output_root>/sex_stratified/
+├── foursector_scatter_AD.png, .pdf          the figure
+└── <cell type>/                             merged_de.csv, merged_de_categories.csv,
+                                             sex_disease_interaction.csv, summary.json
+```
+
+The microglia session folder holds 234 files, about 710 MB:
 - the two DE input matrices, about 400 MB;
 - `expression_gene.csv`, 130 MB.
+
+## Sex-stratified figure (three AD cohorts)
+
+```bash
+$OCA/scripts/r_env.sh $PY $OCA/tools/omic_tool_refactor/run_ad_sex_stratified.py <output_root>
+```
+
+This draws `foursector_scatter_AD.{png,pdf}`: for each cohort, the AD-vs-control log2 fold change in females (x) against males (y). It reproduces the figure first drawn on 2026-10-30 in `AD_20261027_v3_omic_only/sex_stratified/`.
+
+1. **Cohorts:** the workflow above runs for "microglial cell", "astrocyte" and "glutamatergic neuron", the agent's AD cell types, into `omic_<cell type>/`.
+   - The call is the one `run_ad_microglia.py` makes. On the 2026-11-02 data: 1,649, 2,000 and 1,599 metacells.
+   - A cohort folder that already holds its DE inputs is reused, so a `run_ad_microglia.py` output root can be extended without re-running microglia.
+   - A reused folder is not checked for which code or data produced it.
+2. **Sex models:** `sex_stratified_de.R` on each cohort, all three at once. It reads four files from the cohort folder: the two DE input matrices, `de_covariates_*.csv` (the study) and `labels.csv` (sex and donor).
+   - **Join:** `labels.csv` is joined to the matrix columns by position (disease block, then normal block). The join is checked against each metacell's disease status and study.
+   - **Data:** the same log2(CP10K + 1) values and gene filter as the main DE. Metacells without a female or male label are dropped: 4, 15 and 0 in the three cohorts.
+   - **Model:** one limma model, `~ 0 + group + dataset` with group = status × sex. The donor (`source|dataset_id|donor_id`) is a random block (`duplicateCorrelation`; within-donor correlation 0.16, 0.23 and 0.19). The fit uses robust, trended `eBayes`.
+   - **Contrasts:** the disease effect in each sex (the figure's axes), the sex effect within each status, and the sex × disease interaction.
+   - **Output:** `sex_stratified/<cell type>/merged_de.csv` (the figure's input), `sex_disease_interaction.csv` (every contrast, ordered by interaction p) and `summary.json` (counts).
+3. **Figure:** `plot_sex_stratified_scatter.py` draws one panel per cohort.
+   - **Colouring:** a gene is coloured if, in a sex, FDR < 0.05 and |log2FC| ≥ 0.5. Categories: female-specific, male-specific, both up, both down, discordant.
+   - **Labels:** up to 10 genes per panel.
+   - **Output:** `sex_stratified/foursector_scatter_AD.{png,pdf}`, plus `merged_de_categories.csv` per cohort.
+
+**Runtime:** about an hour from an empty output root (58 minutes on 2026-11-02, 8 CPUs, 64 GB requested, peak about 6 GB):
+- the three cohorts run one after another, about 18 minutes;
+- the sex models then take as long as the slowest, about 40 minutes, almost all of it `duplicateCorrelation` on about 18,500 genes;
+- the figure takes seconds.
+
+**Verified 2026-11-02**, a single run of this command into an empty folder, against the 2026-10-30 outputs in `AD_20261027_v3_omic_only`:
+- For each cohort, the four sex-model inputs are byte-identical.
+- So are `merged_de.csv`, `sex_disease_interaction.csv`, `merged_de_categories.csv` and the PNG.
+- `summary.json` differs only in `cohort_dir`, and the PDF only in its creation date.
+- See `COMPARISON.md` in the check folder.
+
+This check ran before the volcano change of `e58bcc7`. That commit changes only the volcano plot (plot stage) of `run_casestudy.R`, not the four files the sex models read.
+
+**Reading it:**
+- At the figure's cutoffs the panels are nearly empty: 17, 7 and 4 coloured genes.
+  - Each sex has 764–1,953 genes at FDR < 0.05, but their median |log2FC| is about 0.1. Most fall inside the ±0.5 band.
+- **Do not cite the interaction counts in `summary.json` and `sex_disease_interaction.csv` yet.**
+  - Y-chromosome genes come out as significant sex × disease interactions (FDR < 0.05) in every cohort: RPS4Y1 in microglia; UTY, DDX3Y, USP9Y and NLGN4Y in astrocytes; DDX3Y in glutamatergic neurons. That points to leftover study × sex × status confounding.
+  - No donor-level sex-label permutation has been run to show the counts exceed chance.
 
 ## Reading the results
 
@@ -217,7 +277,9 @@ The session folder holds 234 files, about 710 MB:
   - limma treats metacells as independent, so its FDR overstates the evidence.
   - In a 2026-10-30 check on this cohort, AD and normal labels were shuffled among persons within each study. Each fold still gave 1,469–6,502 genes at FDR < 0.05 (`webapp/sessions/AD_20261030_v3_study_split/STUDY_SPLIT_SUMMARY.md` in the cluster checkout; `webapp/sessions/` is not in git).
   - The leading genes and the MHC signal did replicate across disjoint study sets.
-- **No gene reaches |log2FC| ≥ 1** on the log2(CP10K + 1) scale. So the volcano colours and labels no genes, and the panel A gene CSV has a header only. The 5,175 FDR < 0.05 genes all have smaller fold changes.
+- **No gene reaches |log2FC| ≥ 1** on the log2(CP10K + 1) scale. The 5,175 FDR < 0.05 genes all have smaller fold changes.
+  - With the agent's |log2FC| ≥ 1 cutoff, the volcano coloured and labelled no genes. That is why `e58bcc7` colours by FDR alone.
+  - The volcano's colours therefore mark statistical significance, not large effects.
 - **Enrichr is a live service.** Its libraries can change between runs.
 
 ## Files in this folder
@@ -238,4 +300,8 @@ The session folder holds 234 files, about 710 MB:
 | `subprocess_r.py` | runs `Rscript` |
 | `run_casestudy.R` | limma DE (`--stage de`) and case-study figures (`--stage plots`) |
 | `kegg_simple.R` | pathway plots |
+| `ad_label_genes.tsv` | AD genes the volcano plot may label |
+| `run_ad_sex_stratified.py` | entry point for the three AD cohorts and the sex-stratified figure |
+| `sex_stratified_de.R` | sex × disease limma model for one cohort folder |
+| `plot_sex_stratified_scatter.py` | the four-sector figure, one panel per cohort |
 | `EXTRACTION.md` | how this folder was cut from the agent's code, where it differs, and how equality was verified |
